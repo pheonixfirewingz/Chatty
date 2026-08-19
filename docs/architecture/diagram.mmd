@@ -1,0 +1,12 @@
+flowchart LR
+  C[Native Rust GUI and terminal clients] -->|Persistent TLS 1.3\nBinary bincode frames\nzstd stream and deltas| B[Rust broker]
+  B --> A[Authentication and roles]
+  B --> M[Admin policy and adapter configuration]
+  B --> R[RP orchestration and context compiler]
+  B --> T[Batching, cancellation and delta engine]
+  A --> S[(SQLite WAL)]
+  M --> S
+  R --> S
+  T --> S
+  M -->|enabled and URL| R
+  R -->|OpenAI-compatible HTTP\nmodel probe and SSE| L[External llama-server]

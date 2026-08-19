@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Chatty
+Comment=Native secure multi-character roleplay client
+Exec=chatty-gui
+Terminal=false
+Categories=Game;Utility;
+StartupNotify=true
