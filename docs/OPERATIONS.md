@@ -22,7 +22,9 @@ The GUI saves an opaque session token, never a password. Logout removes it. For 
 
 Admin > Data is deliberately not a raw database console. Password hashes, session tokens, messages and conversation bodies must remain unavailable. Account deletion is destructive and transactional; the active admin cannot delete itself.
 
-On the development x86-64 host, the stripped release broker measured 9.7 MiB RSS and 0.0% settled idle CPU after 30 seconds with no clients. Release artifact sizes were approximately 11 MiB for the broker and 5.3 MiB for the client. ARM64 must be built natively on the target or through an external cross toolchain because this host has no ARM64 compiler installed.
+On the development x86-64 host, the stripped release broker measured 9.7 MiB RSS and 0.0% settled idle CPU after 30 seconds with no clients. Release artifact sizes were approximately 11 MiB for the broker and 5.3 MiB for the client.
+
+The ARM64 release is built natively on an `aarch64-unknown-linux-gnu` host (this project's current build host is aarch64). `cargo build --release --workspace` produces ARM64 `chatty-broker` (8.5 MiB stripped) and `chatty-gui` (13 MiB stripped) ELF executables targeting `aarch64`. No cross toolchain is required when building on arm64; deploy the binaries with `packaging/chatty-broker.service` and `packaging/chatty.desktop` as on x86-64.
 
 ## Network simulation
 

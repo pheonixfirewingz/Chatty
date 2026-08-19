@@ -33,6 +33,6 @@ TLS and corrupt frames close only the affected connection. Backend probe, HTTP, 
 
 - The GUI's protected session file is not an OS credential store/keyring.
 - The delta log needs an operator-configured retention policy once clients track durable cursors.
-- Cross-compilation for ARM64 should be tested against the target Pi OS image; the broker has no GUI dependencies.
+- ARM64 is built natively on an `aarch64-unknown-linux-gnu` host; deploy the same `packaging/chatty-broker.service` and `packaging/chatty.desktop` as on x86-64. The broker has no GUI dependencies.
 - llama-server transport is assumed to be on a trusted LAN. Put it behind TLS or a private interface when it crosses a trust boundary.
 - Protocol enums use bincode and are ordering-sensitive; rebuild broker and every client together after contract changes and bump the JSON handshake version.

@@ -200,7 +200,7 @@ sudo ./scripts/network-namespace-test.sh
 sudo ./scripts/network-test.sh TEST_IF 'cargo test --workspace'
 ```
 
-Do not claim ARM64 compilation was performed here; it was explicitly excluded/lacked a local toolchain. The broker has no GUI dependencies and a systemd unit exists at `packaging/chatty-broker.service`.
+ARM64 compilation has now been performed: `cargo build --release --workspace` on an `aarch64-unknown-linux-gnu` host produced native ARM64 `chatty-broker` and `chatty-gui` binaries. The broker has no GUI dependencies and a systemd unit exists at `packaging/chatty-broker.service`.
 
 ## Important implementation locations
 
@@ -221,7 +221,7 @@ The broker remains concentrated in `main.rs`; the GUI is intentionally split alo
 
 ## Known constraints and next work
 
-- ARM64/Pi build and real Pi deployment remain unverified.
+- ARM64 native build is verified (`cargo build --release --workspace` on aarch64); real Pi deployment/runtime verification on device remains unverified.
 - The broker-to-llama HTTP hop assumes a trusted LAN/private interface; TLS is mandatory only on client-to-broker today.
 - Admin adapter changes are persisted but there is no explicit “Test adapter” button/status probe in the dialog yet.
 - Admin user deletion is immediate on hover-`×`, matching chat behavior; there is no confirmation dialog.

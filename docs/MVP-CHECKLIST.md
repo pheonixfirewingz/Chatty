@@ -37,7 +37,7 @@ This is the acceptance matrix for the restored MVP specification. “Verified”
 | Race-to-idle | Verified | No background pollers, heartbeat, or maintenance loops; release broker measured 9.7 MiB RSS and 0.0% settled idle CPU on this host |
 | Mobile/rural network testing | Verified; kernel netem profile included | User-space real-TLS test passed with forced reconnect, 113-byte fragmentation, 75±25 ms latency, deterministic 3% TCP retransmission-delay loss, and 256 kbit/s; guarded namespace/dedicated-interface netem profiles additionally cover kernel duplication/reordering when administrator credentials are available |
 | Streaming/cancellation soak | Verified | Deterministic external OpenAI-compatible test server completed 100 SSE generations, AI memory extraction, and 100 mid-stream cancellations without frame desynchronization |
-| Raspberry Pi deployment | Implemented | GUI-free Rust broker, no embedded inference, hardened systemd unit, bounded resources; native ARM64 compilation is documented because this x86 host lacks an ARM64 toolchain |
+| Raspberry Pi deployment | Implemented | GUI-free Rust broker, no embedded inference, hardened systemd unit, bounded resources; native ARM64 release built and verified on an aarch64 host |
 
 ## Verification commands
 

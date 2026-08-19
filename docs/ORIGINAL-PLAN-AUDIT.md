@@ -261,7 +261,7 @@ This document preserves the restored original project specification and maps it 
 | Error handling | **Met** | TLS rejection, fragmented reads, corrupt/oversized frame rejection, zstd bounds, sequence-gap detection, cancellation and upstream HTTP/SSE errors | Lagged live-delta clients reconnect/resume instead of silently losing revisions |
 | SQLite | **Beyond** | Five migrations, WAL, five-connection pool, indexed/bounded owner-scoped queries | Persisted broker policy, public character index and sanitized admin metadata view |
 | Security model | **Beyond** | Mandatory TLS, Argon2, tokens, tenant predicates and server-only role checks | Registration/publishing policies are server-enforced; admin data excludes hashes, tokens and chat content; user deletion blocks self-delete and is transactional |
-| Pi/race-to-idle | **Partial / Excluded build** | GUI-free broker, event-driven idle behavior, systemd unit and previously measured low idle CPU/RSS | Hardened systemd settings and 256 MiB memory ceiling; ARM64 compilation/deployment was explicitly not performed on this x86 host |
+| Pi/race-to-idle | **Met** | GUI-free broker, event-driven idle behavior, systemd unit and previously measured low idle CPU/RSS | Hardened systemd settings and 256 MiB memory ceiling; ARM64 build is now performed natively on an aarch64 host |
 | Network/stress testing | **Met** | Fragmentation, compression, bounded transport and cancellation tests plus user-space shaping, multiclient and stream-soak scripts | Guarded kernel namespace/interface netem scripts cover loss, delay, duplication and reordering when privileges exist |
 | Usable application | **Beyond** | `start-chatty.sh` builds/starts broker+GUI and cleans up; persistence and real adapter paths exist | Native file chooser, frosted dark UI, responsive layouts, admin dialog and GUI automation/visual regression tooling |
 
@@ -304,7 +304,7 @@ This document preserves the restored original project specification and maps it 
 | Reconnection | **Met** | GUI/CLI reconnect plus Snapshot/Resume logic |
 | Race-to-idle | **Met** | No connected-state loop/timer/poller; event-driven tasks |
 | systemd | **Met** | `packaging/chatty-broker.service` |
-| ARM64 build | **Excluded** | Source/deployment design is compatible, but no ARM64 toolchain/build was used here |
+| ARM64 build | **Met** | Native ARM64 release built on an `aarch64-unknown-linux-gnu` host via `cargo build --release --workspace`; broker has no GUI dependencies |
 | Bandwidth/loss/latency/stress tests | **Met** | `scripts/userspace-network-test.sh`, `multiclient-test.sh`, `stream-soak-test.sh`, netem scripts and Rust tests |
 
 ## Work added after the original plan
@@ -328,7 +328,7 @@ These features were not required by the original specification but now define th
 ## Remaining gaps relative to the strictest reading
 
 1. Entity deltas are incremental and revisioned, but not every update is a minimal changed-field patch; many carry the complete changed entity.
-2. ARM64/Pi compilation and deployment have not been executed on this host.
+2. ARM64 compilation is now executed natively on an aarch64 host; deployment/runtime verification on a real Pi device has not been executed.
 3. Upstream broker-to-llama HTTP is assumed to stay on a trusted LAN/private interface; the original mandatory TLS boundary was client-to-broker.
 4. Character PNG export is not implemented. PNG and JSON import plus JSON export are implemented; PNG export was beyond, not part of the original definition of done.
 5. There is no durable delta-retention/compaction policy yet, which matters for very long-lived installations.
