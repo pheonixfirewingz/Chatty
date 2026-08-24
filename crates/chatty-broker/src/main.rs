@@ -954,11 +954,16 @@ async fn dispatch(
                 .map(|r| Character {
                     id: r.get("id"),
                     name: r.get("name"),
+                    description: r.get("description"),
                     personality: r.get("personality"),
                     scenario: r.get("scenario"),
                     system_prompt: r.get("system_prompt"),
                     example_dialogue: r.get("example_dialogue"),
                     appearance: r.get("appearance"),
+                    age: r.get("age"),
+                    gender: r.get("gender"),
+                    race: r.get("race"),
+                    misc: r.get("misc"),
                     tags: decode(r.get::<&[u8], _>("tags")).unwrap_or_default(),
                     avatar: r.get("avatar"),
                     is_public: r.get("is_public"),
@@ -1188,7 +1193,7 @@ async fn dispatch(
                 &changed,
             )
             .await?;
-            sqlx::query("INSERT INTO characters(id,owner_id,name,personality,scenario,system_prompt,example_dialogue,appearance,tags,avatar,revision,is_public) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,personality=excluded.personality,scenario=excluded.scenario,system_prompt=excluded.system_prompt,example_dialogue=excluded.example_dialogue,appearance=excluded.appearance,tags=excluded.tags,avatar=excluded.avatar,revision=excluded.revision,is_public=excluded.is_public WHERE owner_id=excluded.owner_id").bind(&eid).bind(&uid).bind(character.name).bind(character.personality).bind(character.scenario).bind(character.system_prompt).bind(character.example_dialogue).bind(character.appearance).bind(fields).bind(character.avatar).bind(rev).bind(character.is_public).execute(&mut *transaction).await?;
+            sqlx::query("INSERT INTO characters(id,owner_id,name,description,personality,scenario,system_prompt,example_dialogue,appearance,age,gender,race,misc,tags,avatar,revision,is_public) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,personality=excluded.personality,scenario=excluded.scenario,system_prompt=excluded.system_prompt,example_dialogue=excluded.example_dialogue,appearance=excluded.appearance,age=excluded.age,gender=excluded.gender,race=excluded.race,misc=excluded.misc,tags=excluded.tags,avatar=excluded.avatar,revision=excluded.revision,is_public=excluded.is_public WHERE owner_id=excluded.owner_id").bind(&eid).bind(&uid).bind(character.name).bind(character.description).bind(character.personality).bind(character.scenario).bind(character.system_prompt).bind(character.example_dialogue).bind(character.appearance).bind(character.age).bind(character.gender).bind(character.race).bind(character.misc).bind(fields).bind(character.avatar).bind(rev).bind(character.is_public).execute(&mut *transaction).await?;
             transaction.commit().await?;
             send_delta!(&uid, rev, "character", eid, operation, changed);
             send!(
@@ -1223,12 +1228,17 @@ async fn dispatch(
                     let character = CharacterInput {
                         id: Some(id.clone()),
                         name: "Assistant".into(),
+                        description: String::new(),
                         personality: "Helpful, attentive, and conversational.".into(),
                         scenario: String::new(),
                         system_prompt:
                             "Respond naturally and remain consistent with the conversation.".into(),
                         example_dialogue: String::new(),
                         appearance: String::new(),
+                        age: String::new(),
+                        gender: String::new(),
+                        race: String::new(),
+                        misc: String::new(),
                         tags: vec!["default".into()],
                         avatar: None,
                         is_public: false,
@@ -1246,15 +1256,20 @@ async fn dispatch(
                         &changed,
                     )
                     .await?;
-                    sqlx::query("INSERT INTO characters(id,owner_id,name,personality,scenario,system_prompt,example_dialogue,appearance,tags,avatar,revision,is_public) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+                    sqlx::query("INSERT INTO characters(id,owner_id,name,description,personality,scenario,system_prompt,example_dialogue,appearance,age,gender,race,misc,tags,avatar,revision,is_public) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
                         .bind(&id)
                         .bind(&uid)
                         .bind(character.name)
+                        .bind(character.description)
                         .bind(character.personality)
                         .bind(character.scenario)
                         .bind(character.system_prompt)
                         .bind(character.example_dialogue)
                         .bind(character.appearance)
+                        .bind(character.age)
+                        .bind(character.gender)
+                        .bind(character.race)
+                        .bind(character.misc)
                         .bind(tags)
                         .bind(character.avatar)
                         .bind(rev)
@@ -1854,11 +1869,16 @@ fn validate_character(character: &CharacterInput) -> Result<()> {
         bail!("character name length invalid")
     }
     for value in [
+        &character.description,
         &character.personality,
         &character.scenario,
         &character.system_prompt,
         &character.example_dialogue,
         &character.appearance,
+        &character.age,
+        &character.gender,
+        &character.race,
+        &character.misc,
     ] {
         if value.len() > 65_536 {
             bail!("character field too large")
@@ -2361,11 +2381,16 @@ async fn send_snapshot(
         let payload = DeltaPayload::Character(CharacterInput {
             id: Some(entity_id.clone()),
             name: row.get("name"),
+            description: row.get("description"),
             personality: row.get("personality"),
             scenario: row.get("scenario"),
             system_prompt: row.get("system_prompt"),
             example_dialogue: row.get("example_dialogue"),
             appearance: row.get("appearance"),
+            age: row.get("age"),
+            gender: row.get("gender"),
+            race: row.get("race"),
+            misc: row.get("misc"),
             tags: decode(row.get::<&[u8], _>("tags")).unwrap_or_default(),
             avatar: row.get("avatar"),
             is_public: row.get("is_public"),
@@ -2716,7 +2741,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     } = job;
     let config = load_broker_config(&app.db).await?;
     let model = selected_model(app).await?;
-    let participants=sqlx::query("SELECT c.id,c.name,c.system_prompt,c.personality,c.scenario,c.appearance,c.example_dialogue FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id=? ORDER BY p.position").bind(cid).fetch_all(&app.db).await?;
+    let participants=sqlx::query("SELECT c.id,c.name,c.system_prompt,c.description,c.personality,c.scenario,c.appearance,c.age,c.gender,c.race,c.misc,c.example_dialogue FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id=? ORDER BY p.position").bind(cid).fetch_all(&app.db).await?;
     let sid = select_speaker(app, uid, cid, speaker, &participants).await?;
     let character = participants
         .iter()
@@ -2737,18 +2762,24 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             .fetch_one(&app.db)
             .await?;
     let system = format!(
-        "{}\nYou are {}. Personality: {}\nAppearance: {}\nScenario: {}\nExample dialogue:\n{}\nGroup participants:\n{}\nWorld state:\n{}\nStory summary:\n{}\nLore:\n{}\nMemory:\n{}",
+        "{}\nYou are {}.\nDescription: {}\nPersonality: {}\nAppearance: {}\nAge: {}\nGender: {}\nRace: {}\nMisc: {}\nScenario: {}\nExample dialogue:\n{}\nGroup participants:\n{}\nWorld state:\n{}\nStory summary:\n{}\nLore:\n{}\nMemory:\n{}",
         clip(&character.get::<String, _>("system_prompt"), 16_384),
         character.get::<String, _>("name"),
+        clip(&character.get::<String, _>("description"), 16_384),
         clip(&character.get::<String, _>("personality"), 16_384),
         clip(&character.get::<String, _>("appearance"), 16_384),
+        clip(&character.get::<String, _>("age"), 512),
+        clip(&character.get::<String, _>("gender"), 512),
+        clip(&character.get::<String, _>("race"), 512),
+        clip(&character.get::<String, _>("misc"), 2_048),
         clip(&character.get::<String, _>("scenario"), 16_384),
         clip(&character.get::<String, _>("example_dialogue"), 16_384),
         participants
             .iter()
             .map(|r| format!(
-                "{} — personality: {}; appearance: {}; scenario: {}",
+                "{} — description: {}; personality: {}; appearance: {}; scenario: {}",
                 r.get::<String, _>("name"),
+                clip(&r.get::<String, _>("description"), 512),
                 clip(&r.get::<String, _>("personality"), 512),
                 clip(&r.get::<String, _>("appearance"), 512),
                 clip(&r.get::<String, _>("scenario"), 512)
@@ -3630,11 +3661,16 @@ mod tests {
         let character = CharacterInput {
             id: None,
             name: "Owner's character".into(),
+            description: String::new(),
             personality: String::new(),
             scenario: String::new(),
             system_prompt: String::new(),
             example_dialogue: String::new(),
             appearance: String::new(),
+            age: String::new(),
+            gender: String::new(),
+            race: String::new(),
+            misc: String::new(),
             tags: vec![],
             avatar: None,
             is_public: false,

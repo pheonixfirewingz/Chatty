@@ -76,10 +76,10 @@ The default inference URL is `http://192.168.0.97:11434/v1`. Environment overrid
 ### Characters and groups
 
 - Central responsive Characters dialog; compact layout stacks list/editor and desktop uses split panes.
-- Complete card fields: name, personality, appearance, scenario, system prompt, example dialogue, tags and avatar bytes/path.
+- Complete card fields: name, description, personality, appearance, age, gender, race, misc, scenario, system prompt, example dialogue, tags and avatar bytes/path. Description plus Age/Gender/Race/Misc extend the SillyTavern spec; the extras live in `extensions.chatty` on export.
 - Personality and Appearance are intentionally retained as dedicated Chatty fields even when newer SillyTavern cards omit legacy properties.
 - SillyTavern V2 JSON and PNG card import uses the desktop file chooser.
-- JSON export preserves Personality and Appearance in legacy-compatible properties and `extensions.chatty` to prevent round-trip loss.
+- JSON export preserves Personality and Appearance in legacy-compatible properties and `extensions.chatty` to prevent round-trip loss; Age, Gender, Race and Misc round-trip through `extensions.chatty`.
 - Create, select, edit, save, export and delete are functional.
 - Character action row is one line: Chat, Use, Public toggle, Save, Export, Delete.
 - Owned characters may be private/public, subject to broker policy. Public characters are usable by other accounts but not editable by them.

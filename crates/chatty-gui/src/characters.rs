@@ -6,11 +6,16 @@ impl From<&Character> for DraftCharacter {
         Self {
             id: Some(c.id.clone()),
             name: c.name.clone(),
+            description: c.description.clone(),
             personality: c.personality.clone(),
             scenario: c.scenario.clone(),
             system_prompt: c.system_prompt.clone(),
             example_dialogue: c.example_dialogue.clone(),
             appearance: c.appearance.clone(),
+            age: c.age.clone(),
+            gender: c.gender.clone(),
+            race: c.race.clone(),
+            misc: c.misc.clone(),
             tags: c.tags.join(", "),
             avatar: c.avatar.clone(),
             is_public: c.is_public,
@@ -119,6 +124,10 @@ impl ChattyApp {
         ui.add_enabled_ui(can_edit, |ui| {
             ui.label("Name");
             ui.add(egui::TextEdit::singleline(&mut self.draft.name).desired_width(f32::INFINITY));
+            ui.label("Description");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.draft.description).desired_width(f32::INFINITY),
+            );
             ui.label("Personality");
             ui.add(
                 egui::TextEdit::multiline(&mut self.draft.personality).desired_width(f32::INFINITY),
@@ -127,6 +136,31 @@ impl ChattyApp {
             ui.add(
                 egui::TextEdit::multiline(&mut self.draft.appearance).desired_width(f32::INFINITY),
             );
+            ui.horizontal_wrapped(|ui| {
+                ui.allocate_ui(egui::vec2(ui.available_width() / 3.0, 0.0), |ui| {
+                    ui.label("Age");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.draft.age)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                ui.allocate_ui(egui::vec2(ui.available_width() / 3.0, 0.0), |ui| {
+                    ui.label("Gender");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.draft.gender)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
+                    ui.label("Race");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.draft.race)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            });
+            ui.label("Misc");
+            ui.add(egui::TextEdit::multiline(&mut self.draft.misc).desired_width(f32::INFINITY));
             ui.label("Scenario");
             ui.add(
                 egui::TextEdit::multiline(&mut self.draft.scenario).desired_width(f32::INFINITY),
@@ -189,11 +223,16 @@ impl ChattyApp {
             character: CharacterInput {
                 id: self.draft.id.clone(),
                 name: self.draft.name.trim().into(),
+                description: self.draft.description.clone(),
                 personality: self.draft.personality.clone(),
                 scenario: self.draft.scenario.clone(),
                 system_prompt: self.draft.system_prompt.clone(),
                 example_dialogue: self.draft.example_dialogue.clone(),
                 appearance: self.draft.appearance.clone(),
+                age: self.draft.age.clone(),
+                gender: self.draft.gender.clone(),
+                race: self.draft.race.clone(),
+                misc: self.draft.misc.clone(),
                 tags: self
                     .draft
                     .tags
@@ -241,7 +280,7 @@ impl ChattyApp {
         else {
             return;
         };
-        let card = serde_json::json!({"spec":"chara_card_v2","spec_version":"2.0","data":{"name":self.draft.name,"description":self.draft.personality,"personality":self.draft.personality,"scenario":self.draft.scenario,"first_mes":"","mes_example":self.draft.example_dialogue,"system_prompt":self.draft.system_prompt,"tags":self.draft.tags.split(',').map(str::trim).collect::<Vec<_>>(),"extensions":{"chatty":{"appearance":self.draft.appearance,"personality":self.draft.personality}}}});
+        let card = serde_json::json!({"spec":"chara_card_v2","spec_version":"2.0","data":{"name":self.draft.name,"description":self.draft.description,"personality":self.draft.personality,"scenario":self.draft.scenario,"first_mes":"","mes_example":self.draft.example_dialogue,"system_prompt":self.draft.system_prompt,"tags":self.draft.tags.split(',').map(str::trim).collect::<Vec<_>>(),"extensions":{"chatty":{"appearance":self.draft.appearance,"age":self.draft.age,"gender":self.draft.gender,"race":self.draft.race,"misc":self.draft.misc}}}});
         if let Ok(bytes) = serde_json::to_vec_pretty(&card) {
             if let Err(e) = std::fs::write(path, bytes) {
                 self.set_error(format!("Export failed: {e}"));
@@ -256,32 +295,16 @@ fn draft_from_card(root: serde_json::Value) -> Option<DraftCharacter> {
     Some(DraftCharacter {
         id: None,
         name: d.get("name")?.as_str()?.into(),
-        personality: d
-            .get("personality")
-            .or_else(|| d.get("description"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .into(),
-        scenario: d
-            .get("scenario")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .into(),
-        system_prompt: d
-            .get("system_prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .into(),
-        example_dialogue: d
-            .get("mes_example")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .into(),
-        appearance: ext
-            .and_then(|e| e.get("appearance"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .into(),
+        description: str_field(d, "description"),
+        personality: str_field(d, "personality"),
+        scenario: str_field(d, "scenario"),
+        system_prompt: str_field(d, "system_prompt"),
+        example_dialogue: str_field(d, "mes_example"),
+        appearance: ext.map(|e| str_field(e, "appearance")).unwrap_or_default(),
+        age: ext.map(|e| str_field(e, "age")).unwrap_or_default(),
+        gender: ext.map(|e| str_field(e, "gender")).unwrap_or_default(),
+        race: ext.map(|e| str_field(e, "race")).unwrap_or_default(),
+        misc: ext.map(|e| str_field(e, "misc")).unwrap_or_default(),
         tags: d
             .get("tags")
             .and_then(|v| v.as_array())
@@ -297,6 +320,14 @@ fn draft_from_card(root: serde_json::Value) -> Option<DraftCharacter> {
         owned_by_user: true,
     })
 }
+fn str_field(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .into()
+}
+
 fn png_card_json(bytes: &[u8]) -> Option<Vec<u8>> {
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return None;

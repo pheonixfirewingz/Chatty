@@ -349,11 +349,22 @@ impl TryFrom<i32> for ConversationKind {
 pub struct CharacterInput {
     pub id: Option<String>,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub personality: String,
     pub scenario: String,
     pub system_prompt: String,
     pub example_dialogue: String,
     pub appearance: String,
+    /// Chatty extensions beyond the SillyTavern character card spec.
+    #[serde(default)]
+    pub age: String,
+    #[serde(default)]
+    pub gender: String,
+    #[serde(default)]
+    pub race: String,
+    #[serde(default)]
+    pub misc: String,
     pub tags: Vec<String>,
     pub avatar: Option<Vec<u8>>,
     pub is_public: bool,
@@ -366,11 +377,22 @@ pub struct CharacterInput {
 pub struct Character {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub personality: String,
     pub scenario: String,
     pub system_prompt: String,
     pub example_dialogue: String,
     pub appearance: String,
+    /// Chatty extensions beyond the SillyTavern character card spec.
+    #[serde(default)]
+    pub age: String,
+    #[serde(default)]
+    pub gender: String,
+    #[serde(default)]
+    pub race: String,
+    #[serde(default)]
+    pub misc: String,
     pub tags: Vec<String>,
     pub avatar: Option<Vec<u8>>,
     pub is_public: bool,
