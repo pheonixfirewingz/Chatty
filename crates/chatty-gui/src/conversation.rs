@@ -7,18 +7,6 @@ impl ChattyApp {
             .unwrap_or_else(|| "Assistant".into())
     }
 
-    fn active_conversation_title(&self) -> &str {
-        self.selected_conversation
-            .as_ref()
-            .and_then(|id| {
-                self.conversations
-                    .iter()
-                    .find(|conversation| &conversation.id == id)
-            })
-            .map(|conversation| conversation.title.as_str())
-            .unwrap_or("New conversation")
-    }
-
     fn avatar(ui: &mut egui::Ui, name: &str, size: f32) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         ui.painter()
@@ -36,7 +24,6 @@ impl ChattyApp {
     pub(super) fn render_chat(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_rect_before_wrap();
         let compact = available.width() < 760.0;
-        let header_height = 64.0;
         let typing_height = if self.typing_character.is_some() {
             24.0
         } else {
@@ -45,12 +32,8 @@ impl ChattyApp {
         let composer_height = if compact { 94.0 } else { 104.0 };
         let content_width = (available.width() - if compact { 0.0 } else { 28.0 }).min(880.0);
         let content_left = available.center().x - content_width / 2.0;
-        let header_rect = egui::Rect::from_min_max(
-            available.min,
-            egui::pos2(available.max.x, available.min.y + header_height),
-        );
         let messages_rect = egui::Rect::from_min_max(
-            egui::pos2(content_left, header_rect.max.y),
+            egui::pos2(content_left, available.min.y),
             egui::pos2(
                 content_left + content_width,
                 (available.max.y - composer_height - typing_height).max(available.min.y),
@@ -64,39 +47,6 @@ impl ChattyApp {
             ),
         );
 
-        ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
-            egui::Frame::new()
-                .fill(color_surface(ui))
-                .stroke(egui::Stroke::new(1.0, color_border(ui)))
-                .corner_radius(12.0)
-                .inner_margin(egui::Margin::symmetric(14, 10))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        if !self.sidebar_visible
-                            && ui
-                                .add_sized([62.0, 36.0], egui::Button::new("Chats"))
-                                .on_hover_text("Open conversations")
-                                .clicked()
-                        {
-                            self.sidebar_visible = true;
-                        }
-                        let title = self.active_conversation_title().to_owned();
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(title).size(17.0).strong());
-                            let detail = if self.selected_conversation.is_some() {
-                                format!(
-                                    "Chatting with {}",
-                                    self.character_name(self.selected_speaker().as_deref())
-                                )
-                            } else {
-                                "Choose who you would like to talk with".into()
-                            };
-                            ui.label(egui::RichText::new(detail).size(12.0).weak());
-                        });
-                    });
-                });
-        });
         ui.scope_builder(egui::UiBuilder::new().max_rect(composer_rect), |ui| {
             ui.add_space(8.0);
             egui::Frame::new()
@@ -107,7 +57,7 @@ impl ChattyApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let response = ui.add_sized(
-                            [(ui.available_width() - 86.0).max(160.0), 42.0],
+                            [(ui.available_width() - 86.0).max(120.0), 42.0],
                             egui::TextEdit::multiline(&mut self.input)
                                 .hint_text("Message your character...")
                                 .frame(egui::Frame::NONE)
@@ -220,10 +170,10 @@ impl ChattyApp {
                     egui::Frame::new()
                         .fill(COLOR_PRIMARY_STRONG)
                         .corner_radius(16.0)
-                        .inner_margin(egui::Margin::symmetric(15, 10))
+                        .inner_margin(egui::Margin::symmetric(15, 7))
                         .show(ui, |ui| {
                             ui.set_max_width((ui.available_width() * 0.72).clamp(150.0, 620.0));
-                            ui.label(&message.content);
+                            ui.label(egui::RichText::new(&message.content).color(COLOR_ON_PRIMARY));
                         });
                 });
             } else {

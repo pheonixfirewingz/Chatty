@@ -27,10 +27,7 @@ use ui::FooterIcon;
 
 const COLOR_PRIMARY: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);
 const COLOR_PRIMARY_STRONG: egui::Color32 = egui::Color32::from_rgb(79, 70, 229);
-
-fn color_surface(ui: &egui::Ui) -> egui::Color32 {
-    ui.visuals().window_fill
-}
+const COLOR_ON_PRIMARY: egui::Color32 = egui::Color32::WHITE;
 
 fn color_surface_raised(ui: &egui::Ui) -> egui::Color32 {
     ui.visuals().faint_bg_color
@@ -1153,6 +1150,27 @@ mod visual_tests {
             .expect("render compact UI")
             .save("/tmp/chatty-restored-compact.png")
             .expect("save compact UI");
+    }
+
+    #[test]
+    fn visual_compact_light_chat() {
+        let mut compact = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(430.0, 760.0))
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, true, false, 20);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.light_mode = true;
+                app.sidebar_visible = false;
+                app
+            });
+        compact
+            .render()
+            .expect("render compact light UI")
+            .save("/tmp/chatty-restored-compact-light.png")
+            .expect("save compact light UI");
     }
 
     #[test]
