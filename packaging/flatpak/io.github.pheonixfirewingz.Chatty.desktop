@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Chatty
+Comment=Native secure AI character roleplay client
+Exec=chatty-gui
+Icon=io.github.pheonixfirewingz.Chatty
+Terminal=false
+Categories=Utility;
+Keywords=AI;Chat;Roleplay;
+StartupNotify=true

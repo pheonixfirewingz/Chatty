@@ -62,6 +62,42 @@ cargo run --release -p chatty-gui
 
 The GUI first asks for the broker's static IP and tests the TLS connection on port `7443`. It then resumes a saved session for that specific broker when possible, otherwise it shows login. `CHATTY_BROKER` can prefill the IP field but does not bypass this connection step. The development certificate covers `localhost`, `rasp-server`, `127.0.0.1`, and the deployed device address `192.168.0.98`; reissue it with the deployed static IP in its subject alternative names when that address changes. Distribute only `certs/ca.pem` to clients through a trusted channel and keep `ca.key` offline. Clients pin the configured CA and have no insecure TLS mode.
 
+### Flatpak client release
+
+Build a client-only Flatpak bundle with the Freedesktop 25.08 SDK and its
+official Rust extension:
+
+```sh
+flatpak install flathub \
+  org.freedesktop.Platform//25.08 \
+  org.freedesktop.Sdk//25.08 \
+  org.freedesktop.Sdk.Extension.rust-stable//25.08
+./scripts/build-flatpak.sh
+```
+
+The release build vendors the locked Rust dependencies, compiles only
+`chatty-gui` inside the Flatpak SDK, and writes
+`dist/chatty-<version>-<arch>.flatpak`. It does not package or start the broker.
+Install the result with `flatpak install --user ./dist/chatty-*.flatpak`.
+
+The sandbox has network access for connecting to a separately operated broker,
+but no general host-file access. To pass a broker CA certificate from the host,
+grant that individual file for the launch and supply the normal client options:
+
+```sh
+flatpak run --filesystem=/absolute/path/ca.pem:ro \
+  io.github.pheonixfirewingz.Chatty \
+  --broker 192.168.0.98 \
+  --ca /absolute/path/ca.pem
+```
+
+The declared runtime permissions are limited to network access, Wayland with
+fallback X11, and DRI rendering. Host files selected through the desktop portal
+are granted individually; no broad host filesystem or D-Bus access is declared.
+
+Set `CHATTY_FLATPAK_BRANCH` to use another installed matching Freedesktop
+Platform/SDK branch.
+
 ## Configuration and local data
 
 Broker settings can be supplied as flags or environment variables:
