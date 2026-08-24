@@ -25,6 +25,7 @@ impl ChattyApp {
         let max_height = Self::popup_max_height(ctx);
         let dialog_width = (ctx.content_rect().width() - 32.0).clamp(360.0, 920.0);
         egui::Window::new("Characters")
+            .frame(modal_frame(ctx, self.light_mode, self.glass_mode))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)

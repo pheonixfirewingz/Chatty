@@ -49,10 +49,8 @@ fn color_primary_text(ui: &egui::Ui) -> egui::Color32 {
 }
 
 fn paint_glass_background(ui: &egui::Ui, light_mode: bool) {
-    let rect = ui.max_rect();
-    let painter = ui.painter();
-    painter.rect_filled(
-        rect,
+    ui.painter().rect_filled(
+        ui.max_rect(),
         0.0,
         if light_mode {
             egui::Color32::from_rgba_unmultiplied(226, 232, 248, 175)
@@ -60,25 +58,36 @@ fn paint_glass_background(ui: &egui::Ui, light_mode: bool) {
             egui::Color32::from_rgba_unmultiplied(4, 8, 18, 205)
         },
     );
-    let radius = rect.width().min(rect.height()) * 0.34;
-    painter.circle_filled(
-        egui::pos2(rect.right() - radius * 0.25, rect.top() + radius * 0.2),
-        radius,
+}
+
+fn paint_glass_modal_scrim(ui: &egui::Ui, light_mode: bool) {
+    ui.painter().rect_filled(
+        ui.max_rect(),
+        0.0,
         if light_mode {
-            egui::Color32::from_rgba_unmultiplied(99, 102, 241, 42)
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 205)
         } else {
-            egui::Color32::from_rgba_unmultiplied(79, 70, 229, 70)
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 210)
         },
     );
-    painter.circle_filled(
-        egui::pos2(rect.left() + radius * 0.3, rect.bottom() - radius * 0.1),
-        radius * 0.8,
-        if light_mode {
-            egui::Color32::from_rgba_unmultiplied(14, 165, 233, 34)
+}
+
+fn modal_frame(ctx: &egui::Context, light_mode: bool, glass_mode: bool) -> egui::Frame {
+    let theme = if light_mode {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    let frame = egui::Frame::window(&ctx.style_of(theme));
+    if glass_mode {
+        frame.fill(if light_mode {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180)
         } else {
-            egui::Color32::from_rgba_unmultiplied(14, 165, 233, 48)
-        },
-    );
+            egui::Color32::from_rgba_unmultiplied(20, 29, 48, 180)
+        })
+    } else {
+        frame
+    }
 }
 
 #[derive(Parser, Clone)]
@@ -122,6 +131,9 @@ fn main() -> Result<()> {
     let glass_mode = preferences_path
         .as_deref()
         .is_some_and(network::load_glass_mode);
+    let transparency = preferences_path
+        .as_deref()
+        .map_or(20, network::load_transparency);
     let size = [args.width, args.height];
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -147,10 +159,11 @@ fn main() -> Result<()> {
         "Chatty",
         options,
         Box::new(move |cc| {
-            configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode);
+            configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode, transparency);
             let mut app = ChattyApp::new(command_tx, event_rx);
             app.light_mode = light_mode;
             app.glass_mode = glass_mode;
+            app.transparency = transparency;
             app.preferences_path = preferences_path;
             if inspect {
                 app.load_inspection_demo();
@@ -164,31 +177,40 @@ fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-fn configure_style_with_surface(ctx: &egui::Context, light_mode: bool, glass_mode: bool) {
+fn configure_style_with_surface(
+    ctx: &egui::Context,
+    light_mode: bool,
+    glass_mode: bool,
+    transparency: u8,
+) {
+    let transparency = transparency.min(80);
+    let surface_alpha = 255_u8.saturating_sub(((u16::from(transparency) * 255) / 100) as u8);
+    let raised_alpha = surface_alpha.saturating_add(18);
+    let hover_alpha = surface_alpha.saturating_add(36);
     let mut visuals = if light_mode {
         let mut visuals = egui::Visuals::light();
         visuals.panel_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(246, 248, 255, 205)
+            egui::Color32::from_rgba_unmultiplied(246, 248, 255, surface_alpha)
         } else {
             egui::Color32::from_rgb(246, 247, 251)
         };
         visuals.window_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, raised_alpha)
         } else {
             egui::Color32::WHITE
         };
         visuals.extreme_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(230, 235, 247, 190)
+            egui::Color32::from_rgba_unmultiplied(230, 235, 247, surface_alpha)
         } else {
             egui::Color32::from_rgb(238, 240, 246)
         };
         visuals.faint_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 125)
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, surface_alpha)
         } else {
             egui::Color32::from_rgb(235, 237, 245)
         };
         visuals.code_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(238, 242, 252, 205)
+            egui::Color32::from_rgba_unmultiplied(238, 242, 252, raised_alpha)
         } else {
             egui::Color32::from_rgb(236, 238, 244)
         };
@@ -196,27 +218,27 @@ fn configure_style_with_surface(ctx: &egui::Context, light_mode: bool, glass_mod
     } else {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(10, 16, 29, 205)
+            egui::Color32::from_rgba_unmultiplied(10, 16, 29, surface_alpha)
         } else {
             egui::Color32::from_rgb(11, 15, 23)
         };
         visuals.window_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(20, 29, 48, 220)
+            egui::Color32::from_rgba_unmultiplied(20, 29, 48, raised_alpha)
         } else {
             egui::Color32::from_rgb(17, 23, 34)
         };
         visuals.extreme_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(7, 12, 23, 200)
+            egui::Color32::from_rgba_unmultiplied(7, 12, 23, surface_alpha)
         } else {
             egui::Color32::from_rgb(8, 12, 19)
         };
         visuals.faint_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(65, 82, 122, 95)
+            egui::Color32::from_rgba_unmultiplied(65, 82, 122, surface_alpha)
         } else {
             egui::Color32::from_rgb(24, 32, 46)
         };
         visuals.code_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(28, 40, 65, 205)
+            egui::Color32::from_rgba_unmultiplied(28, 40, 65, raised_alpha)
         } else {
             egui::Color32::from_rgb(20, 28, 41)
         };
@@ -224,9 +246,9 @@ fn configure_style_with_surface(ctx: &egui::Context, light_mode: bool, glass_mod
     };
     if glass_mode {
         let subtle_fill = if light_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 135)
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, surface_alpha)
         } else {
-            egui::Color32::from_rgba_unmultiplied(52, 66, 98, 135)
+            egui::Color32::from_rgba_unmultiplied(52, 66, 98, surface_alpha)
         };
         let border = if light_mode {
             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 210)
@@ -239,9 +261,9 @@ fn configure_style_with_surface(ctx: &egui::Context, light_mode: bool, glass_mod
         visuals.widgets.inactive.weak_bg_fill = subtle_fill;
         visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
         visuals.widgets.hovered.bg_fill = if light_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, hover_alpha)
         } else {
-            egui::Color32::from_rgba_unmultiplied(83, 103, 150, 190)
+            egui::Color32::from_rgba_unmultiplied(83, 103, 150, hover_alpha)
         };
         visuals.widgets.hovered.weak_bg_fill = visuals.widgets.hovered.bg_fill;
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border);
@@ -376,6 +398,7 @@ struct ChattyApp {
     account_usage: TokenUsage,
     light_mode: bool,
     glass_mode: bool,
+    transparency: u8,
     preferences_path: Option<PathBuf>,
 }
 
@@ -446,6 +469,7 @@ impl ChattyApp {
             account_usage: TokenUsage::default(),
             light_mode: false,
             glass_mode: false,
+            transparency: 20,
             preferences_path: None,
         }
     }
@@ -776,7 +800,7 @@ mod visual_tests {
         egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -789,7 +813,7 @@ mod visual_tests {
         egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -806,7 +830,7 @@ mod visual_tests {
         egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -820,7 +844,7 @@ mod visual_tests {
         egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -1116,7 +1140,7 @@ mod visual_tests {
         let mut compact = egui_kittest::Harness::builder()
             .with_size(egui::vec2(430.0, 760.0))
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -1178,7 +1202,7 @@ mod visual_tests {
         let mut new_chat = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1440.0, 900.0))
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let mut app = ChattyApp::new(commands, events);
                 app.load_inspection_demo();
                 app
@@ -1283,7 +1307,7 @@ mod visual_tests {
         let mut login = egui_kittest::Harness::builder()
             .with_size(egui::vec2(640.0, 480.0))
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 ChattyApp::new(commands, events)
@@ -1327,7 +1351,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(430.0, 760.0))
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -1355,7 +1379,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1440.0, 900.0))
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -1417,7 +1441,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1440.0, 900.0))
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -1437,7 +1461,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(430.0, 760.0))
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -1452,17 +1476,29 @@ mod visual_tests {
             .expect("save compact admin UI");
     }
 
-    fn render_settings(size: egui::Vec2, light_mode: bool, glass_mode: bool, path: &str) {
+    fn render_settings(
+        size: egui::Vec2,
+        light_mode: bool,
+        glass_mode: bool,
+        transparency: u8,
+        path: &str,
+    ) {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(move |creation| {
-                configure_style_with_surface(&creation.egui_ctx, light_mode, glass_mode);
+                configure_style_with_surface(
+                    &creation.egui_ctx,
+                    light_mode,
+                    glass_mode,
+                    transparency,
+                );
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
                 app.load_inspection_demo();
                 app.light_mode = light_mode;
                 app.glass_mode = glass_mode;
+                app.transparency = transparency;
                 app.screen = Screen::Settings;
                 app
             });
@@ -1479,6 +1515,7 @@ mod visual_tests {
             egui::vec2(1440.0, 900.0),
             false,
             false,
+            20,
             "/tmp/chatty-settings-desktop-dark.png",
         );
     }
@@ -1489,6 +1526,7 @@ mod visual_tests {
             egui::vec2(430.0, 760.0),
             true,
             false,
+            20,
             "/tmp/chatty-settings-compact-light.png",
         );
     }
@@ -1499,6 +1537,7 @@ mod visual_tests {
             egui::vec2(1440.0, 900.0),
             false,
             true,
+            80,
             "/tmp/chatty-settings-glass-dark-desktop.png",
         );
     }
@@ -1509,8 +1548,72 @@ mod visual_tests {
             egui::vec2(430.0, 760.0),
             true,
             true,
+            80,
             "/tmp/chatty-settings-glass-light-compact.png",
         );
+    }
+
+    #[test]
+    fn visual_settings_short_viewport() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 480.0))
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, false, true, 80);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.glass_mode = true;
+                app.transparency = 80;
+                app.screen = Screen::Settings;
+                app
+            });
+        let appearance = harness.get_by_label("Appearance");
+        appearance.scroll_down();
+        appearance.scroll_down();
+        harness.run_ok();
+        let total = harness.get_by_label("Total").rect();
+        assert!(total.top() >= 0.0 && total.bottom() <= 480.0);
+        harness
+            .render()
+            .expect("render scrolled settings UI at short viewport")
+            .save("/tmp/chatty-settings-short-scroll.png")
+            .expect("save scrolled settings UI at short viewport");
+    }
+
+    #[test]
+    fn visual_glass_surfaces_at_maximum_transparency() {
+        for (size, light_mode, path) in [
+            (
+                egui::vec2(1440.0, 900.0),
+                false,
+                "/tmp/chatty-glass-80-dark-desktop.png",
+            ),
+            (
+                egui::vec2(430.0, 760.0),
+                true,
+                "/tmp/chatty-glass-80-light-compact.png",
+            ),
+        ] {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(size)
+                .build_eframe(move |creation| {
+                    configure_style_with_surface(&creation.egui_ctx, light_mode, true, 80);
+                    let (commands, _) = mpsc::unbounded_channel();
+                    let (_, events) = std::sync::mpsc::channel();
+                    let mut app = ChattyApp::new(commands, events);
+                    app.load_inspection_demo();
+                    app.light_mode = light_mode;
+                    app.glass_mode = true;
+                    app.transparency = 80;
+                    app
+                });
+            harness
+                .render()
+                .expect("render maximum-transparency glass UI")
+                .save(path)
+                .expect("save maximum-transparency glass UI");
+        }
     }
 
     #[test]
@@ -1528,7 +1631,7 @@ mod visual_tests {
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(size)
                 .build_eframe(|creation| {
-                    configure_style_with_surface(&creation.egui_ctx, false, false);
+                    configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                     let (commands, _) = mpsc::unbounded_channel();
                     let (_, events) = std::sync::mpsc::channel();
                     let mut app = ChattyApp::new(commands, events);
@@ -1549,7 +1652,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false);
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -1630,6 +1733,13 @@ impl eframe::App for ChattyApp {
                     self.render_shell(ui)
                 }
             });
+        let modal_open = self.draft_character_open
+            || self.new_chat_open
+            || matches!(self.screen, Screen::Admin | Screen::Settings)
+            || self.error.is_some();
+        if self.glass_mode && modal_open {
+            paint_glass_modal_scrim(ui, self.light_mode);
+        }
         if self.draft_character_open {
             self.render_character_dialog(&ctx)
         }
@@ -1644,6 +1754,7 @@ impl eframe::App for ChattyApp {
         }
         if let Some(error) = self.error.clone() {
             egui::Window::new("Notice")
+                .frame(modal_frame(&ctx, self.light_mode, self.glass_mode))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 28.0])
@@ -1878,85 +1989,119 @@ impl ChattyApp {
 
     fn render_settings_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.screen == Screen::Settings;
+        let max_height = Self::popup_max_height(ctx);
+        let dialog_width = (ctx.content_rect().width() - 24.0).clamp(280.0, 420.0);
         egui::Window::new("Settings")
+            .frame(modal_frame(ctx, self.light_mode, self.glass_mode))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(420.0)
+            .default_size([dialog_width, max_height.min(560.0)])
+            .max_width(dialog_width)
+            .max_height(max_height)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.heading("Appearance");
-                ui.label("Choose how Chatty looks on this device.");
-                ui.add_space(6.0);
-                ui.weak("Theme");
-                let previous_light_mode = self.light_mode;
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_sized(
-                            [96.0, 40.0],
-                            egui::Button::selectable(!self.light_mode, "Dark"),
-                        )
-                        .clicked()
-                    {
-                        self.light_mode = false;
-                    }
-                    if ui
-                        .add_sized(
-                            [96.0, 40.0],
-                            egui::Button::selectable(self.light_mode, "Light"),
-                        )
-                        .clicked()
-                    {
-                        self.light_mode = true;
-                    }
-                });
-                ui.add_space(8.0);
-                ui.weak("Surface");
-                let previous_glass_mode = self.glass_mode;
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_sized(
-                            [96.0, 40.0],
-                            egui::Button::selectable(!self.glass_mode, "Solid"),
-                        )
-                        .clicked()
-                    {
-                        self.glass_mode = false;
-                    }
-                    if ui
-                        .add_sized(
-                            [96.0, 40.0],
-                            egui::Button::selectable(self.glass_mode, "Glass"),
-                        )
-                        .clicked()
-                    {
-                        self.glass_mode = true;
-                    }
-                });
-                if previous_light_mode != self.light_mode || previous_glass_mode != self.glass_mode
-                {
-                    configure_style_with_surface(ctx, self.light_mode, self.glass_mode);
-                    if let Some(path) = &self.preferences_path {
-                        network::save_preferences(path, self.light_mode, self.glass_mode);
-                    }
-                    ctx.request_repaint();
-                }
-                ui.add_space(18.0);
-                ui.separator();
-                ui.heading("Token usage");
-                egui::Grid::new("account-token-usage")
-                    .num_columns(2)
-                    .spacing([24.0, 8.0])
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-popup-content")
+                    .max_height((max_height - 32.0).max(120.0))
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.label("Prompt tokens");
-                        ui.strong(format_token_count(self.account_usage.prompt_tokens));
-                        ui.end_row();
-                        ui.label("Completion tokens");
-                        ui.strong(format_token_count(self.account_usage.completion_tokens));
-                        ui.end_row();
-                        ui.label("Total");
-                        ui.strong(format_token_count(self.account_usage.total()));
-                        ui.end_row();
+                        ui.heading("Appearance");
+                        ui.label("Choose how Chatty looks on this device.");
+                        ui.add_space(6.0);
+                        ui.weak("Theme");
+                        let previous_light_mode = self.light_mode;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized(
+                                    [96.0, 40.0],
+                                    egui::Button::selectable(!self.light_mode, "Dark"),
+                                )
+                                .clicked()
+                            {
+                                self.light_mode = false;
+                            }
+                            if ui
+                                .add_sized(
+                                    [96.0, 40.0],
+                                    egui::Button::selectable(self.light_mode, "Light"),
+                                )
+                                .clicked()
+                            {
+                                self.light_mode = true;
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.weak("Surface");
+                        let previous_glass_mode = self.glass_mode;
+                        let previous_transparency = self.transparency;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized(
+                                    [96.0, 40.0],
+                                    egui::Button::selectable(!self.glass_mode, "Solid"),
+                                )
+                                .clicked()
+                            {
+                                self.glass_mode = false;
+                            }
+                            if ui
+                                .add_sized(
+                                    [96.0, 40.0],
+                                    egui::Button::selectable(self.glass_mode, "Glass"),
+                                )
+                                .clicked()
+                            {
+                                self.glass_mode = true;
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.add_enabled_ui(self.glass_mode, |ui| {
+                            ui.add_sized(
+                                [ui.available_width().min(320.0), 40.0],
+                                egui::Slider::new(&mut self.transparency, 0..=80)
+                                    .text("Transparency")
+                                    .suffix("%"),
+                            );
+                            ui.weak("0% is opaque · 80% is most transparent");
+                        });
+                        if previous_light_mode != self.light_mode
+                            || previous_glass_mode != self.glass_mode
+                            || previous_transparency != self.transparency
+                        {
+                            configure_style_with_surface(
+                                ctx,
+                                self.light_mode,
+                                self.glass_mode,
+                                self.transparency,
+                            );
+                            if let Some(path) = &self.preferences_path {
+                                network::save_preferences(
+                                    path,
+                                    self.light_mode,
+                                    self.glass_mode,
+                                    self.transparency,
+                                );
+                            }
+                            ctx.request_repaint();
+                        }
+                        ui.add_space(18.0);
+                        ui.separator();
+                        ui.heading("Token usage");
+                        egui::Grid::new("account-token-usage")
+                            .num_columns(2)
+                            .spacing([24.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label("Prompt tokens");
+                                ui.strong(format_token_count(self.account_usage.prompt_tokens));
+                                ui.end_row();
+                                ui.label("Completion tokens");
+                                ui.strong(format_token_count(self.account_usage.completion_tokens));
+                                ui.end_row();
+                                ui.label("Total");
+                                ui.strong(format_token_count(self.account_usage.total()));
+                                ui.end_row();
+                            });
                     });
             });
         if !open {

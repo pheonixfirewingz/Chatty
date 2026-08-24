@@ -93,13 +93,37 @@ pub(super) fn load_glass_mode(path: &std::path::Path) -> bool {
         .is_some_and(|value| value.lines().any(|line| line.trim() == "surface=glass"))
 }
 
-pub(super) fn save_preferences(path: &std::path::Path, light_mode: bool, glass_mode: bool) {
+pub(super) fn load_transparency(path: &std::path::Path) -> u8 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|value| {
+            value.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("transparency=")?
+                    .parse::<u8>()
+                    .ok()
+            })
+        })
+        .unwrap_or(20)
+        .min(80)
+}
+
+pub(super) fn save_preferences(
+    path: &std::path::Path,
+    light_mode: bool,
+    glass_mode: bool,
+    transparency: u8,
+) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let theme = if light_mode { "light" } else { "dark" };
     let surface = if glass_mode { "glass" } else { "solid" };
-    let _ = fs::write(path, format!("theme={theme}\nsurface={surface}\n"));
+    let transparency = transparency.min(80);
+    let _ = fs::write(
+        path,
+        format!("theme={theme}\nsurface={surface}\ntransparency={transparency}\n"),
+    );
 }
 
 async fn connect(args: &Args) -> Result<TlsStream<TcpStream>> {
@@ -240,7 +264,7 @@ fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> b
 mod tests {
     use super::{
         default_session_path, is_expected_post_logout_unauthorized, load_glass_mode,
-        load_light_mode, save_preferences,
+        load_light_mode, load_transparency, save_preferences,
     };
     use chatty_protocol::{ErrorCode, Frame, MessageType, WireError, encode};
     use std::path::PathBuf;
@@ -313,13 +337,15 @@ mod tests {
             std::process::id()
         ));
 
-        save_preferences(&path, true, true);
+        save_preferences(&path, true, true, 80);
         assert!(load_light_mode(&path));
         assert!(load_glass_mode(&path));
+        assert_eq!(load_transparency(&path), 80);
 
-        save_preferences(&path, false, false);
+        save_preferences(&path, false, false, 25);
         assert!(!load_light_mode(&path));
         assert!(!load_glass_mode(&path));
+        assert_eq!(load_transparency(&path), 25);
         let _ = std::fs::remove_file(path);
     }
 }
