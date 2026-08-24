@@ -60,7 +60,7 @@ CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 cargo run --release -p chatty-broker
 cargo run --release -p chatty-gui
 ```
 
-The development certificate covers `localhost` and `127.0.0.1`. For a remote deployment, distribute only `certs/ca.pem` to clients through a trusted channel, keep `ca.key` offline, and issue a server certificate whose SAN matches `CHATTY_SERVER_NAME`. Clients pin the configured CA and have no insecure TLS mode.
+The development certificate covers `localhost`, `rasp-server`, `127.0.0.1`, and the deployed device address `192.168.0.98`. The GUI defaults to `192.168.0.98:7443` with that IP as its TLS server name; `CHATTY_BROKER` and `CHATTY_SERVER_NAME` can override both. Distribute only `certs/ca.pem` to clients through a trusted channel, keep `ca.key` offline, and reissue the server certificate if the device address changes. Clients pin the configured CA and have no insecure TLS mode.
 
 ## Configuration and local data
 

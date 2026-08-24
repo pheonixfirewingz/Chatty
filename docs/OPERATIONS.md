@@ -2,6 +2,8 @@
 
 The broker is event-driven: no poller, heartbeat, maintenance loop, or idle timer runs. SQLite uses a five-connection pool and WAL. `packaging/chatty-broker.service` provides a hardened ARM64-compatible systemd unit.
 
+On the `rasp-server` deployment, the broker is installed as the lingering user service `packaging/chatty-broker-user.service`. Its executable is `%h/.local/libexec/chatty/chatty-broker`, state is in `%h/.local/share/chatty`, and TLS material is in `%h/.config/chatty`. The service listens on `0.0.0.0:7443`; the release GUI defaults to `192.168.0.98:7443` and verifies the matching IP SAN in the server certificate. Use the system unit instead when a privileged system-wide installation is available.
+
 ## Broker resource rules
 
 The service is capped at 256 MiB by systemd. Monitoring reports RSS (`VmRSS`) and

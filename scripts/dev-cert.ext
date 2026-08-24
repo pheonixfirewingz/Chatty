@@ -1,4 +1,4 @@
-subjectAltName=DNS:localhost,IP:127.0.0.1
+subjectAltName=DNS:localhost,DNS:rasp-server,IP:127.0.0.1,IP:192.168.0.98
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth

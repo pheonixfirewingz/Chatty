@@ -1,0 +1,24 @@
+[Unit]
+Description=Chatty low-bandwidth RP broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/chatty
+ExecStart=%h/.local/libexec/chatty/chatty-broker
+Environment=CHATTY_LISTEN=0.0.0.0:7443
+Environment=CHATTY_DATABASE=sqlite://%h/.local/share/chatty/chatty.db?mode=rwc
+Environment=CHATTY_CERT=%h/.config/chatty/server.pem
+Environment=CHATTY_KEY=%h/.config/chatty/server.key
+Environment=CHATTY_LLAMA_URL=http://192.168.0.97:11434/v1
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/chatty
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

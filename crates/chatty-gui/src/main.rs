@@ -89,9 +89,9 @@ fn modal_frame(ctx: &egui::Context, light_mode: bool, glass_mode: bool) -> egui:
 
 #[derive(Parser, Clone)]
 struct Args {
-    #[arg(long, env = "CHATTY_BROKER", default_value = "127.0.0.1:7443")]
+    #[arg(long, env = "CHATTY_BROKER", default_value = "192.168.0.98:7443")]
     broker: String,
-    #[arg(long, env = "CHATTY_SERVER_NAME", default_value = "localhost")]
+    #[arg(long, env = "CHATTY_SERVER_NAME", default_value = "192.168.0.98")]
     server_name: String,
     #[arg(long, env = "CHATTY_CA", default_value = "certs/ca.pem")]
     ca: String,
