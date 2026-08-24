@@ -2,7 +2,7 @@
 
 The broker is event-driven: no poller, heartbeat, maintenance loop, or idle timer runs. SQLite uses a five-connection pool and WAL. `packaging/chatty-broker.service` provides a hardened ARM64-compatible systemd unit.
 
-On the `rasp-server` deployment, the broker is installed as the lingering user service `packaging/chatty-broker-user.service`. Its executable is `%h/.local/libexec/chatty/chatty-broker`, state is in `%h/.local/share/chatty`, and TLS material is in `%h/.config/chatty`. The service listens on `0.0.0.0:7443`; the release GUI defaults to `192.168.0.98:7443` and verifies the matching IP SAN in the server certificate. Use the system unit instead when a privileged system-wide installation is available.
+On the `rasp-server` deployment, the broker is installed as the lingering user service `packaging/chatty-broker-user.service`. Its executable is `%h/.local/libexec/chatty/chatty-broker`, state is in `%h/.local/share/chatty`, and TLS material is in `%h/.config/chatty`. The service listens on `0.0.0.0:7443`; the GUI asks for the server's static IP and verifies the matching IP SAN in the server certificate. Use the system unit instead when a privileged system-wide installation is available.
 
 ## Broker resource rules
 
@@ -16,7 +16,7 @@ an operational incident, not as a reason to raise the cap automatically.
 
 ## Local startup and state
 
-Use `./start-chatty.sh` to create missing development certificates, build missing release binaries, launch the broker and GUI, and stop the broker when the GUI exits. The per-user database is `$XDG_DATA_HOME/chatty/chatty.db` (fallback `~/.local/share/chatty/chatty.db`), while the launcher log and GUI session are under `$XDG_STATE_HOME/chatty/` (fallback `~/.local/state/chatty/`). Debug and release builds use the same locations. On first use, the launcher copies an existing `.chatty/chatty.db` and its SQLite sidecars to the XDG data directory, retaining the originals as a backup. The script respects existing `CHATTY_LISTEN`, `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_DATABASE`, `CHATTY_LOG_FILE`, `CHATTY_CERT`, `CHATTY_KEY`, `CHATTY_CA` and `CHATTY_LLAMA_URL` values.
+Use `./start-chatty.sh` to create missing development certificates, build missing release binaries, launch the broker and GUI, and stop the broker when the GUI exits. The per-user database is `$XDG_DATA_HOME/chatty/chatty.db` (fallback `~/.local/share/chatty/chatty.db`), while the launcher log and GUI session are under `$XDG_STATE_HOME/chatty/` (fallback `~/.local/state/chatty/`). Debug and release builds use the same locations. On first use, the launcher copies an existing `.chatty/chatty.db` and its SQLite sidecars to the XDG data directory, retaining the originals as a backup. The script respects existing `CHATTY_LISTEN`, `CHATTY_BROKER`, `CHATTY_DATABASE`, `CHATTY_LOG_FILE`, `CHATTY_CERT`, `CHATTY_KEY`, `CHATTY_CA` and `CHATTY_LLAMA_URL` values.
 
 The current client/broker handshake protocol is version 9. A version mismatch is intentionally fatal; rebuild all Rust components together. On a fresh database, `CHATTY_LLAMA_URL` seeds the singleton broker settings row. Later URL/enabled, provider, model, generation-default and policy changes are persistent and should be made from Admin > Broker. Admin > Ollama controls models through the configured server's native API.
 

@@ -9,6 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::BufReader,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     thread,
@@ -22,7 +23,7 @@ mod characters;
 mod conversation;
 mod network;
 mod ui;
-use network::{Command, Event};
+use network::{Command, ConnectionTarget, Event};
 use ui::FooterIcon;
 
 const COLOR_PRIMARY: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);
@@ -89,10 +90,8 @@ fn modal_frame(ctx: &egui::Context, light_mode: bool, glass_mode: bool) -> egui:
 
 #[derive(Parser, Clone)]
 struct Args {
-    #[arg(long, env = "CHATTY_BROKER", default_value = "192.168.0.98:7443")]
+    #[arg(long, env = "CHATTY_BROKER", default_value = "")]
     broker: String,
-    #[arg(long, env = "CHATTY_SERVER_NAME", default_value = "192.168.0.98")]
-    server_name: String,
     #[arg(long, env = "CHATTY_CA", default_value = "certs/ca.pem")]
     ca: String,
     #[arg(long)]
@@ -113,14 +112,21 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("failed to install TLS provider"))?;
     let mut args = Args::parse();
     let inspect = args.inspect;
+    let initial_server_ip = broker_ip(&args.broker).unwrap_or_default();
+    let initial_broker = initial_server_ip
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, 7443).to_string());
     let mut remembered_session = None;
     if !inspect {
         // Resolve this before starting eframe so debug and release launches use
         // the same absolute XDG state path and never fall back to the cwd.
         args.session_file = Some(network::session_path(&args)?);
-        remembered_session = args.session_file.as_ref().and_then(network::load_session);
+        remembered_session = args
+            .session_file
+            .as_ref()
+            .and_then(|path| network::load_session(path, initial_broker.as_deref()));
     }
-    let restoring_session = remembered_session.is_some();
     let preferences_path = args.session_file.as_deref().map(network::preferences_path);
     let light_mode = preferences_path
         .as_deref()
@@ -158,20 +164,33 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode, transparency);
             let mut app = ChattyApp::new(command_tx, event_rx);
+            app.server_ip = initial_server_ip;
             app.light_mode = light_mode;
             app.glass_mode = glass_mode;
             app.transparency = transparency;
             app.preferences_path = preferences_path;
             if inspect {
                 app.load_inspection_demo();
-            } else if restoring_session {
-                app.restoring_session = true;
-                app.status = "Restoring saved session…".into();
             }
             Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn broker_ip(value: &str) -> Option<String> {
+    value
+        .trim()
+        .parse::<IpAddr>()
+        .map(|ip| ip.to_string())
+        .ok()
+        .or_else(|| {
+            value
+                .trim()
+                .parse::<SocketAddr>()
+                .map(|address| address.ip().to_string())
+                .ok()
+        })
 }
 
 fn configure_style_with_surface(
@@ -355,6 +374,9 @@ struct ChattyApp {
     commands: mpsc::UnboundedSender<Command>,
     events: std::sync::mpsc::Receiver<Event>,
     status: String,
+    server_ip: String,
+    connected: bool,
+    connecting: bool,
     restoring_session: bool,
     token: String,
     user_id: String,
@@ -407,7 +429,10 @@ impl ChattyApp {
         Self {
             commands,
             events,
-            status: "Starting…".into(),
+            status: "Enter the server IP to begin.".into(),
+            server_ip: String::new(),
+            connected: false,
+            connecting: false,
             restoring_session: false,
             token: String::new(),
             user_id: String::new(),
@@ -488,6 +513,8 @@ impl ChattyApp {
         });
     }
     fn authenticated(&mut self, token: String, user_id: String, role: Role, revision: i64) {
+        self.connected = true;
+        self.connecting = false;
         self.restoring_session = false;
         self.token = token;
         self.user_id = user_id;
@@ -505,6 +532,26 @@ impl ChattyApp {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Status(s) => self.status = s,
+                Event::Connected { resuming_session } => {
+                    self.connected = true;
+                    self.connecting = false;
+                    self.restoring_session = resuming_session;
+                }
+                Event::ConnectionFailed(message) => {
+                    self.connected = false;
+                    self.connecting = false;
+                    self.restoring_session = false;
+                    self.status = "Not connected".into();
+                    self.set_error(message);
+                }
+                Event::Disconnected => {
+                    self.connected = false;
+                    self.connecting = false;
+                    self.restoring_session = false;
+                    self.token.clear();
+                    self.role = None;
+                    self.status = "Enter the server IP to begin.".into();
+                }
                 Event::SessionExpired => {
                     self.restoring_session = false;
                     self.token.clear();
@@ -669,6 +716,8 @@ impl ChattyApp {
         });
     }
     fn load_inspection_demo(&mut self) {
+        self.connected = true;
+        self.connecting = false;
         self.restoring_session = false;
         self.status = "Online · inspection".into();
         self.token = "inspection".into();
@@ -793,6 +842,13 @@ mod visual_tests {
     use super::*;
     use egui_kittest::kittest::{NodeT, Queryable};
 
+    #[test]
+    fn broker_ip_accepts_an_ip_with_or_without_the_default_port() {
+        assert_eq!(broker_ip("192.168.0.98"), Some("192.168.0.98".into()));
+        assert_eq!(broker_ip("192.168.0.98:7443"), Some("192.168.0.98".into()));
+        assert_eq!(broker_ip("chatty.example"), None);
+    }
+
     fn harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
         egui_kittest::Harness::builder()
             .with_size(size)
@@ -831,6 +887,7 @@ mod visual_tests {
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
+                app.connected = true;
                 app.restoring_session = true;
                 app.status = "Restoring saved session…".into();
                 app
@@ -1743,7 +1800,9 @@ impl eframe::App for ChattyApp {
             .fill(ui.visuals().panel_fill)
             .inner_margin(edge_padding)
             .show(ui, |ui| {
-                if self.restoring_session {
+                if !self.connected {
+                    self.render_server_connection(ui)
+                } else if self.restoring_session {
                     self.render_session_restore(ui)
                 } else if self.token.is_empty() {
                     self.render_login(ui)
@@ -1789,6 +1848,59 @@ impl eframe::App for ChattyApp {
 }
 
 impl ChattyApp {
+    fn render_server_connection(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            let top = (ui.available_height() * 0.18).clamp(36.0, 150.0);
+            ui.add_space(top);
+            ui.heading(egui::RichText::new("Connect to Chatty").size(30.0));
+            ui.label("Enter the static IP address of your Chatty server.");
+            ui.add_space(22.0);
+            ui.scope(|ui| {
+                ui.set_max_width(420.0);
+                ui.label("Server IP");
+                let response = ui.add_enabled(
+                    !self.connecting,
+                    egui::TextEdit::singleline(&mut self.server_ip)
+                        .hint_text("192.168.0.98")
+                        .desired_width(ui.available_width()),
+                );
+                let submit =
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                ui.add_space(10.0);
+                let clicked = ui
+                    .add_enabled(
+                        !self.connecting,
+                        egui::Button::new(if self.connecting {
+                            "Trying connection…"
+                        } else {
+                            "Try connection"
+                        })
+                        .min_size(egui::vec2(ui.available_width(), 42.0))
+                        .fill(egui::Color32::from_rgb(37, 99, 235)),
+                    )
+                    .clicked();
+                if (clicked || submit) && !self.connecting {
+                    match self.server_ip.trim().parse::<IpAddr>() {
+                        Ok(ip) => {
+                            self.server_ip = ip.to_string();
+                            self.connecting = true;
+                            self.status = format!("Connecting to {}: 7443…", self.server_ip);
+                            self.error = None;
+                            let target = ConnectionTarget {
+                                broker: SocketAddr::new(ip, 7443).to_string(),
+                                server_name: ip.to_string(),
+                            };
+                            let _ = self.commands.send(Command::Connect(target));
+                        }
+                        Err(_) => self.set_error("Enter a valid IPv4 or IPv6 address."),
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(&self.status).small().weak());
+            });
+        });
+    }
+
     fn render_session_restore(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             let top = (ui.available_height() * 0.28).clamp(72.0, 220.0);
@@ -1847,6 +1959,13 @@ impl ChattyApp {
                         password: self.password.clone(),
                     });
                     self.status = "Creating account…".into();
+                }
+                ui.add_space(8.0);
+                if ui.button("Change server").clicked() {
+                    let _ = self.commands.send(Command::Disconnect);
+                    self.connected = false;
+                    self.restoring_session = false;
+                    self.status = "Enter the server IP to begin.".into();
                 }
             });
         });

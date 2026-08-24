@@ -3,6 +3,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 
 pub(super) enum Command {
+    Connect(ConnectionTarget),
+    Disconnect,
     Request(Box<Request>),
     SendThenGenerate {
         message: Box<Request>,
@@ -16,8 +18,23 @@ pub(super) enum Command {
 
 pub(super) enum Event {
     Status(String),
+    Connected { resuming_session: bool },
+    ConnectionFailed(String),
+    Disconnected,
     Frame(Frame),
     SessionExpired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ConnectionTarget {
+    pub broker: String,
+    pub server_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SavedSession {
+    pub broker: String,
+    pub token: String,
 }
 
 pub(super) fn session_path(args: &Args) -> Result<PathBuf> {
@@ -46,7 +63,7 @@ fn default_session_path(xdg_state_home: Option<PathBuf>, home: Option<PathBuf>) 
         .map(|path| path.join("chatty/session"))
 }
 
-fn save_session(path: &PathBuf, token: &str) {
+fn save_session(path: &PathBuf, session: &SavedSession) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -67,14 +84,39 @@ fn save_session(path: &PathBuf, token: &str) {
         .write(true)
         .open(path);
     if let Ok(mut file) = file {
-        let _ = file.write_all(token.as_bytes());
+        let value = serde_json::json!({
+            "broker": session.broker,
+            "token": session.token,
+        });
+        let _ = file.write_all(value.to_string().as_bytes());
     }
 }
 
-pub(super) fn load_session(path: &PathBuf) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .filter(|token| !token.trim().is_empty())
+pub(super) fn load_session(path: &PathBuf, legacy_broker: Option<&str>) -> Option<SavedSession> {
+    let contents = fs::read_to_string(path).ok()?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+        let broker = value.get("broker")?.as_str()?.trim();
+        let token = value.get("token")?.as_str()?.trim();
+        if broker.is_empty() || token.is_empty() {
+            return None;
+        }
+        return Some(SavedSession {
+            broker: broker.into(),
+            token: token.into(),
+        });
+    }
+
+    let broker = legacy_broker?.trim();
+    let token = contents.trim();
+    if broker.is_empty() || token.is_empty() {
+        return None;
+    }
+    // Old Chatty versions stored only the token. It is safe to migrate when
+    // startup configuration also identifies the old broker explicitly.
+    Some(SavedSession {
+        broker: broker.into(),
+        token: token.into(),
+    })
 }
 
 pub(super) fn preferences_path(session_path: &std::path::Path) -> PathBuf {
@@ -126,7 +168,7 @@ pub(super) fn save_preferences(
     );
 }
 
-async fn connect(args: &Args) -> Result<TlsStream<TcpStream>> {
+async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<TcpStream>> {
     let mut roots = RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut BufReader::new(File::open(&args.ca)?)) {
         roots.add(cert?).context("invalid pinned CA")?;
@@ -134,9 +176,9 @@ async fn connect(args: &Args) -> Result<TlsStream<TcpStream>> {
     let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let tcp = TcpStream::connect(&args.broker).await?;
+    let tcp = TcpStream::connect(&target.broker).await?;
     tcp.set_nodelay(true)?;
-    let name = ServerName::try_from(args.server_name.clone()).context("invalid server name")?;
+    let name = ServerName::try_from(target.server_name.clone()).context("invalid server name")?;
     let mut stream = TlsConnector::from(Arc::new(config))
         .connect(name, tcp)
         .await
@@ -154,7 +196,7 @@ async fn connect(args: &Args) -> Result<TlsStream<TcpStream>> {
 
 pub(super) async fn run(
     args: Args,
-    mut remembered: Option<String>,
+    mut remembered: Option<SavedSession>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: std::sync::mpsc::Sender<Event>,
 ) {
@@ -170,19 +212,74 @@ pub(super) async fn run(
     };
     let mut next_id = 1u64;
     let mut signed_out_through_request = None;
+    let mut target: Option<ConnectionTarget> = None;
+    let mut established_for_target = false;
     loop {
+        if target.is_none() {
+            match commands.recv().await {
+                Some(Command::Connect(requested)) => {
+                    target = Some(requested);
+                    established_for_target = false;
+                }
+                Some(Command::ClearSession) => {
+                    remembered = None;
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                Some(Command::Stop) | None => return,
+                _ => continue,
+            }
+        }
+
+        let active_target = target.clone().expect("connection target is set");
         let _ = events.send(Event::Status("Connecting…".into()));
-        let mut stream = match connect(&args).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = events.send(Event::Status(format!(
-                    "{} · Offline: {e}",
-                    current_utc_timestamp()
-                )));
-                tokio::time::sleep(Duration::from_secs(2)).await;
+        let mut stream = match tokio::time::timeout(
+            Duration::from_secs(8),
+            connect(&args, &active_target),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                if established_for_target {
+                    let _ = events.send(Event::Status(format!(
+                        "{} · Offline: {error:#}",
+                        current_utc_timestamp()
+                    )));
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                } else {
+                    target = None;
+                    let _ = events.send(Event::ConnectionFailed(format!(
+                        "Could not connect: {error:#}"
+                    )));
+                }
+                continue;
+            }
+            Err(_) => {
+                if established_for_target {
+                    let _ = events.send(Event::Status(format!(
+                        "{} · Offline: connection timed out",
+                        current_utc_timestamp()
+                    )));
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                } else {
+                    target = None;
+                    let _ = events.send(Event::ConnectionFailed(
+                        "Could not connect: the server did not respond within 8 seconds".into(),
+                    ));
+                }
                 continue;
             }
         };
+
+        established_for_target = true;
+        let resume_token = remembered
+            .as_ref()
+            .filter(|session| session.broker == active_target.broker)
+            .map(|session| session.token.clone());
+        let _ = events.send(Event::Connected {
+            resuming_session: resume_token.is_some(),
+        });
         let _ = events.send(Event::Status("Online · TLS 1.3".into()));
         next_id += 1;
         let _ = write_message(
@@ -192,22 +289,30 @@ pub(super) async fn run(
             &Request::GetServerCapabilities,
         )
         .await;
-        if let Some(token) = remembered.clone() {
+        if let Some(token) = resume_token {
             next_id += 1;
             let _ = write_message(
                 &mut stream,
                 MessageType::Request,
                 next_id,
                 &Request::Resume {
-                    session_token: token.clone(),
+                    session_token: token,
                     since_revision: 0,
                 },
             )
             .await;
         }
+        let mut reconnect = false;
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
+                    Some(Command::Connect(_)) => {}
+                    Some(Command::Disconnect) => {
+                        target = None;
+                        established_for_target = false;
+                        let _ = events.send(Event::Disconnected);
+                        break;
+                    }
                     Some(Command::Request(request)) => {
                         next_id += 1;
                         if matches!(&*request, Request::Logout { .. }) {
@@ -215,13 +320,13 @@ pub(super) async fn run(
                             signed_out_through_request = Some(next_id);
                             let _ = fs::remove_file(&path);
                         }
-                        if write_message(&mut stream, MessageType::Request, next_id, &*request).await.is_err() { break; }
+                        if write_message(&mut stream, MessageType::Request, next_id, &*request).await.is_err() { reconnect = true; break; }
                     }
-                    Some(Command::SendThenGenerate { message, generate }) => { next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*message).await.is_err() { break; } next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*generate).await.is_err() { break; } }
-                    Some(Command::Cancel(id)) => if write_payload(&mut stream, MessageType::Cancel, id, vec![]).await.is_err() { break; },
+                    Some(Command::SendThenGenerate { message, generate }) => { next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*message).await.is_err() { reconnect = true; break; } next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*generate).await.is_err() { reconnect = true; break; } }
+                    Some(Command::Cancel(id)) => if write_payload(&mut stream, MessageType::Cancel, id, vec![]).await.is_err() { reconnect = true; break; },
                     Some(Command::Reconnect) => {
                         let _ = events.send(Event::Status("Reconnecting…".into()));
-                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        reconnect = true;
                         break;
                     }
                     Some(Command::ClearSession) => {
@@ -233,8 +338,8 @@ pub(super) async fn run(
                 },
                 result = read_frame(&mut stream) => match result {
                     Ok(frame) => {
-                        if frame.message_type == MessageType::Response { if let Ok(Response::Authenticated { session_token, .. }) = decode::<Response>(&frame.payload) { remembered = Some(session_token.clone()); signed_out_through_request = None; if !args.inspect { save_session(&path, &session_token); } } }
-                        if frame.message_type == MessageType::Error { if let Ok(error) = decode::<WireError>(&frame.payload) { if matches!(error.code, ErrorCode::Unauthorized) && remembered.is_some() { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } } }
+                        if frame.message_type == MessageType::Response { if let Ok(Response::Authenticated { session_token, .. }) = decode::<Response>(&frame.payload) { let session = SavedSession { broker: active_target.broker.clone(), token: session_token.clone() }; remembered = Some(session.clone()); signed_out_through_request = None; if !args.inspect { save_session(&path, &session); } } }
+                        if frame.message_type == MessageType::Error { if let Ok(error) = decode::<WireError>(&frame.payload) { if matches!(error.code, ErrorCode::Unauthorized) && remembered.as_ref().is_some_and(|session| session.broker == active_target.broker) { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } } }
                         if is_expected_post_logout_unauthorized(&frame, signed_out_through_request) {
                             continue;
                         }
@@ -245,10 +350,14 @@ pub(super) async fn run(
                             "{} · Offline: {e}",
                             current_utc_timestamp()
                         )));
+                        reconnect = true;
                         break;
                     }
                 }
             }
+        }
+        if reconnect && target.is_some() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 }
@@ -263,8 +372,8 @@ fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> b
 #[cfg(test)]
 mod tests {
     use super::{
-        default_session_path, is_expected_post_logout_unauthorized, load_glass_mode,
-        load_light_mode, load_transparency, save_preferences,
+        SavedSession, default_session_path, is_expected_post_logout_unauthorized, load_glass_mode,
+        load_light_mode, load_session, load_transparency, save_preferences, save_session,
     };
     use chatty_protocol::{ErrorCode, Frame, MessageType, WireError, encode};
     use std::path::PathBuf;
@@ -346,6 +455,38 @@ mod tests {
         assert!(!load_light_mode(&path));
         assert!(!load_glass_mode(&path));
         assert_eq!(load_transparency(&path), 25);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saved_session_is_scoped_to_its_broker() {
+        let path =
+            std::env::temp_dir().join(format!("chatty-saved-session-{}", std::process::id()));
+        let session = SavedSession {
+            broker: "192.168.0.98:7443".into(),
+            token: "secret-session-token".into(),
+        };
+
+        save_session(&path, &session);
+
+        assert_eq!(load_session(&path, None), Some(session));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_session_requires_an_explicit_startup_broker() {
+        let path =
+            std::env::temp_dir().join(format!("chatty-legacy-session-{}", std::process::id()));
+        std::fs::write(&path, "old-unscoped-token").unwrap();
+
+        assert_eq!(load_session(&path, None), None);
+        assert_eq!(
+            load_session(&path, Some("192.168.0.98:7443")),
+            Some(SavedSession {
+                broker: "192.168.0.98:7443".into(),
+                token: "old-unscoped-token".into(),
+            })
+        );
         let _ = std::fs::remove_file(path);
     }
 }

@@ -28,7 +28,6 @@ broker_log=${CHATTY_LOG_FILE:-$state_dir/broker.log}
 
 listen_address=${CHATTY_LISTEN:-127.0.0.1:7443}
 client_address=${CHATTY_BROKER:-$listen_address}
-server_name=${CHATTY_SERVER_NAME:-localhost}
 database=${CHATTY_DATABASE:-sqlite://$data_dir/chatty.db?mode=rwc}
 certificate=${CHATTY_CERT:-$project_dir/certs/server.pem}
 private_key=${CHATTY_KEY:-$project_dir/certs/server.key}
@@ -118,6 +117,5 @@ fi
 printf '%s\n' "Launching Chatty GUI…"
 env \
     CHATTY_BROKER="$client_address" \
-    CHATTY_SERVER_NAME="$server_name" \
     CHATTY_CA="$ca_certificate" \
     "$project_dir/target/release/chatty-gui"

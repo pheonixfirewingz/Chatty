@@ -15,7 +15,7 @@ There is currently no terminal client in the workspace. Some older documents and
 
 The desktop client currently supports:
 
-- account registration, login, saved sessions, logout, admin/user roles, and tenant-isolated data
+- explicit server-IP selection, connection testing, account registration/login, server-scoped saved sessions, logout, admin/user roles, and tenant-isolated data
 - character card creation/editing, SillyTavern JSON/PNG import, JSON export, tags, and public sharing
 - private one-character conversations with automatic titles
 - streamed and cancellable generation, response regeneration/deletion, and Markdown rendering
@@ -60,7 +60,7 @@ CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 cargo run --release -p chatty-broker
 cargo run --release -p chatty-gui
 ```
 
-The development certificate covers `localhost`, `rasp-server`, `127.0.0.1`, and the deployed device address `192.168.0.98`. The GUI defaults to `192.168.0.98:7443` with that IP as its TLS server name; `CHATTY_BROKER` and `CHATTY_SERVER_NAME` can override both. Distribute only `certs/ca.pem` to clients through a trusted channel, keep `ca.key` offline, and reissue the server certificate if the device address changes. Clients pin the configured CA and have no insecure TLS mode.
+The GUI first asks for the broker's static IP and tests the TLS connection on port `7443`. It then resumes a saved session for that specific broker when possible, otherwise it shows login. `CHATTY_BROKER` can prefill the IP field but does not bypass this connection step. The development certificate covers `localhost`, `rasp-server`, `127.0.0.1`, and the deployed device address `192.168.0.98`; reissue it with the deployed static IP in its subject alternative names when that address changes. Distribute only `certs/ca.pem` to clients through a trusted channel and keep `ca.key` offline. Clients pin the configured CA and have no insecure TLS mode.
 
 ## Configuration and local data
 
@@ -74,14 +74,14 @@ Broker settings can be supplied as flags or environment variables:
 | `CHATTY_KEY` | Server private key | `certs/server.key` |
 | `CHATTY_LLAMA_URL` | Initial inference endpoint for a new database | `http://192.168.0.97:11434/v1` |
 
-GUI variables are `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_CA`, and `CHATTY_SESSION_FILE`. The launcher additionally accepts `CHATTY_LOG_FILE`.
+GUI variables are `CHATTY_BROKER` (optional IP-field prefill), `CHATTY_CA`, and `CHATTY_SESSION_FILE`. The launcher additionally accepts `CHATTY_LOG_FILE`.
 
 The inference URL only seeds a new database. After first launch, an administrator can change the persisted adapter URL, provider mode, model, generation defaults, and access policies from the Admin dialog.
 
 Default per-user files follow the XDG Base Directory Specification:
 
 - database: `$XDG_DATA_HOME/chatty/chatty.db` or `~/.local/share/chatty/chatty.db`
-- saved session and appearance preferences: `$XDG_STATE_HOME/chatty/` or `~/.local/state/chatty/`
+- server-scoped saved session and appearance preferences: `$XDG_STATE_HOME/chatty/` or `~/.local/state/chatty/`
 - launcher log: `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log`
 
 On first use, the launcher copies a legacy `.chatty/chatty.db` and its SQLite sidecar files into the XDG data directory while leaving the originals in place as a backup.
