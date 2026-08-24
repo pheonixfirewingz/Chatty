@@ -170,7 +170,7 @@ impl ChattyApp {
     }
     fn save_character(&mut self) {
         if self.draft.name.trim().is_empty() {
-            self.error = Some("Character name is required.".into());
+            self.set_error("Character name is required.");
             return;
         }
         self.send(Request::UpsertCharacter {
@@ -220,7 +220,7 @@ impl ChattyApp {
             .and_then(draft_from_card)
         {
             Some(d) => self.draft = d,
-            None => self.error = Some("Could not read that SillyTavern card.".into()),
+            None => self.set_error("Could not read that SillyTavern card."),
         }
     }
     fn export_character(&mut self) {
@@ -233,7 +233,7 @@ impl ChattyApp {
         let card = serde_json::json!({"spec":"chara_card_v2","spec_version":"2.0","data":{"name":self.draft.name,"description":self.draft.personality,"personality":self.draft.personality,"scenario":self.draft.scenario,"first_mes":"","mes_example":self.draft.example_dialogue,"system_prompt":self.draft.system_prompt,"tags":self.draft.tags.split(',').map(str::trim).collect::<Vec<_>>(),"extensions":{"chatty":{"appearance":self.draft.appearance,"personality":self.draft.personality}}}});
         if let Ok(bytes) = serde_json::to_vec_pretty(&card) {
             if let Err(e) = std::fs::write(path, bytes) {
-                self.error = Some(format!("Export failed: {e}"));
+                self.set_error(format!("Export failed: {e}"));
             }
         }
     }

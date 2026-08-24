@@ -14,8 +14,16 @@ To build anything missing and launch the broker plus GUI together:
 ./start-chatty.sh
 ```
 
-Closing the GUI also stops the broker. Its database and log are stored in
-`.chatty/`. Existing `CHATTY_*` environment variables override the defaults.
+Closing the GUI also stops the broker. Per-user files follow the Linux XDG Base
+Directory Specification in debug and release builds:
+
+- database: `$XDG_DATA_HOME/chatty/chatty.db` or `~/.local/share/chatty/chatty.db`
+- session: `$XDG_STATE_HOME/chatty/session` or `~/.local/state/chatty/session`
+- launcher log: `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log`
+
+The launcher copies a legacy `.chatty/chatty.db` into the XDG data directory on
+first use and leaves the original as a backup. Existing `CHATTY_*` environment
+variables override the defaults.
 
 ```sh
 ./scripts/create-dev-cert.sh
@@ -64,7 +72,7 @@ Mutations are also pushed immediately to every other authenticated connection ow
 
 ## Configuration
 
-Broker flags have matching environment variables: `CHATTY_LISTEN`, `CHATTY_DATABASE`, `CHATTY_CERT`, `CHATTY_KEY`, and `CHATTY_LLAMA_URL`. Client variables are `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_CA`, and optional `CHATTY_SESSION_FILE`.
+Broker flags have matching environment variables: `CHATTY_LISTEN`, `CHATTY_DATABASE`, `CHATTY_CERT`, `CHATTY_KEY`, and `CHATTY_LLAMA_URL`. The launcher also accepts `CHATTY_LOG_FILE`. Client variables are `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_CA`, and optional `CHATTY_SESSION_FILE`.
 
 `CHATTY_LLAMA_URL` seeds persistent broker settings on a new database. Admins can later change the adapter URL/enabled state, self-registration policy and non-admin publishing policy in the GUI. Disabling registration removes the GUI Register action and is independently enforced by the broker; admin-created accounts remain available.
 

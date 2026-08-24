@@ -2,6 +2,7 @@
 //! This executable is test support, never embedded in the broker or client.
 
 use anyhow::{Context, Result};
+use chatty_protocol::current_utc_timestamp;
 use clap::Parser;
 use serde_json::json;
 use tokio::{
@@ -32,7 +33,7 @@ async fn main() -> Result<()> {
 
 async fn handle(mut stream: TcpStream, words: usize, delay_ms: u64) {
     if let Err(error) = respond(&mut stream, words, delay_ms).await {
-        eprintln!("mock request failed: {error}");
+        eprintln!("{} · mock request failed: {error}", current_utc_timestamp());
     }
 }
 

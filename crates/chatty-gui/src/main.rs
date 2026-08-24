@@ -48,8 +48,13 @@ fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("failed to install TLS provider"))?;
-    let args = Args::parse();
+    let mut args = Args::parse();
     let inspect = args.inspect;
+    if !inspect {
+        // Resolve this before starting eframe so debug and release launches use
+        // the same absolute XDG state path and never fall back to the cwd.
+        args.session_file = Some(network::session_path(&args)?);
+    }
     let size = [args.width, args.height];
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -114,6 +119,12 @@ struct DraftCharacter {
     owned_by_user: bool,
 }
 
+#[derive(Clone)]
+struct UiNotice {
+    timestamp: String,
+    message: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Chat,
@@ -144,7 +155,7 @@ struct ChattyApp {
     active_request: Option<u64>,
     screen: Screen,
     sidebar_visible: bool,
-    error: Option<String>,
+    error: Option<UiNotice>,
     draft: DraftCharacter,
     draft_character_open: bool,
     new_chat_open: bool,
@@ -217,6 +228,12 @@ impl ChattyApp {
     fn send(&self, request: Request) {
         let _ = self.commands.send(Command::Request(Box::new(request)));
     }
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.error = Some(UiNotice {
+            timestamp: current_utc_timestamp(),
+            message: message.into(),
+        });
+    }
     fn refresh(&self) {
         self.send(Request::ListCharacters {
             session_token: self.token.clone(),
@@ -241,7 +258,7 @@ impl ChattyApp {
                 Event::SessionExpired => {
                     self.token.clear();
                     self.role = None;
-                    self.error = Some("Saved session expired. Sign in again.".into());
+                    self.set_error("Saved session expired. Sign in again.");
                 }
                 Event::Frame(frame) => self.handle_frame(frame),
             }
@@ -323,12 +340,13 @@ impl ChattyApp {
             }
             MessageType::Error => {
                 if let Ok(e) = decode::<WireError>(&frame.payload) {
-                    self.error = Some(match e.code {
+                    let message = match e.code {
                         ErrorCode::BackendUnavailable | ErrorCode::ModelMissing => {
                             "The broker could not complete that request.".into()
                         }
                         _ => e.message,
-                    });
+                    };
+                    self.set_error(message);
                     self.active_request = None;
                     self.typing_character = None;
                 }
@@ -415,7 +433,7 @@ impl ChattyApp {
             adapter_status: AdapterStatus::Online,
             adapter_model_count: 1,
             adapter_latency_ms: Some(18),
-            recent_errors: vec![],
+            recent_errors: vec!["2026-08-24 14:32:07 UTC · Adapter request timed out".into()],
         });
     }
 }
@@ -435,6 +453,23 @@ mod visual_tests {
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
                 app.load_inspection_demo();
+                app
+            })
+    }
+
+    fn notice_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(|creation| {
+                configure_style(&creation.egui_ctx);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.error = Some(UiNotice {
+                    timestamp: "2026-08-24 14:32:07 UTC".into(),
+                    message: "The broker could not complete that request.".into(),
+                });
                 app
             })
     }
@@ -499,6 +534,24 @@ mod visual_tests {
             .expect("render compact UI")
             .save("/tmp/chatty-restored-compact.png")
             .expect("save compact UI");
+    }
+
+    #[test]
+    fn visual_desktop_timestamped_notice() {
+        notice_harness(egui::vec2(1440.0, 900.0))
+            .render()
+            .expect("render desktop timestamped notice")
+            .save("/tmp/chatty-desktop-timestamped-notice.png")
+            .expect("save desktop timestamped notice");
+    }
+
+    #[test]
+    fn visual_compact_timestamped_notice() {
+        notice_harness(egui::vec2(430.0, 760.0))
+            .render()
+            .expect("render compact timestamped notice")
+            .save("/tmp/chatty-compact-timestamped-notice.png")
+            .expect("save compact timestamped notice");
     }
 
     #[test]
@@ -635,7 +688,9 @@ impl eframe::App for ChattyApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 28.0])
                 .show(&ctx, |ui| {
-                    ui.label(error);
+                    ui.set_max_width(360.0);
+                    ui.label(egui::RichText::new(error.timestamp).small().weak());
+                    ui.label(error.message);
                     if ui.button("Close").clicked() {
                         self.error = None;
                     }
@@ -767,7 +822,7 @@ impl ChattyApp {
         });
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(&self.status);
                 if ui.button("Characters").clicked() {
                     self.screen = Screen::Characters;

@@ -20,18 +20,30 @@ pub(super) enum Event {
     SessionExpired,
 }
 
-fn session_path(args: &Args) -> PathBuf {
-    args.session_file.clone().unwrap_or_else(|| {
-        std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".local/state")
-            })
-            .join("chatty/session")
-    })
+pub(super) fn session_path(args: &Args) -> Result<PathBuf> {
+    if let Some(path) = args.session_file.clone() {
+        return Ok(path);
+    }
+
+    default_session_path(
+        std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+    .context(
+        "could not determine the Linux user state directory; set XDG_STATE_HOME, HOME, or CHATTY_SESSION_FILE",
+    )
+}
+
+fn default_session_path(xdg_state_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    // The XDG specification requires values to be absolute. Ignore a relative
+    // XDG value and use its documented HOME fallback instead.
+    xdg_state_home
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/state"))
+        })
+        .map(|path| path.join("chatty/session"))
 }
 
 fn save_session(path: &PathBuf, token: &str) {
@@ -90,7 +102,16 @@ pub(super) async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: std::sync::mpsc::Sender<Event>,
 ) {
-    let path = session_path(&args);
+    let path = match session_path(&args) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = events.send(Event::Status(format!(
+                "{} · Startup failed: {error:#}",
+                current_utc_timestamp()
+            )));
+            return;
+        }
+    };
     let mut remembered = if args.inspect {
         None
     } else {
@@ -104,7 +125,10 @@ pub(super) async fn run(
         let mut stream = match connect(&args).await {
             Ok(s) => s,
             Err(e) => {
-                let _ = events.send(Event::Status(format!("Offline: {e}")));
+                let _ = events.send(Event::Status(format!(
+                    "{} · Offline: {e}",
+                    current_utc_timestamp()
+                )));
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -151,9 +175,63 @@ pub(super) async fn run(
                         if frame.message_type == MessageType::Error { if let Ok(error) = decode::<WireError>(&frame.payload) { if matches!(error.code, ErrorCode::Unauthorized) { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } } }
                         if events.send(Event::Frame(frame)).is_err() { return; }
                     }
-                    Err(e) => { let _ = events.send(Event::Status(format!("Offline: {e}"))); break; }
+                    Err(e) => {
+                        let _ = events.send(Event::Status(format!(
+                            "{} · Offline: {e}",
+                            current_utc_timestamp()
+                        )));
+                        break;
+                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_session_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn session_uses_absolute_xdg_state_home() {
+        assert_eq!(
+            default_session_path(
+                Some(PathBuf::from("/tmp/xdg-state")),
+                Some(PathBuf::from("/home/tester")),
+            ),
+            Some(PathBuf::from("/tmp/xdg-state/chatty/session")),
+        );
+    }
+
+    #[test]
+    fn session_uses_linux_home_fallback() {
+        assert_eq!(
+            default_session_path(None, Some(PathBuf::from("/home/tester"))),
+            Some(PathBuf::from("/home/tester/.local/state/chatty/session",)),
+        );
+    }
+
+    #[test]
+    fn relative_xdg_state_home_is_ignored() {
+        assert_eq!(
+            default_session_path(
+                Some(PathBuf::from("relative/state")),
+                Some(PathBuf::from("/home/tester")),
+            ),
+            Some(PathBuf::from("/home/tester/.local/state/chatty/session",)),
+        );
+    }
+
+    #[test]
+    fn session_never_falls_back_to_current_directory() {
+        assert_eq!(default_session_path(None, None), None);
+        assert_eq!(
+            default_session_path(
+                Some(PathBuf::from("relative/state")),
+                Some(PathBuf::from("relative/home")),
+            ),
+            None,
+        );
     }
 }

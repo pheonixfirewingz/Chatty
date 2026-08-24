@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=simple
 User=chatty
 Group=chatty
+StateDirectory=chatty
+StateDirectoryMode=0750
 WorkingDirectory=/var/lib/chatty
 ExecStart=/usr/local/bin/chatty-broker
 Environment=CHATTY_DATABASE=sqlite:///var/lib/chatty/chatty.db?mode=rwc
@@ -19,7 +21,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/chatty
 MemoryMax=256M
 
 [Install]

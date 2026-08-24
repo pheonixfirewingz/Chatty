@@ -14,11 +14,11 @@ an operational incident, not as a reason to raise the cap automatically.
 
 ## Local startup and state
 
-Use `./start-chatty.sh` to create missing development certificates, build missing release binaries, launch the broker and GUI, and stop the broker when the GUI exits. The default database and log are `.chatty/chatty.db` and `.chatty/broker.log`. The script respects existing `CHATTY_LISTEN`, `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_DATABASE`, `CHATTY_CERT`, `CHATTY_KEY`, `CHATTY_CA` and `CHATTY_LLAMA_URL` values.
+Use `./start-chatty.sh` to create missing development certificates, build missing release binaries, launch the broker and GUI, and stop the broker when the GUI exits. The per-user database is `$XDG_DATA_HOME/chatty/chatty.db` (fallback `~/.local/share/chatty/chatty.db`), while the launcher log and GUI session are under `$XDG_STATE_HOME/chatty/` (fallback `~/.local/state/chatty/`). Debug and release builds use the same locations. On first use, the launcher copies an existing `.chatty/chatty.db` and its SQLite sidecars to the XDG data directory, retaining the originals as a backup. The script respects existing `CHATTY_LISTEN`, `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_DATABASE`, `CHATTY_LOG_FILE`, `CHATTY_CERT`, `CHATTY_KEY`, `CHATTY_CA` and `CHATTY_LLAMA_URL` values.
 
 The current client/broker handshake protocol is version 8. A version mismatch is intentionally fatal; rebuild all Rust components together. On a fresh database, `CHATTY_LLAMA_URL` seeds the singleton broker settings row. Later URL/enabled and policy changes are persistent and should be made from Admin > Broker.
 
-The GUI saves an opaque session token, never a password. Logout removes it. For isolated GUI automation/tests, set `CHATTY_SESSION_FILE` to a temporary path or use inspection mode so a real login is neither loaded nor overwritten.
+The GUI saves an opaque session token, never a password, at `$XDG_STATE_HOME/chatty/session` (falling back to `~/.local/state/chatty/session`). Debug and release builds use the same location and never save relative to the build/current directory. Logout removes it. For isolated GUI automation/tests, set `CHATTY_SESSION_FILE` to a temporary path or use inspection mode so a real login is neither loaded nor overwritten.
 
 Admin > Data is deliberately not a raw database console. Password hashes, session tokens, messages and conversation bodies must remain unavailable. Account deletion is destructive and transactional; the active admin cannot delete itself.
 

@@ -7,6 +7,19 @@ use std::io::{Cursor, Read};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+const UTC_TIMESTAMP_FORMAT: &[time::format_description::FormatItem<'static>] =
+    time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
+
+pub fn current_utc_timestamp() -> String {
+    format_utc_timestamp(time::OffsetDateTime::now_utc())
+}
+
+fn format_utc_timestamp(timestamp: time::OffsetDateTime) -> String {
+    timestamp
+        .format(UTC_TIMESTAMP_FORMAT)
+        .unwrap_or_else(|_| "unknown time UTC".to_owned())
+}
+
 pub const HEADER_LEN: usize = 14;
 pub const MAX_PAYLOAD: usize = 8 * 1024 * 1024;
 pub const COMPRESSION_THRESHOLD: usize = 256;
@@ -612,6 +625,13 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Frame, P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_error_timestamp_is_stable_and_readable() {
+        let timestamp = time::macros::datetime!(2026-08-24 14:32:07 UTC);
+        assert_eq!(format_utc_timestamp(timestamp), "2026-08-24 14:32:07 UTC");
+    }
+
     #[tokio::test]
     async fn compressed_round_trip() {
         let (mut a, mut b) = tokio::io::duplex(32 * 1024);

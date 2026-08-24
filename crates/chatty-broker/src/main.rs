@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 use std::{
     collections::HashMap,
-    fs::File,
+    fs::{self, File},
     io::BufReader,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -32,12 +33,8 @@ use uuid::Uuid;
 struct Args {
     #[arg(long, env = "CHATTY_LISTEN", default_value = "0.0.0.0:7443")]
     listen: String,
-    #[arg(
-        long,
-        env = "CHATTY_DATABASE",
-        default_value = "sqlite://chatty.db?mode=rwc"
-    )]
-    database: String,
+    #[arg(long, env = "CHATTY_DATABASE")]
+    database: Option<String>,
     #[arg(long, env = "CHATTY_CERT", default_value = "certs/server.pem")]
     cert: String,
     #[arg(long, env = "CHATTY_KEY", default_value = "certs/server.key")]
@@ -48,6 +45,36 @@ struct Args {
         default_value = "http://192.168.0.97:11434/v1"
     )]
     llama_url: String,
+}
+
+fn default_user_data_dir(
+    xdg_data_home: Option<PathBuf>,
+    user_home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    xdg_data_home
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            user_home
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/share"))
+        })
+        .map(|path| path.join("chatty"))
+}
+
+fn default_database_url() -> Result<String> {
+    let data_dir = default_user_data_dir(
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+    .context(
+        "could not determine the Linux user data directory; set XDG_DATA_HOME, HOME, or CHATTY_DATABASE",
+    )?;
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("create application data directory {}", data_dir.display()))?;
+    Ok(format!(
+        "sqlite://{}?mode=rwc",
+        data_dir.join("chatty.db").display()
+    ))
 }
 
 #[derive(Clone)]
@@ -101,9 +128,13 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     let _ = STARTED_AT.set(std::time::Instant::now());
+    let database = match args.database.as_deref() {
+        Some(database) => database.to_owned(),
+        None => default_database_url()?,
+    };
     let db = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&args.database)
+        .connect(&database)
         .await?;
     sqlx::migrate!().run(&db).await?;
     sqlx::query("INSERT OR IGNORE INTO broker_settings(singleton,adapter_url) VALUES(1,?)")
@@ -266,7 +297,7 @@ async fn serve(
                     {
                         let w = classify_error(&e);
                         let mut errors = error_log.lock().await;
-                        errors.push(e.to_string());
+                        errors.push(format!("{} · {e}", current_utc_timestamp()));
                         if errors.len() > 20 {
                             errors.remove(0);
                         }
@@ -2775,6 +2806,37 @@ async fn select_speaker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_uses_absolute_xdg_data_home() {
+        assert_eq!(
+            default_user_data_dir(
+                Some(PathBuf::from("/tmp/xdg-data")),
+                Some(PathBuf::from("/home/tester")),
+            ),
+            Some(PathBuf::from("/tmp/xdg-data/chatty")),
+        );
+    }
+
+    #[test]
+    fn database_uses_linux_home_fallback() {
+        assert_eq!(
+            default_user_data_dir(None, Some(PathBuf::from("/home/tester"))),
+            Some(PathBuf::from("/home/tester/.local/share/chatty")),
+        );
+    }
+
+    #[test]
+    fn database_never_falls_back_to_current_directory() {
+        assert_eq!(default_user_data_dir(None, None), None);
+        assert_eq!(
+            default_user_data_dir(
+                Some(PathBuf::from("relative/data")),
+                Some(PathBuf::from("relative/home")),
+            ),
+            None,
+        );
+    }
 
     #[test]
     fn fragmented_sse_is_buffered_without_data_loss() {

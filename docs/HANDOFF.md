@@ -38,12 +38,13 @@ From the repository root:
 ./start-chatty.sh
 ```
 
-This creates development certificates if missing, builds release binaries if missing, starts the broker, waits for its TCP listener, starts the GUI, and stops the broker when the GUI exits. Runtime state is under `.chatty/`:
+This creates development certificates if missing, builds release binaries if missing, starts the broker, waits for its TCP listener, starts the GUI, and stops the broker when the GUI exits. Per-user files follow the Linux XDG layout in debug and release builds:
 
-- `.chatty/chatty.db`: SQLite database
-- `.chatty/broker.log`: broker log
+- `$XDG_DATA_HOME/chatty/chatty.db` (fallback `~/.local/share/chatty/chatty.db`): SQLite database
+- `$XDG_STATE_HOME/chatty/broker.log` (fallback `~/.local/state/chatty/broker.log`): broker log
+- `$XDG_STATE_HOME/chatty/session` (fallback `~/.local/state/chatty/session`): GUI session token
 
-The GUI session defaults to `$XDG_STATE_HOME/chatty/session` or `~/.local/state/chatty/session`. Override it with `CHATTY_SESSION_FILE`; inspection mode does not load a real session.
+The launcher copies a legacy project-local `.chatty/chatty.db` into the XDG data directory once and retains the original as a backup. No component falls back to the build/current directory. Override database, log, or session paths with `CHATTY_DATABASE`, `CHATTY_LOG_FILE`, or `CHATTY_SESSION_FILE`; inspection mode does not load a real session.
 
 The default inference URL is `http://192.168.0.97:11434/v1`. Environment overrides are listed in `README.md` and `docs/OPERATIONS.md`.
 
@@ -54,6 +55,7 @@ The default inference URL is `http://192.168.0.97:11434/v1`. Environment overrid
 - Responsive native login UI, dynamically scaled by viewport/platform DPI.
 - TLS connection feedback and validation feedback are visible.
 - Session token is saved with mode `0600`; passwords are never saved.
+- User-visible errors and broker-monitor error history include their UTC timestamp.
 - The broker publishes a safe `registration_enabled` capability before login.
 - When self-registration is disabled, the Register UI is absent and registration is still rejected server-side.
 - The first account on an empty broker becomes admin.
