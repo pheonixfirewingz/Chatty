@@ -60,7 +60,7 @@ CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 cargo run --release -p chatty-broker
 cargo run --release -p chatty-gui
 ```
 
-The GUI first asks for the broker's static IP and tests the TLS connection on port `7443`. It then resumes a saved session for that specific broker when possible, otherwise it shows login. `CHATTY_BROKER` can prefill the IP field but does not bypass this connection step. The development certificate covers `localhost`, `rasp-server`, `127.0.0.1`, and the deployed device address `192.168.0.98`; reissue it with the deployed static IP in its subject alternative names when that address changes. Distribute only `certs/ca.pem` to clients through a trusted channel and keep `ca.key` offline. Clients pin the configured CA and have no insecure TLS mode.
+The GUI first asks for the broker's IP address or domain and tests the TLS connection on port `7443`. It then resumes a saved session for that specific broker when possible, otherwise it shows login. `CHATTY_BROKER` can prefill the address field but does not bypass this connection step. The development certificate covers `localhost`, `rasp-server`, `127.0.0.1`, and the deployed device address `192.168.0.98`; reissue it with the deployed address in its subject alternative names when that address changes. Distribute only public CA certificates to clients through a trusted channel and keep `ca.key` offline. Clients pin the configured CA and have no insecure TLS mode.
 
 ### Flatpak client release
 
@@ -81,15 +81,17 @@ The release build vendors the locked Rust dependencies, compiles only
 Install the result with `flatpak install --user ./dist/chatty-*.flatpak`.
 
 The sandbox has network access for connecting to a separately operated broker,
-but no general host-file access. To pass a broker CA certificate from the host,
-grant that individual file for the launch and supply the normal client options:
+but no general host-file access. Put each broker's public CA certificate in the
+app's private configuration directory, named after its IP address or domain:
 
 ```sh
-flatpak run --filesystem=/absolute/path/ca.pem:ro \
-  io.github.pheonixfirewingz.Chatty \
-  --broker 192.168.0.98 \
-  --ca /absolute/path/ca.pem
+mkdir -p ~/.var/app/io.github.pheonixfirewingz.Chatty/config/chatty/server-cas
+cp /trusted/path/ca.pem \
+  ~/.var/app/io.github.pheonixfirewingz.Chatty/config/chatty/server-cas/192.168.0.98.ca.pem
 ```
+
+For a domain, use a name such as `broker.example.test.ca.pem`. The `--ca` option
+or `CHATTY_CA` environment variable can still select an explicit certificate.
 
 The declared runtime permissions are limited to network access, Wayland with
 fallback X11, and DRI rendering. Host files selected through the desktop portal

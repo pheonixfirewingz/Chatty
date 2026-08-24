@@ -169,8 +169,11 @@ pub(super) fn save_preferences(
 }
 
 async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<TcpStream>> {
+    let ca_path = ca_path(args, target)?;
     let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut BufReader::new(File::open(&args.ca)?)) {
+    let ca_file = File::open(&ca_path)
+        .with_context(|| format!("could not open CA certificate {}", ca_path.display()))?;
+    for cert in rustls_pemfile::certs(&mut BufReader::new(ca_file)) {
         roots.add(cert?).context("invalid pinned CA")?;
     }
     let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -192,6 +195,55 @@ async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<Tcp
         anyhow::bail!("unsupported broker handshake");
     }
     Ok(stream)
+}
+
+fn ca_path(args: &Args, target: &ConnectionTarget) -> Result<PathBuf> {
+    if let Some(path) = args.ca.clone() {
+        return Ok(path);
+    }
+
+    let server_name = target.server_name.trim();
+    if server_name.is_empty()
+        || server_name == "."
+        || server_name == ".."
+        || server_name.contains(['/', '\\'])
+    {
+        anyhow::bail!("invalid server name for CA certificate lookup");
+    }
+
+    let server_ca = default_server_ca_path(
+        server_name,
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+    .context(
+        "could not determine the Linux user config directory; set XDG_CONFIG_HOME, HOME, or CHATTY_CA",
+    )?;
+
+    // Preserve the repository-relative development default outside Flatpak.
+    // A server-specific CA always wins when the user has installed one.
+    if server_ca.is_file() || std::env::var_os("FLATPAK_ID").is_some() {
+        Ok(server_ca)
+    } else {
+        Ok(PathBuf::from("certs/ca.pem"))
+    }
+}
+
+fn default_server_ca_path(
+    server_name: &str,
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    xdg_config_home
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".config"))
+        })
+        .map(|path| {
+            path.join("chatty/server-cas")
+                .join(format!("{server_name}.ca.pem"))
+        })
 }
 
 pub(super) async fn run(
@@ -372,8 +424,9 @@ fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> b
 #[cfg(test)]
 mod tests {
     use super::{
-        SavedSession, default_session_path, is_expected_post_logout_unauthorized, load_glass_mode,
-        load_light_mode, load_session, load_transparency, save_preferences, save_session,
+        SavedSession, default_server_ca_path, default_session_path,
+        is_expected_post_logout_unauthorized, load_glass_mode, load_light_mode, load_session,
+        load_transparency, save_preferences, save_session,
     };
     use chatty_protocol::{ErrorCode, Frame, MessageType, WireError, encode};
     use std::path::PathBuf;
@@ -488,5 +541,33 @@ mod tests {
             })
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn server_ca_uses_absolute_xdg_config_home() {
+        assert_eq!(
+            default_server_ca_path(
+                "192.168.0.98",
+                Some(PathBuf::from("/tmp/xdg-config")),
+                Some(PathBuf::from("/home/test")),
+            ),
+            Some(PathBuf::from(
+                "/tmp/xdg-config/chatty/server-cas/192.168.0.98.ca.pem"
+            )),
+        );
+    }
+
+    #[test]
+    fn server_ca_falls_back_to_home_config() {
+        assert_eq!(
+            default_server_ca_path(
+                "broker.example.test",
+                Some(PathBuf::from("relative-config")),
+                Some(PathBuf::from("/home/test")),
+            ),
+            Some(PathBuf::from(
+                "/home/test/.config/chatty/server-cas/broker.example.test.ca.pem"
+            )),
+        );
     }
 }

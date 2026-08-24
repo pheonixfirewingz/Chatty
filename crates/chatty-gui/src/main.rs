@@ -92,8 +92,8 @@ fn modal_frame(ctx: &egui::Context, light_mode: bool, glass_mode: bool) -> egui:
 struct Args {
     #[arg(long, env = "CHATTY_BROKER", default_value = "")]
     broker: String,
-    #[arg(long, env = "CHATTY_CA", default_value = "certs/ca.pem")]
-    ca: String,
+    #[arg(long, env = "CHATTY_CA")]
+    ca: Option<PathBuf>,
     #[arg(long)]
     inspect: bool,
     #[arg(long, default_value = "/tmp/chatty-gui-control")]
@@ -112,11 +112,8 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("failed to install TLS provider"))?;
     let mut args = Args::parse();
     let inspect = args.inspect;
-    let initial_server_ip = broker_ip(&args.broker).unwrap_or_default();
-    let initial_broker = initial_server_ip
-        .parse::<IpAddr>()
-        .ok()
-        .map(|ip| SocketAddr::new(ip, 7443).to_string());
+    let initial_server = broker_host(&args.broker).unwrap_or_default();
+    let initial_broker = connection_target(&initial_server).map(|target| target.broker);
     let mut remembered_session = None;
     if !inspect {
         // Resolve this before starting eframe so debug and release launches use
@@ -164,7 +161,7 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode, transparency);
             let mut app = ChattyApp::new(command_tx, event_rx);
-            app.server_ip = initial_server_ip;
+            app.server_address = initial_server;
             app.light_mode = light_mode;
             app.glass_mode = glass_mode;
             app.transparency = transparency;
@@ -178,19 +175,53 @@ fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-fn broker_ip(value: &str) -> Option<String> {
+fn broker_host(value: &str) -> Option<String> {
+    let value = value.trim();
     value
-        .trim()
         .parse::<IpAddr>()
         .map(|ip| ip.to_string())
         .ok()
         .or_else(|| {
             value
-                .trim()
                 .parse::<SocketAddr>()
                 .map(|address| address.ip().to_string())
                 .ok()
         })
+        .or_else(|| {
+            let host = match value.rsplit_once(':') {
+                Some((host, "7443")) if !host.contains(':') => host,
+                Some(_) => return None,
+                None => value,
+            };
+            let valid = !host.is_empty()
+                && host.len() <= 253
+                && host.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && label
+                            .as_bytes()
+                            .last()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                });
+            valid.then(|| host.to_ascii_lowercase())
+        })
+}
+
+fn connection_target(value: &str) -> Option<ConnectionTarget> {
+    let host = broker_host(value)?;
+    let broker = host.parse::<IpAddr>().map_or_else(
+        |_| format!("{host}:7443"),
+        |ip| SocketAddr::new(ip, 7443).to_string(),
+    );
+    Some(ConnectionTarget {
+        broker,
+        server_name: host,
+    })
 }
 
 fn configure_style_with_surface(
@@ -374,7 +405,7 @@ struct ChattyApp {
     commands: mpsc::UnboundedSender<Command>,
     events: std::sync::mpsc::Receiver<Event>,
     status: String,
-    server_ip: String,
+    server_address: String,
     connected: bool,
     connecting: bool,
     restoring_session: bool,
@@ -429,8 +460,8 @@ impl ChattyApp {
         Self {
             commands,
             events,
-            status: "Enter the server IP to begin.".into(),
-            server_ip: String::new(),
+            status: "Enter the server address to begin.".into(),
+            server_address: String::new(),
             connected: false,
             connecting: false,
             restoring_session: false,
@@ -843,10 +874,26 @@ mod visual_tests {
     use egui_kittest::kittest::{NodeT, Queryable};
 
     #[test]
-    fn broker_ip_accepts_an_ip_with_or_without_the_default_port() {
-        assert_eq!(broker_ip("192.168.0.98"), Some("192.168.0.98".into()));
-        assert_eq!(broker_ip("192.168.0.98:7443"), Some("192.168.0.98".into()));
-        assert_eq!(broker_ip("chatty.example"), None);
+    fn broker_host_accepts_ips_and_domains() {
+        assert_eq!(broker_host("192.168.0.98"), Some("192.168.0.98".into()));
+        assert_eq!(
+            broker_host("192.168.0.98:7443"),
+            Some("192.168.0.98".into())
+        );
+        assert_eq!(broker_host("Chatty.Example"), Some("chatty.example".into()));
+        assert_eq!(broker_host("bad_name.example"), None);
+        assert_eq!(broker_host("chatty.example:1234"), None);
+    }
+
+    #[test]
+    fn connection_target_uses_tls_host_and_default_port() {
+        assert_eq!(
+            connection_target("chatty.example"),
+            Some(ConnectionTarget {
+                broker: "chatty.example:7443".into(),
+                server_name: "chatty.example".into(),
+            })
+        );
     }
 
     fn harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
@@ -1853,15 +1900,15 @@ impl ChattyApp {
             let top = (ui.available_height() * 0.18).clamp(36.0, 150.0);
             ui.add_space(top);
             ui.heading(egui::RichText::new("Connect to Chatty").size(30.0));
-            ui.label("Enter the static IP address of your Chatty server.");
+            ui.label("Enter the IP address or domain of your Chatty server.");
             ui.add_space(22.0);
             ui.scope(|ui| {
                 ui.set_max_width(420.0);
-                ui.label("Server IP");
+                ui.label("Server address");
                 let response = ui.add_enabled(
                     !self.connecting,
-                    egui::TextEdit::singleline(&mut self.server_ip)
-                        .hint_text("192.168.0.98")
+                    egui::TextEdit::singleline(&mut self.server_address)
+                        .hint_text("192.168.0.98 or chatty.example.com")
                         .desired_width(ui.available_width()),
                 );
                 let submit =
@@ -1880,19 +1927,15 @@ impl ChattyApp {
                     )
                     .clicked();
                 if (clicked || submit) && !self.connecting {
-                    match self.server_ip.trim().parse::<IpAddr>() {
-                        Ok(ip) => {
-                            self.server_ip = ip.to_string();
+                    match connection_target(&self.server_address) {
+                        Some(target) => {
+                            self.server_address = target.server_name.clone();
                             self.connecting = true;
-                            self.status = format!("Connecting to {}: 7443…", self.server_ip);
+                            self.status = format!("Connecting to {}: 7443…", self.server_address);
                             self.error = None;
-                            let target = ConnectionTarget {
-                                broker: SocketAddr::new(ip, 7443).to_string(),
-                                server_name: ip.to_string(),
-                            };
                             let _ = self.commands.send(Command::Connect(target));
                         }
-                        Err(_) => self.set_error("Enter a valid IPv4 or IPv6 address."),
+                        None => self.set_error("Enter a valid IP address or domain."),
                     }
                 }
                 ui.add_space(8.0);
