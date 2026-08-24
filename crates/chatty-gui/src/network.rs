@@ -123,6 +123,23 @@ pub(super) fn preferences_path(session_path: &std::path::Path) -> PathBuf {
     session_path.with_extension("preferences")
 }
 
+pub(super) fn last_server_path(session_path: &std::path::Path) -> PathBuf {
+    session_path.with_file_name("last-server")
+}
+
+pub(super) fn load_last_server(path: &std::path::Path) -> Option<String> {
+    let server = fs::read_to_string(path).ok()?;
+    let server = server.trim();
+    (!server.is_empty()).then(|| server.to_owned())
+}
+
+fn save_last_server(path: &std::path::Path, server: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, format!("{}\n", server.trim()));
+}
+
 pub(super) fn load_light_mode(path: &std::path::Path) -> bool {
     fs::read_to_string(path)
         .ok()
@@ -266,6 +283,7 @@ pub(super) async fn run(
     let mut signed_out_through_request = None;
     let mut target: Option<ConnectionTarget> = None;
     let mut established_for_target = false;
+    let last_server = last_server_path(&path);
     loop {
         if target.is_none() {
             match commands.recv().await {
@@ -325,6 +343,7 @@ pub(super) async fn run(
         };
 
         established_for_target = true;
+        save_last_server(&last_server, &active_target.server_name);
         let resume_token = remembered
             .as_ref()
             .filter(|session| session.broker == active_target.broker)
@@ -425,8 +444,9 @@ fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> b
 mod tests {
     use super::{
         SavedSession, default_server_ca_path, default_session_path,
-        is_expected_post_logout_unauthorized, load_glass_mode, load_light_mode, load_session,
-        load_transparency, save_preferences, save_session,
+        is_expected_post_logout_unauthorized, last_server_path, load_glass_mode, load_last_server,
+        load_light_mode, load_session, load_transparency, save_last_server, save_preferences,
+        save_session,
     };
     use chatty_protocol::{ErrorCode, Frame, MessageType, WireError, encode};
     use std::path::PathBuf;
@@ -569,5 +589,20 @@ mod tests {
                 "/home/test/.config/chatty/server-cas/broker.example.test.ca.pem"
             )),
         );
+    }
+
+    #[test]
+    fn last_connected_server_round_trips() {
+        let session =
+            std::env::temp_dir().join(format!("chatty-last-server-session-{}", std::process::id()));
+        let path = last_server_path(&session);
+
+        save_last_server(&path, "  chatty.example.test  ");
+
+        assert_eq!(
+            load_last_server(&path).as_deref(),
+            Some("chatty.example.test")
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

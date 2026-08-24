@@ -173,7 +173,12 @@ impl ChattyApp {
                         .inner_margin(egui::Margin::symmetric(15, 7))
                         .show(ui, |ui| {
                             ui.set_max_width((ui.available_width() * 0.72).clamp(150.0, 620.0));
-                            ui.label(egui::RichText::new(&message.content).color(COLOR_ON_PRIMARY));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&message.content).color(COLOR_ON_PRIMARY),
+                                )
+                                .wrap(),
+                            );
                         });
                 });
             } else {

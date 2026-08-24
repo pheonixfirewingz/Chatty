@@ -112,13 +112,23 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("failed to install TLS provider"))?;
     let mut args = Args::parse();
     let inspect = args.inspect;
-    let initial_server = broker_host(&args.broker).unwrap_or_default();
-    let initial_broker = connection_target(&initial_server).map(|target| target.broker);
+    let mut initial_server = broker_host(&args.broker).unwrap_or_default();
+    let mut initial_broker = connection_target(&initial_server).map(|target| target.broker);
     let mut remembered_session = None;
     if !inspect {
         // Resolve this before starting eframe so debug and release launches use
         // the same absolute XDG state path and never fall back to the cwd.
         args.session_file = Some(network::session_path(&args)?);
+        if initial_server.is_empty() {
+            initial_server = args
+                .session_file
+                .as_deref()
+                .map(network::last_server_path)
+                .and_then(|path| network::load_last_server(&path))
+                .and_then(|server| broker_host(&server))
+                .unwrap_or_default();
+            initial_broker = connection_target(&initial_server).map(|target| target.broker);
+        }
         remembered_session = args
             .session_file
             .as_ref()
@@ -907,6 +917,53 @@ mod visual_tests {
                 app.load_inspection_demo();
                 app
             })
+    }
+
+    const LONG_USER_MESSAGE: &str = "Please write a detailed description of the observatory, including the weathered stone walls, the old brass telescope, the valley below, and every small detail that makes this place feel lived in and memorable.";
+
+    fn long_user_message_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                if size.x < 760.0 {
+                    app.sidebar_visible = false;
+                }
+                app.messages[0].content = LONG_USER_MESSAGE.into();
+                app
+            })
+    }
+
+    #[test]
+    fn visual_desktop_long_user_message() {
+        let mut harness = long_user_message_harness(egui::vec2(1440.0, 900.0));
+        harness.run_ok();
+        let message = harness.get_by_label(LONG_USER_MESSAGE).rect();
+        assert!(message.left() >= 0.0 && message.right() <= 1440.0);
+        assert!(message.height() > 30.0);
+        harness
+            .render()
+            .expect("render desktop long user message")
+            .save("/tmp/chatty-desktop-long-user-message.png")
+            .expect("save desktop long user message");
+    }
+
+    #[test]
+    fn visual_compact_long_user_message() {
+        let mut harness = long_user_message_harness(egui::vec2(430.0, 760.0));
+        harness.run_ok();
+        let message = harness.get_by_label(LONG_USER_MESSAGE).rect();
+        assert!(message.left() >= 0.0 && message.right() <= 430.0);
+        assert!(message.height() > 60.0);
+        harness
+            .render()
+            .expect("render compact long user message")
+            .save("/tmp/chatty-compact-long-user-message.png")
+            .expect("save compact long user message");
     }
 
     fn notice_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
