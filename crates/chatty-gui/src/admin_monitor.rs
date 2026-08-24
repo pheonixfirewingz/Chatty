@@ -43,11 +43,13 @@ impl ChattyApp {
     pub(super) fn render_admin_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.screen == Screen::Admin;
         let max_height = Self::popup_max_height(ctx);
+        let dialog_width = (ctx.content_rect().width() - 32.0).clamp(360.0, 920.0);
         egui::Window::new("Admin")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size([820.0, max_height.min(620.0)])
+            .default_size([dialog_width, max_height.min(700.0)])
+            .max_width(dialog_width)
             .max_height(max_height)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
@@ -187,8 +189,9 @@ impl ChattyApp {
                 }
             });
         ui.heading("Generation defaults");
+        let compact_generation = ui.available_width() < 560.0;
         egui::Grid::new("generation-defaults")
-            .num_columns(4)
+            .num_columns(if compact_generation { 2 } else { 4 })
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 ui.label("Temperature");
@@ -197,6 +200,9 @@ impl ChattyApp {
                         .range(0.0..=2.0)
                         .speed(0.01),
                 );
+                if compact_generation {
+                    ui.end_row();
+                }
                 ui.label("Top P");
                 ui.add(
                     egui::DragValue::new(&mut self.broker_config.top_p)
@@ -206,6 +212,9 @@ impl ChattyApp {
                 ui.end_row();
                 ui.label("Top K");
                 ui.add(egui::DragValue::new(&mut self.broker_config.top_k).range(0..=10_000));
+                if compact_generation {
+                    ui.end_row();
+                }
                 ui.label("Context");
                 ui.add(
                     egui::DragValue::new(&mut self.broker_config.num_ctx).range(128..=1_048_576),
@@ -215,6 +224,9 @@ impl ChattyApp {
                 ui.add(
                     egui::DragValue::new(&mut self.broker_config.num_predict).range(-1..=1_048_576),
                 );
+                if compact_generation {
+                    ui.end_row();
+                }
                 ui.label("Repeat penalty");
                 ui.add(
                     egui::DragValue::new(&mut self.broker_config.repeat_penalty)
@@ -224,6 +236,9 @@ impl ChattyApp {
                 ui.end_row();
                 ui.label("Seed");
                 ui.add(egui::DragValue::new(&mut self.broker_config.seed));
+                if compact_generation {
+                    ui.end_row();
+                }
                 ui.label("Keep alive");
                 ui.text_edit_singleline(&mut self.broker_config.keep_alive);
                 ui.end_row();
@@ -343,62 +358,86 @@ impl ChattyApp {
         }
     }
     fn render_admin_users(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.admin_new_username);
+        let compact = ui.available_width() < 600.0;
+        let create_user = |ui: &mut egui::Ui, app: &mut Self| {
             ui.add(
-                egui::TextEdit::singleline(&mut self.admin_new_password)
+                egui::TextEdit::singleline(&mut app.admin_new_username)
+                    .hint_text("Username")
+                    .desired_width(if compact { f32::INFINITY } else { 170.0 }),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.admin_new_password)
                     .password(true)
-                    .hint_text("Password"),
+                    .hint_text("Password")
+                    .desired_width(if compact { f32::INFINITY } else { 170.0 }),
             );
             egui::ComboBox::from_id_salt("new-role")
-                .selected_text(format!("{:?}", self.admin_new_role))
+                .selected_text(format!("{:?}", app.admin_new_role))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.admin_new_role, Role::User, "User");
-                    ui.selectable_value(&mut self.admin_new_role, Role::Admin, "Admin");
+                    ui.selectable_value(&mut app.admin_new_role, Role::User, "User");
+                    ui.selectable_value(&mut app.admin_new_role, Role::Admin, "Admin");
                 });
             if ui.button("Create").clicked() {
-                self.send(Request::AdminCreateUser {
-                    session_token: self.token.clone(),
-                    username: self.admin_new_username.clone(),
-                    password: self.admin_new_password.clone(),
-                    role: self.admin_new_role,
+                app.send(Request::AdminCreateUser {
+                    session_token: app.token.clone(),
+                    username: app.admin_new_username.clone(),
+                    password: app.admin_new_password.clone(),
+                    role: app.admin_new_role,
                 });
-                self.admin_new_password.clear();
+                app.admin_new_password.clear();
             }
-        });
+        };
+        if compact {
+            ui.vertical(|ui| create_user(ui, self));
+        } else {
+            ui.horizontal(|ui| create_user(ui, self));
+        }
         ui.separator();
         for user in self.users.clone() {
-            ui.horizontal(|ui| {
-                ui.label(&user.username);
-                ui.weak(format!("{:?}", user.role));
-                if user.id != self.user_id {
-                    let role = if user.role == Role::Admin {
-                        Role::User
-                    } else {
-                        Role::Admin
-                    };
-                    if ui
-                        .button(if role == Role::Admin {
-                            "Promote"
+            egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .corner_radius(8.0)
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(&user.username);
+                        ui.weak(format!("{:?}", user.role));
+                        ui.label(format!("{} tokens", format_token_count(user.usage.total())))
+                            .on_hover_text(format!(
+                                "{} prompt · {} completion",
+                                format_token_count(user.usage.prompt_tokens),
+                                format_token_count(user.usage.completion_tokens)
+                            ));
+                    });
+                    if user.id != self.user_id {
+                        let role = if user.role == Role::Admin {
+                            Role::User
                         } else {
-                            "Demote"
-                        })
-                        .clicked()
-                    {
-                        self.send(Request::AdminSetRole {
-                            session_token: self.token.clone(),
-                            user_id: user.id.clone(),
-                            role,
-                        });
+                            Role::Admin
+                        };
+                        if ui
+                            .button(if role == Role::Admin {
+                                "Promote"
+                            } else {
+                                "Demote"
+                            })
+                            .clicked()
+                        {
+                            self.send(Request::AdminSetRole {
+                                session_token: self.token.clone(),
+                                user_id: user.id.clone(),
+                                role,
+                            });
+                        }
+                        if ui.button("Delete").clicked() {
+                            self.send(Request::AdminDeleteUser {
+                                session_token: self.token.clone(),
+                                user_id: user.id,
+                            });
+                        }
                     }
-                    if ui.button("Delete").clicked() {
-                        self.send(Request::AdminDeleteUser {
-                            session_token: self.token.clone(),
-                            user_id: user.id,
-                        });
-                    }
-                }
-            });
+                });
+            ui.add_space(6.0);
         }
     }
     fn render_admin_data(&mut self, ui: &mut egui::Ui) {

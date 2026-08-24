@@ -6,45 +6,121 @@ impl ChattyApp {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "Assistant".into())
     }
+
+    fn active_conversation_title(&self) -> &str {
+        self.selected_conversation
+            .as_ref()
+            .and_then(|id| {
+                self.conversations
+                    .iter()
+                    .find(|conversation| &conversation.id == id)
+            })
+            .map(|conversation| conversation.title.as_str())
+            .unwrap_or("New conversation")
+    }
+
+    fn avatar(ui: &mut egui::Ui, name: &str, size: f32) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        ui.painter()
+            .circle_filled(rect.center(), size / 2.0, COLOR_PRIMARY);
+        let initial = name.chars().next().unwrap_or('A').to_ascii_uppercase();
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            initial,
+            egui::FontId::new(size * 0.42, egui::FontFamily::Proportional),
+            egui::Color32::WHITE,
+        );
+    }
+
     pub(super) fn render_chat(&mut self, ui: &mut egui::Ui) {
-        if !self.sidebar_visible && ui.button("Chats").clicked() {
-            self.sidebar_visible = true;
-        }
         let available = ui.available_rect_before_wrap();
+        let compact = available.width() < 760.0;
+        let header_height = 64.0;
         let typing_height = if self.typing_character.is_some() {
-            26.0
+            24.0
         } else {
             0.0
         };
-        let composer_height = 66.0;
-        let messages_rect = egui::Rect::from_min_max(
+        let composer_height = if compact { 94.0 } else { 104.0 };
+        let content_width = (available.width() - if compact { 0.0 } else { 28.0 }).min(880.0);
+        let content_left = available.center().x - content_width / 2.0;
+        let header_rect = egui::Rect::from_min_max(
             available.min,
+            egui::pos2(available.max.x, available.min.y + header_height),
+        );
+        let messages_rect = egui::Rect::from_min_max(
+            egui::pos2(content_left, header_rect.max.y),
             egui::pos2(
-                available.max.x,
+                content_left + content_width,
                 (available.max.y - composer_height - typing_height).max(available.min.y),
             ),
         );
         let composer_rect = egui::Rect::from_min_max(
-            egui::pos2(available.min.x, available.max.y - composer_height),
-            available.max,
+            egui::pos2(content_left, available.max.y - composer_height),
+            egui::pos2(
+                content_left + content_width - if compact { 13.0 } else { 0.0 },
+                available.max.y,
+            ),
         );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(composer_rect), |ui| {
+
+        ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
             egui::Frame::new()
-                .fill(egui::Color32::from_rgba_unmultiplied(30, 33, 42, 220))
-                .corner_radius(16.0)
+                .fill(color_surface(ui))
+                .stroke(egui::Stroke::new(1.0, color_border(ui)))
+                .corner_radius(12.0)
                 .inner_margin(egui::Margin::symmetric(14, 10))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if !self.sidebar_visible
+                            && ui
+                                .add_sized([62.0, 36.0], egui::Button::new("Chats"))
+                                .on_hover_text("Open conversations")
+                                .clicked()
+                        {
+                            self.sidebar_visible = true;
+                        }
+                        let title = self.active_conversation_title().to_owned();
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(title).size(17.0).strong());
+                            let detail = if self.selected_conversation.is_some() {
+                                format!(
+                                    "Chatting with {}",
+                                    self.character_name(self.selected_speaker().as_deref())
+                                )
+                            } else {
+                                "Choose who you would like to talk with".into()
+                            };
+                            ui.label(egui::RichText::new(detail).size(12.0).weak());
+                        });
+                    });
+                });
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(composer_rect), |ui| {
+            ui.add_space(8.0);
+            egui::Frame::new()
+                .fill(color_surface_raised(ui))
+                .stroke(egui::Stroke::new(1.0, color_border(ui)))
+                .corner_radius(16.0)
+                .inner_margin(egui::Margin::symmetric(12, 9))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let response = ui.add_sized(
-                            [(ui.available_width() - 70.0).max(100.0), 44.0],
+                            [(ui.available_width() - 86.0).max(160.0), 42.0],
                             egui::TextEdit::multiline(&mut self.input)
-                                .hint_text("Message…")
+                                .hint_text("Message your character...")
+                                .frame(egui::Frame::NONE)
+                                .vertical_align(egui::Align::Center)
                                 .desired_rows(1),
                         );
                         let enter = response.has_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                         if let Some(id) = self.active_request {
-                            if ui.button("Stop").clicked() {
+                            if ui
+                                .add_sized([70.0, 40.0], egui::Button::new("Stop"))
+                                .clicked()
+                            {
                                 let _ = self.commands.send(Command::Cancel(id));
                             }
                         } else {
@@ -53,17 +129,33 @@ impl ChattyApp {
                             } else {
                                 "Send"
                             };
-                            if ui.button(label).clicked() || enter {
+                            if ui
+                                .add_sized(
+                                    [70.0, 40.0],
+                                    egui::Button::new(egui::RichText::new(label).strong())
+                                        .fill(COLOR_PRIMARY_STRONG)
+                                        .corner_radius(11.0),
+                                )
+                                .clicked()
+                                || enter
+                            {
                                 self.submit_message();
                             }
                         }
                     });
+                    if !compact {
+                        ui.label(
+                            egui::RichText::new("Enter to send  ·  Shift + Enter for a new line")
+                                .size(11.0)
+                                .weak(),
+                        );
+                    }
                 });
         });
         if let Some(id) = self.typing_character.as_deref() {
             let typing_rect = egui::Rect::from_min_max(
-                egui::pos2(available.min.x, messages_rect.max.y),
-                egui::pos2(available.max.x, composer_rect.min.y),
+                egui::pos2(content_left + 8.0, messages_rect.max.y),
+                egui::pos2(content_left + content_width, composer_rect.min.y),
             );
             ui.scope_builder(egui::UiBuilder::new().max_rect(typing_rect), |ui| {
                 ui.label(
@@ -79,11 +171,29 @@ impl ChattyApp {
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    ui.add_space(12.0);
+                    ui.add_space(24.0);
                     if self.selected_conversation.is_none() {
                         ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() * 0.3);
-                            if ui.button("Continue").clicked() {
+                            ui.add_space(ui.available_height() * 0.32);
+                            ui.heading(egui::RichText::new("Who will you meet today?").size(24.0));
+                            ui.label(
+                                egui::RichText::new(
+                                    "Pick a character, set the scene, and start a conversation.",
+                                )
+                                .weak(),
+                            );
+                            ui.add_space(16.0);
+                            if ui
+                                .add_sized(
+                                    [168.0, 42.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Start a new chat").strong(),
+                                    )
+                                    .fill(COLOR_PRIMARY_STRONG)
+                                    .corner_radius(11.0),
+                                )
+                                .clicked()
+                            {
                                 self.new_chat_open = true;
                             }
                         });
@@ -91,11 +201,11 @@ impl ChattyApp {
                     }
                     for message in self.messages.clone() {
                         ui.push_id(&message.id, |ui| self.render_message(ui, &message));
-                        ui.add_space(14.0);
+                        ui.add_space(18.0);
                     }
                     if !self.stream_text.is_empty() {
                         let name = self.character_name(self.typing_character.as_deref());
-                        ui.strong(egui::RichText::new(name).size(20.0));
+                        ui.strong(egui::RichText::new(name).size(16.0));
                         let text = self.stream_text.clone();
                         self.render_markdown(ui, &text);
                     }
@@ -108,25 +218,29 @@ impl ChattyApp {
             if user {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(48, 52, 65))
+                        .fill(COLOR_PRIMARY_STRONG)
                         .corner_radius(16.0)
-                        .inner_margin(egui::Margin::symmetric(13, 9))
+                        .inner_margin(egui::Margin::symmetric(15, 10))
                         .show(ui, |ui| {
-                            ui.set_max_width((ui.available_width() * 0.72).max(120.0));
+                            ui.set_max_width((ui.available_width() * 0.72).clamp(150.0, 620.0));
                             ui.label(&message.content);
                         });
                 });
             } else {
-                ui.horizontal(|ui| {
-                    ui.strong(
-                        egui::RichText::new(self.character_name(message.author_id.as_deref()))
-                            .size(20.0),
-                    );
-                    if ui.small_button("↻").on_hover_text("Regenerate").clicked() {
-                        self.regenerate(message);
-                    }
+                let name = self.character_name(message.author_id.as_deref());
+                ui.horizontal_top(|ui| {
+                    Self::avatar(ui, &name, 34.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(&name)
+                                .size(14.0)
+                                .strong()
+                                .color(color_primary_text(ui)),
+                        );
+                        ui.add_space(1.0);
+                        self.render_markdown(ui, &message.content);
+                    });
                 });
-                self.render_markdown(ui, &message.content);
             }
         });
         let message_rect = rendered.response.rect;
@@ -134,16 +248,30 @@ impl ChattyApp {
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|pointer| message_rect.contains(pointer));
         let delete_rect = egui::Rect::from_min_size(
-            egui::pos2(message_rect.right() - 26.0, message_rect.top()),
-            egui::vec2(24.0, 24.0),
+            egui::pos2(message_rect.right() - 20.0, message_rect.top()),
+            egui::vec2(18.0, 24.0),
         );
-        if hovered
-            && ui
+        if hovered {
+            if !user {
+                let regenerate_rect = delete_rect.translate(egui::vec2(-18.0, 1.0));
+                if ui
+                    .put(
+                        regenerate_rect,
+                        egui::Button::new(egui::RichText::new("↻").size(8.0)).frame(false),
+                    )
+                    .on_hover_text("Regenerate response")
+                    .clicked()
+                {
+                    self.regenerate(message);
+                }
+            }
+            if ui
                 .put(delete_rect, egui::Button::new("×").frame(false))
                 .on_hover_text("Delete")
                 .clicked()
-        {
-            self.delete_message(&message.id);
+            {
+                self.delete_message(&message.id);
+            }
         }
     }
     fn delete_message(&self, id: &str) {
@@ -204,87 +332,129 @@ impl ChattyApp {
     }
     pub(super) fn render_new_chat_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.new_chat_open;
+        let mut conversation_created = false;
         let max_height = Self::popup_max_height(ctx);
+        let dialog_width = (ctx.content_rect().width() - 32.0).clamp(300.0, 520.0);
         egui::Window::new("New chat")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(480.0)
+            .default_width(dialog_width)
+            .max_width(dialog_width)
             .max_height(max_height)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("new-chat-popup-content")
-                    .max_height((max_height - 48.0).max(80.0))
+                    .max_height((max_height - 118.0).max(120.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.label("Title");
-                        ui.text_edit_singleline(&mut self.new_conversation_title);
-                        ui.label("Characters");
+                        ui.label(
+                            egui::RichText::new("Choose a character for a private chat.").weak(),
+                        );
+                        ui.add_space(16.0);
+                        ui.label(egui::RichText::new("CONVERSATION NAME").size(11.0).weak());
+                        ui.add_sized(
+                            [ui.available_width(), 42.0],
+                            egui::TextEdit::singleline(&mut self.new_conversation_title)
+                                .hint_text("Optional — we can name it for you"),
+                        );
+                        ui.add_space(14.0);
+                        ui.label(egui::RichText::new("CHARACTERS").size(11.0).weak());
+                        ui.add_space(4.0);
                         for c in &self.characters {
-                            let mut selected = self.selected_characters.contains(&c.id);
-                            if ui.checkbox(&mut selected, &c.name).changed() {
-                                if selected {
-                                    self.selected_characters.insert(c.id.clone());
+                            let selected = self.selected_characters.contains(&c.id);
+                            let mut selector_clicked = false;
+                            let response = egui::Frame::new()
+                                .fill(if selected {
+                                    egui::Color32::from_rgb(40, 43, 75)
                                 } else {
-                                    self.selected_characters.remove(&c.id);
-                                }
-                            }
-                        }
-                        if self.selected_characters.len() > 1 {
-                            egui::ComboBox::from_label("Mode")
-                                .selected_text(match self.new_conversation_kind {
-                                    ConversationKind::GroupManual => "Manual",
-                                    ConversationKind::GroupRoundRobin => "Round robin",
-                                    ConversationKind::GroupAutomatic => "Automatic",
-                                    _ => "Manual",
+                                    color_surface_raised(ui)
                                 })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.new_conversation_kind,
-                                        ConversationKind::GroupManual,
-                                        "Manual",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.new_conversation_kind,
-                                        ConversationKind::GroupRoundRobin,
-                                        "Round robin",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.new_conversation_kind,
-                                        ConversationKind::GroupAutomatic,
-                                        "Automatic",
-                                    );
-                                });
-                        }
-                        if ui.button("Create").clicked() {
-                            let ids = self.selected_characters.iter().cloned().collect::<Vec<_>>();
-                            let kind = if ids.len() > 1 {
-                                self.new_conversation_kind
-                            } else {
-                                ConversationKind::Direct
-                            };
-                            let title = if self.new_conversation_title.trim().is_empty() {
-                                self.characters
-                                    .iter()
-                                    .find(|c| ids.contains(&c.id))
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_else(|| "New chat".into())
-                            } else {
-                                self.new_conversation_title.clone()
-                            };
-                            self.send(Request::CreateConversation {
-                                session_token: self.token.clone(),
-                                title,
-                                kind,
-                                participant_ids: ids,
-                            });
-                            self.new_chat_open = false;
-                            self.new_conversation_title.clear();
-                            self.selected_characters.clear();
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    if selected {
+                                        COLOR_PRIMARY
+                                    } else {
+                                        color_border(ui)
+                                    },
+                                ))
+                                .corner_radius(12.0)
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        Self::avatar(ui, &c.name, 34.0);
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new(&c.name).strong());
+                                            let summary = if c.personality.trim().is_empty() {
+                                                "Ready to chat"
+                                            } else {
+                                                c.personality.as_str()
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(summary).size(12.0).weak(),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                selector_clicked = ui
+                                                    .radio(selected, "")
+                                                    .on_hover_text(format!(
+                                                        "Start a private chat with {}",
+                                                        c.name
+                                                    ))
+                                                    .clicked();
+                                            },
+                                        );
+                                    });
+                                })
+                                .response
+                                .interact(egui::Sense::click());
+                            if response.clicked() || selector_clicked {
+                                self.selected_characters.clear();
+                                self.selected_characters.insert(c.id.clone());
+                            }
+                            ui.add_space(6.0);
                         }
                     });
+                ui.add_space(12.0);
+                let ready = !self.selected_characters.is_empty();
+                let create = ui.add_enabled(
+                    ready,
+                    egui::Button::new(egui::RichText::new("Create conversation").strong())
+                        .fill(COLOR_PRIMARY_STRONG)
+                        .corner_radius(11.0)
+                        .min_size(egui::vec2(ui.available_width(), 44.0)),
+                );
+                if create.clicked() {
+                    let ids = self
+                        .selected_characters
+                        .iter()
+                        .next()
+                        .cloned()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let title = if self.new_conversation_title.trim().is_empty() {
+                        self.characters
+                            .iter()
+                            .find(|c| ids.contains(&c.id))
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| "New chat".into())
+                    } else {
+                        self.new_conversation_title.clone()
+                    };
+                    self.send(Request::CreateConversation {
+                        session_token: self.token.clone(),
+                        title,
+                        kind: ConversationKind::Direct,
+                        participant_ids: ids,
+                    });
+                    conversation_created = true;
+                    self.new_conversation_title.clear();
+                    self.selected_characters.clear();
+                }
             });
-        self.new_chat_open = open;
+        self.new_chat_open = open && !conversation_created;
     }
 }

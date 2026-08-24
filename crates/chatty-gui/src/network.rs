@@ -71,6 +71,37 @@ fn save_session(path: &PathBuf, token: &str) {
     }
 }
 
+pub(super) fn load_session(path: &PathBuf) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+}
+
+pub(super) fn preferences_path(session_path: &std::path::Path) -> PathBuf {
+    session_path.with_extension("preferences")
+}
+
+pub(super) fn load_light_mode(path: &std::path::Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|value| value.lines().any(|line| line.trim() == "theme=light"))
+}
+
+pub(super) fn load_glass_mode(path: &std::path::Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|value| value.lines().any(|line| line.trim() == "surface=glass"))
+}
+
+pub(super) fn save_preferences(path: &std::path::Path, light_mode: bool, glass_mode: bool) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let theme = if light_mode { "light" } else { "dark" };
+    let surface = if glass_mode { "glass" } else { "solid" };
+    let _ = fs::write(path, format!("theme={theme}\nsurface={surface}\n"));
+}
+
 async fn connect(args: &Args) -> Result<TlsStream<TcpStream>> {
     let mut roots = RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut BufReader::new(File::open(&args.ca)?)) {
@@ -99,6 +130,7 @@ async fn connect(args: &Args) -> Result<TlsStream<TcpStream>> {
 
 pub(super) async fn run(
     args: Args,
+    mut remembered: Option<String>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: std::sync::mpsc::Sender<Event>,
 ) {
@@ -112,14 +144,8 @@ pub(super) async fn run(
             return;
         }
     };
-    let mut remembered = if args.inspect {
-        None
-    } else {
-        fs::read_to_string(&path)
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    };
     let mut next_id = 1u64;
+    let mut signed_out_through_request = None;
     loop {
         let _ = events.send(Event::Status("Connecting…".into()));
         let mut stream = match connect(&args).await {
@@ -158,7 +184,15 @@ pub(super) async fn run(
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
-                    Some(Command::Request(request)) => { next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*request).await.is_err() { break; } }
+                    Some(Command::Request(request)) => {
+                        next_id += 1;
+                        if matches!(&*request, Request::Logout { .. }) {
+                            remembered = None;
+                            signed_out_through_request = Some(next_id);
+                            let _ = fs::remove_file(&path);
+                        }
+                        if write_message(&mut stream, MessageType::Request, next_id, &*request).await.is_err() { break; }
+                    }
                     Some(Command::SendThenGenerate { message, generate }) => { next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*message).await.is_err() { break; } next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*generate).await.is_err() { break; } }
                     Some(Command::Cancel(id)) => if write_payload(&mut stream, MessageType::Cancel, id, vec![]).await.is_err() { break; },
                     Some(Command::Reconnect) => {
@@ -166,13 +200,20 @@ pub(super) async fn run(
                         tokio::time::sleep(Duration::from_millis(300)).await;
                         break;
                     }
-                    Some(Command::ClearSession) => { remembered = None; let _ = fs::remove_file(&path); }
+                    Some(Command::ClearSession) => {
+                        remembered = None;
+                        signed_out_through_request = Some(next_id);
+                        let _ = fs::remove_file(&path);
+                    }
                     Some(Command::Stop) | None => return,
                 },
                 result = read_frame(&mut stream) => match result {
                     Ok(frame) => {
-                        if frame.message_type == MessageType::Response { if let Ok(Response::Authenticated { session_token, .. }) = decode::<Response>(&frame.payload) { remembered = Some(session_token.clone()); if !args.inspect { save_session(&path, &session_token); } } }
-                        if frame.message_type == MessageType::Error { if let Ok(error) = decode::<WireError>(&frame.payload) { if matches!(error.code, ErrorCode::Unauthorized) { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } } }
+                        if frame.message_type == MessageType::Response { if let Ok(Response::Authenticated { session_token, .. }) = decode::<Response>(&frame.payload) { remembered = Some(session_token.clone()); signed_out_through_request = None; if !args.inspect { save_session(&path, &session_token); } } }
+                        if frame.message_type == MessageType::Error { if let Ok(error) = decode::<WireError>(&frame.payload) { if matches!(error.code, ErrorCode::Unauthorized) && remembered.is_some() { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } } }
+                        if is_expected_post_logout_unauthorized(&frame, signed_out_through_request) {
+                            continue;
+                        }
                         if events.send(Event::Frame(frame)).is_err() { return; }
                     }
                     Err(e) => {
@@ -188,9 +229,20 @@ pub(super) async fn run(
     }
 }
 
+fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> bool {
+    frame.message_type == MessageType::Error
+        && cutoff.is_some_and(|request_id| frame.request_id <= request_id)
+        && decode::<WireError>(&frame.payload)
+            .is_ok_and(|error| matches!(error.code, ErrorCode::Unauthorized))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::default_session_path;
+    use super::{
+        default_session_path, is_expected_post_logout_unauthorized, load_glass_mode,
+        load_light_mode, save_preferences,
+    };
+    use chatty_protocol::{ErrorCode, Frame, MessageType, WireError, encode};
     use std::path::PathBuf;
 
     #[test]
@@ -233,5 +285,41 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn unauthorized_from_pre_logout_request_is_expected() {
+        let frame = Frame {
+            compressed: false,
+            message_type: MessageType::Error,
+            request_id: 12,
+            payload: encode(&WireError {
+                code: ErrorCode::Unauthorized,
+                message: "unauthorized".into(),
+                retryable: false,
+            })
+            .unwrap(),
+        };
+
+        assert!(is_expected_post_logout_unauthorized(&frame, Some(12)));
+        assert!(!is_expected_post_logout_unauthorized(&frame, Some(11)));
+        assert!(!is_expected_post_logout_unauthorized(&frame, None));
+    }
+
+    #[test]
+    fn appearance_preferences_round_trip_together() {
+        let path = std::env::temp_dir().join(format!(
+            "chatty-appearance-preferences-{}",
+            std::process::id()
+        ));
+
+        save_preferences(&path, true, true);
+        assert!(load_light_mode(&path));
+        assert!(load_glass_mode(&path));
+
+        save_preferences(&path, false, false);
+        assert!(!load_light_mode(&path));
+        assert!(!load_glass_mode(&path));
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -1,79 +1,105 @@
 # Chatty
 
-Chatty is a small native Rust roleplay platform: a TLS-only broker, native GUI and terminal clients, and an external OpenAI-compatible llama.cpp server. The broker owns persistence and RP orchestration; it never embeds inference.
+Chatty is a Linux-focused native Rust application for persistent AI character roleplay. It consists of a TLS-only broker, an `egui` desktop client, a shared binary protocol, SQLite persistence, and an external inference service. The broker owns authentication, data, prompt assembly, streaming, and administration; model inference stays in Ollama or another OpenAI-compatible server.
 
-For a complete cold-start description of the implementation, UI, admin controls, verification state, constraints and next work, read [the handoff](docs/HANDOFF.md). The preserved project brief and requirement-by-requirement comparison are in [the original-plan audit](docs/ORIGINAL-PLAN-AUDIT.md).
+## Current state
+
+Chatty is a working pre-release application (`0.1.0`), not a packaged end-user release. The current workspace contains:
+
+- `chatty-broker`: the multi-user TLS service and inference adapter
+- `chatty-gui`: the responsive native desktop client
+- `chatty-protocol`: shared framing, request/response, delta, and compression types
+- `chatty-mock-llama`: a test-only inference backend
+
+There is currently no terminal client in the workspace. Some older documents and network-test scripts still refer to the removed `chatty-client` binary and should be treated as historical until they are updated.
+
+The desktop client currently supports:
+
+- account registration, login, saved sessions, logout, admin/user roles, and tenant-isolated data
+- character card creation/editing, SillyTavern JSON/PNG import, JSON export, tags, and public sharing
+- private one-character conversations with automatic titles
+- streamed and cancellable generation, response regeneration/deletion, and Markdown rendering
+- automatic chat naming, reconnect/resume, and live state deltas across a user's connected clients
+- a responsive desktop layout with compact navigation plus persistent dark/light and solid/glass appearance preferences
+- per-account prompt/completion token totals; admins can also see totals for each user
+- broker monitoring, persisted generation settings, registration/publishing policy, user management, sanitized metadata inspection, and Ollama model pull/load/unload/delete controls
+
+The latest in-tree work refreshes the GUI, adds usage accounting across generation, speaker selection, memory extraction, and automatic naming, hardens sign-out/session restoration, and treats a concurrently deleted conversation as an expected empty result.
+
+The broker and protocol also implement group modes, message variants/swipes, lore, scoped memories, world state, summaries, and system messages. The refreshed GUI does not currently expose those workflows and deliberately hides group conversations. They require a future GUI pass (or another protocol client) before they are usable from the shipped desktop interface.
 
 ## Quick start
 
-Prerequisites: Rust, OpenSSL (certificate creation), SQLite, and a running `llama-server`.
+Prerequisites:
 
-To build anything missing and launch the broker plus GUI together:
+- a current Rust toolchain
+- OpenSSL, used by the development certificate script
+- an Ollama server or another OpenAI-compatible chat-completions server
+- Linux desktop libraries required by `eframe`/`egui`
+
+To create development certificates, build release binaries, start the broker, and launch the GUI:
 
 ```sh
 ./start-chatty.sh
 ```
 
-Closing the GUI also stops the broker. Per-user files follow the Linux XDG Base
-Directory Specification in debug and release builds:
+The launcher defaults to `http://192.168.0.97:11434/v1` for inference. Override that for a local Ollama installation, for example:
 
-- database: `$XDG_DATA_HOME/chatty/chatty.db` or `~/.local/share/chatty/chatty.db`
-- session: `$XDG_STATE_HOME/chatty/session` or `~/.local/state/chatty/session`
-- launcher log: `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log`
+```sh
+CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 ./start-chatty.sh
+```
 
-The launcher copies a legacy `.chatty/chatty.db` into the XDG data directory on
-first use and leaves the original as a backup. Existing `CHATTY_*` environment
-variables override the defaults.
+Closing the GUI stops the broker started by the launcher. The first account registered against a new database becomes an administrator. Passwords must contain at least ten characters.
+
+To run the components separately:
 
 ```sh
 ./scripts/create-dev-cert.sh
-cargo build --release
-CHATTY_LLAMA_URL=http://192.168.0.97:11434/v1 cargo run --release -p chatty-broker
-cargo run --release -p chatty-client
+cargo build --release --workspace
+CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 cargo run --release -p chatty-broker
 cargo run --release -p chatty-gui
 ```
 
-The certificate script pins `localhost` and `127.0.0.1`. Copy only `certs/ca.pem` to each client through a trusted channel and pass it with `--ca`; clients trust only that local CA and do not accept insecure TLS. Keep `ca.key` offline in real deployments and set `--server-name` to a SAN in the deployed certificate.
+The development certificate covers `localhost` and `127.0.0.1`. For a remote deployment, distribute only `certs/ca.pem` to clients through a trusted channel, keep `ca.key` offline, and issue a server certificate whose SAN matches `CHATTY_SERVER_NAME`. Clients pin the configured CA and have no insecure TLS mode.
 
-Both native clients maintain one connection and automatically reconnect/resume after an outage. The GUI covers accounts and admin roles, complete character cards, SillyTavern import/JSON export, public sharing, direct/group conversations, messages, Markdown, lore, memory, swipes, streamed generation, cancellation and CRUD actions. Admins can persist adapter/policy configuration, manage Ollama models and runtime allocation, manage users, override character visibility and inspect sanitized non-chat metadata. The first registered account becomes admin. Passwords must be at least ten characters. Runtime messages use bincode; stream/delta frames are always zstd-compressed, as are other payloads of at least 256 bytes. The current wire contract is protocol version 9.
+## Configuration and local data
 
-Selected commands:
+Broker settings can be supplied as flags or environment variables:
 
-```text
-help
-register USER PASSWORD
-login USER PASSWORD
-users
-role USER_ID admin|user
-useradd USER PASSWORD user|admin
-userdel USER_ID
-char NAME
-charfull ID|-|NAME|PERSONALITY|SCENARIO|SYSTEM|EXAMPLE|APPEARANCE|TAG,TAG|AVATAR_PATH|-
-conversation TITLE CHARACTER_ID
-conversation-update CONVERSATION_ID TITLE|CHARACTER_ID,CHARACTER_ID
-group manual|round|auto TITLE|CHARACTER_ID,CHARACTER_ID
-state CONVERSATION_ID WORLD_STATE|SUMMARY
-send CONVERSATION_ID TEXT
-speak CONVERSATION_ID CHARACTER_ID TEXT
-system CONVERSATION_ID TEXT
-generate CONVERSATION_ID [CHARACTER_ID]
-swipe CONVERSATION_ID PARENT_MESSAGE_ID
-select MESSAGE_ID VARIANT_ID
-lore CONVERSATION_ID|- KEY,KEY|CONTENT
-lorefull ID|-|CONVERSATION|-|ALWAYS_TRUE_OR_FALSE|PRIORITY|KEY,KEY|CONTENT
-memory CONVERSATION_ID|- CONTENT
-memoryfull ID|-|CONVERSATION|-|CHARACTER|-|CONTENT
-memory-extract CONVERSATION_ID CHARACTER_ID|-
-delete character|conversation|message|lore|memory ENTITY_ID
+| Variable | Purpose | Default |
+|---|---|---|
+| `CHATTY_LISTEN` | Broker listen address | launcher: `127.0.0.1:7443`; broker alone: `0.0.0.0:7443` |
+| `CHATTY_DATABASE` | SQLite connection URL | XDG data directory |
+| `CHATTY_CERT` | Server certificate | `certs/server.pem` |
+| `CHATTY_KEY` | Server private key | `certs/server.key` |
+| `CHATTY_LLAMA_URL` | Initial inference endpoint for a new database | `http://192.168.0.97:11434/v1` |
+
+GUI variables are `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_CA`, and `CHATTY_SESSION_FILE`. The launcher additionally accepts `CHATTY_LOG_FILE`.
+
+The inference URL only seeds a new database. After first launch, an administrator can change the persisted adapter URL, provider mode, model, generation defaults, and access policies from the Admin dialog.
+
+Default per-user files follow the XDG Base Directory Specification:
+
+- database: `$XDG_DATA_HOME/chatty/chatty.db` or `~/.local/share/chatty/chatty.db`
+- saved session and appearance preferences: `$XDG_STATE_HOME/chatty/` or `~/.local/state/chatty/`
+- launcher log: `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log`
+
+On first use, the launcher copies a legacy `.chatty/chatty.db` and its SQLite sidecar files into the XDG data directory while leaving the originals in place as a backup.
+
+## Protocol and security
+
+Chatty uses TLS 1.3 and a persistent connection. The initial handshake is JSON; runtime payloads use bincode 2. Stream and delta frames are always zstd-compressed, as are other payloads of at least 256 bytes. Frames are bounded to 8 MiB, writer queues are bounded for backpressure, and streamed model output is batched before transmission. The current wire contract is protocol version 9.
+
+Passwords are hashed with Argon2. Authorization and ownership checks are enforced by the broker, and state deltas are scoped to other authenticated connections belonging to the same account. Admin metadata views intentionally exclude password hashes, session tokens, messages, and conversation content.
+
+## Development
+
+Run the current automated suite with:
+
+```sh
+cargo test --workspace
 ```
 
-Authentication performs one explicit typed snapshot. After that, reconnects request only deltas newer than the client's revision cursor.
-Mutations are also pushed immediately to every other authenticated connection owned by the same account. Other accounts never receive those deltas.
+The suite covers protocol framing/compression, bounded decoding and streaming, broker authorization and tenant isolation, token accounting, reconnect/session behavior, delta application, and responsive GUI rendering. Visual GUI tests write inspection images under `/tmp`.
 
-## Configuration
-
-Broker flags have matching environment variables: `CHATTY_LISTEN`, `CHATTY_DATABASE`, `CHATTY_CERT`, `CHATTY_KEY`, and `CHATTY_LLAMA_URL`. The launcher also accepts `CHATTY_LOG_FILE`. Client variables are `CHATTY_BROKER`, `CHATTY_SERVER_NAME`, `CHATTY_CA`, and optional `CHATTY_SESSION_FILE`.
-
-`CHATTY_LLAMA_URL` seeds persistent broker settings on a new database. Admins can later change the adapter URL/enabled state, provider mode, selected model, generation defaults, self-registration policy and non-admin publishing policy in the GUI. The Ollama tab uses the broker-side adaptor to show the server version and installed/running models and to pull, load, unload, or delete models. Disabling registration removes the GUI Register action and is independently enforced by the broker; admin-created accounts remain available.
-
-Run `cargo test --workspace` for framing, compression ratio, fragmentation, decompression limits, SSE integrity, GUI delta application, tenant isolation, and bounded streaming stress. The executable verification harnesses are `scripts/userspace-network-test.sh`, `scripts/multiclient-test.sh`, and `scripts/stream-soak-test.sh`; the privileged kernel-netem variants are documented in [operations](docs/OPERATIONS.md). See [architecture](docs/architecture/ARCHITECTURE.md) for system boundaries.
+Useful design and operational background lives in [the architecture](docs/architecture/ARCHITECTURE.md), [operations notes](docs/OPERATIONS.md), [the implementation handoff](docs/HANDOFF.md), and [the original-plan audit](docs/ORIGINAL-PLAN-AUDIT.md). Those documents predate the removal of the terminal client in places; this README and the current source tree describe the runnable workspace.

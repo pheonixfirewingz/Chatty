@@ -230,6 +230,9 @@ pub enum Request {
         conversation_id: String,
         character_id: Option<String>,
     },
+    GetAccountUsage {
+        session_token: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -271,6 +274,12 @@ pub enum Response {
         cancelled: bool,
     },
     Pong,
+    /// The requested conversation disappeared before it could be opened.
+    /// This is an expected read outcome, not a protocol error.
+    ConversationNotFound {
+        conversation_id: String,
+    },
+    AccountUsage(TokenUsage),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -508,6 +517,19 @@ pub struct UserAccount {
     pub username: String,
     pub role: Role,
     pub created_at: String,
+    pub usage: TokenUsage,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn total(self) -> u64 {
+        self.prompt_tokens.saturating_add(self.completion_tokens)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

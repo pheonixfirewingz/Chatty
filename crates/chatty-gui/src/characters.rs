@@ -23,18 +23,20 @@ impl ChattyApp {
     pub(super) fn render_character_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.draft_character_open;
         let max_height = Self::popup_max_height(ctx);
+        let dialog_width = (ctx.content_rect().width() - 32.0).clamp(360.0, 920.0);
         egui::Window::new("Characters")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size([850.0, max_height.min(620.0)])
+            .default_size([dialog_width, max_height.min(700.0)])
+            .max_width(dialog_width)
             .max_height(max_height)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                let compact = ui.available_width() < 650.0;
+                let compact = ui.available_width() < 700.0;
                 let pane_height = (max_height - 48.0).max(80.0);
                 if compact {
-                    let list_height = pane_height * 0.2;
+                    let list_height = (pane_height * 0.24).clamp(96.0, 150.0);
                     egui::ScrollArea::vertical()
                         .id_salt("character-list-pane")
                         .max_height(list_height)
@@ -48,7 +50,7 @@ impl ChattyApp {
                         .show(ui, |ui| self.character_editor(ui));
                 } else {
                     let total_width = ui.available_width();
-                    let list_width = (total_width - 12.0) * 0.2;
+                    let list_width = ((total_width - 12.0) * 0.24).clamp(190.0, 250.0);
                     ui.horizontal(|ui| {
                         ui.allocate_ui_with_layout(
                             egui::vec2(list_width, pane_height),
@@ -102,32 +104,45 @@ impl ChattyApp {
         }
     }
     fn character_editor(&mut self, ui: &mut egui::Ui) {
-        ui.heading(if self.draft.id.is_some() {
-            "Edit"
-        } else {
-            "Create"
+        let can_edit = self.draft.owned_by_user;
+        ui.heading(match (self.draft.id.is_some(), can_edit) {
+            (false, _) => "Create character",
+            (true, true) => "Edit character",
+            (true, false) => "View character",
         });
+        if !can_edit {
+            ui.label("Public character · Only the owner can edit it.");
+        }
         self.character_actions(ui);
         ui.separator();
-        ui.label("Name");
-        ui.add(egui::TextEdit::singleline(&mut self.draft.name).desired_width(f32::INFINITY));
-        ui.label("Personality");
-        ui.add(egui::TextEdit::multiline(&mut self.draft.personality).desired_width(f32::INFINITY));
-        ui.label("Appearance");
-        ui.add(egui::TextEdit::multiline(&mut self.draft.appearance).desired_width(f32::INFINITY));
-        ui.label("Scenario");
-        ui.add(egui::TextEdit::multiline(&mut self.draft.scenario).desired_width(f32::INFINITY));
-        ui.label("System prompt");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.draft.system_prompt).desired_width(f32::INFINITY),
-        );
-        ui.label("Example dialogue");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.draft.example_dialogue)
-                .desired_width(f32::INFINITY),
-        );
-        ui.label("Tags");
-        ui.add(egui::TextEdit::singleline(&mut self.draft.tags).desired_width(f32::INFINITY));
+        ui.add_enabled_ui(can_edit, |ui| {
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut self.draft.name).desired_width(f32::INFINITY));
+            ui.label("Personality");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.draft.personality).desired_width(f32::INFINITY),
+            );
+            ui.label("Appearance");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.draft.appearance).desired_width(f32::INFINITY),
+            );
+            ui.label("Scenario");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.draft.scenario).desired_width(f32::INFINITY),
+            );
+            ui.label("System prompt");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.draft.system_prompt)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.label("Example dialogue");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.draft.example_dialogue)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.label("Tags");
+            ui.add(egui::TextEdit::singleline(&mut self.draft.tags).desired_width(f32::INFINITY));
+        });
     }
     fn character_actions(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
@@ -137,11 +152,6 @@ impl ChattyApp {
                     self.selected_characters.insert(id);
                     self.new_chat_open = true;
                     self.draft_character_open = false;
-                }
-            }
-            if ui.button("Use").clicked() {
-                if let Some(id) = self.draft.id.clone() {
-                    self.selected_characters.insert(id);
                 }
             }
             if self.draft.owned_by_user {

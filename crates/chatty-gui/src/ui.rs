@@ -2,7 +2,162 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum FooterIcon {
+    Characters,
+    Admin,
+    Settings,
+    SignOut,
+}
+
 impl ChattyApp {
+    pub(super) fn footer_icon_button(
+        ui: &mut egui::Ui,
+        icon: FooterIcon,
+        label: &'static str,
+    ) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.style().interact(&response);
+            ui.painter().rect(
+                rect,
+                8.0,
+                visuals.weak_bg_fill,
+                visuals.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+            let center = rect.center();
+            let stroke = egui::Stroke::new(1.8, visuals.fg_stroke.color);
+            let painter = ui.painter();
+            match icon {
+                FooterIcon::Characters => {
+                    painter.circle_stroke(center + egui::vec2(-5.0, -5.0), 3.5, stroke);
+                    painter.circle_stroke(center + egui::vec2(5.0, -3.0), 3.0, stroke);
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-11.0, 7.0),
+                            center + egui::vec2(1.0, 7.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(1.0, 7.0),
+                            center + egui::vec2(10.0, 7.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-11.0, 7.0),
+                            center + egui::vec2(-8.0, 2.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(10.0, 7.0),
+                            center + egui::vec2(7.0, 2.0),
+                        ],
+                        stroke,
+                    );
+                }
+                FooterIcon::Admin => {
+                    let points = [
+                        center + egui::vec2(0.0, -10.0),
+                        center + egui::vec2(8.0, -6.0),
+                        center + egui::vec2(7.0, 3.0),
+                        center + egui::vec2(0.0, 10.0),
+                        center + egui::vec2(-7.0, 3.0),
+                        center + egui::vec2(-8.0, -6.0),
+                        center + egui::vec2(0.0, -10.0),
+                    ];
+                    painter.add(egui::Shape::line(points.to_vec(), stroke));
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-4.0, 0.0),
+                            center + egui::vec2(-1.0, 3.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-1.0, 3.0),
+                            center + egui::vec2(5.0, -3.0),
+                        ],
+                        stroke,
+                    );
+                }
+                FooterIcon::Settings => {
+                    painter.circle_stroke(center, 5.0, stroke);
+                    painter.circle_stroke(center, 1.5, stroke);
+                    for direction in [
+                        egui::vec2(0.0, -1.0),
+                        egui::vec2(0.707, -0.707),
+                        egui::vec2(1.0, 0.0),
+                        egui::vec2(0.707, 0.707),
+                        egui::vec2(0.0, 1.0),
+                        egui::vec2(-0.707, 0.707),
+                        egui::vec2(-1.0, 0.0),
+                        egui::vec2(-0.707, -0.707),
+                    ] {
+                        painter.line_segment(
+                            [center + direction * 7.0, center + direction * 10.0],
+                            stroke,
+                        );
+                    }
+                }
+                FooterIcon::SignOut => {
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-9.0, -9.0),
+                            center + egui::vec2(-9.0, 9.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-9.0, -9.0),
+                            center + egui::vec2(-2.0, -9.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-9.0, 9.0),
+                            center + egui::vec2(-2.0, 9.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-4.0, 0.0),
+                            center + egui::vec2(9.0, 0.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(5.0, -4.0),
+                            center + egui::vec2(9.0, 0.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [center + egui::vec2(5.0, 4.0), center + egui::vec2(9.0, 0.0)],
+                        stroke,
+                    );
+                }
+            }
+        }
+
+        response.on_hover_text(label)
+    }
+
     pub(super) fn popup_max_height(ctx: &egui::Context) -> f32 {
         ctx.content_rect().height() * 0.75
     }

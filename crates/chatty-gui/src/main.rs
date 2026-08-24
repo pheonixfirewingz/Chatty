@@ -23,6 +23,63 @@ mod conversation;
 mod network;
 mod ui;
 use network::{Command, Event};
+use ui::FooterIcon;
+
+const COLOR_PRIMARY: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);
+const COLOR_PRIMARY_STRONG: egui::Color32 = egui::Color32::from_rgb(79, 70, 229);
+
+fn color_surface(ui: &egui::Ui) -> egui::Color32 {
+    ui.visuals().window_fill
+}
+
+fn color_surface_raised(ui: &egui::Ui) -> egui::Color32 {
+    ui.visuals().faint_bg_color
+}
+
+fn color_border(ui: &egui::Ui) -> egui::Color32 {
+    ui.visuals().widgets.noninteractive.bg_stroke.color
+}
+
+fn color_primary_text(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(199, 210, 254)
+    } else {
+        egui::Color32::from_rgb(49, 46, 129)
+    }
+}
+
+fn paint_glass_background(ui: &egui::Ui, light_mode: bool) {
+    let rect = ui.max_rect();
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        0.0,
+        if light_mode {
+            egui::Color32::from_rgba_unmultiplied(226, 232, 248, 175)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(4, 8, 18, 205)
+        },
+    );
+    let radius = rect.width().min(rect.height()) * 0.34;
+    painter.circle_filled(
+        egui::pos2(rect.right() - radius * 0.25, rect.top() + radius * 0.2),
+        radius,
+        if light_mode {
+            egui::Color32::from_rgba_unmultiplied(99, 102, 241, 42)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(79, 70, 229, 70)
+        },
+    );
+    painter.circle_filled(
+        egui::pos2(rect.left() + radius * 0.3, rect.bottom() - radius * 0.1),
+        radius * 0.8,
+        if light_mode {
+            egui::Color32::from_rgba_unmultiplied(14, 165, 233, 34)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(14, 165, 233, 48)
+        },
+    );
+}
 
 #[derive(Parser, Clone)]
 struct Args {
@@ -50,11 +107,21 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("failed to install TLS provider"))?;
     let mut args = Args::parse();
     let inspect = args.inspect;
+    let mut remembered_session = None;
     if !inspect {
         // Resolve this before starting eframe so debug and release launches use
         // the same absolute XDG state path and never fall back to the cwd.
         args.session_file = Some(network::session_path(&args)?);
+        remembered_session = args.session_file.as_ref().and_then(network::load_session);
     }
+    let restoring_session = remembered_session.is_some();
+    let preferences_path = args.session_file.as_deref().map(network::preferences_path);
+    let light_mode = preferences_path
+        .as_deref()
+        .is_some_and(network::load_light_mode);
+    let glass_mode = preferences_path
+        .as_deref()
+        .is_some_and(network::load_glass_mode);
     let size = [args.width, args.height];
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -66,13 +133,13 @@ fn main() -> Result<()> {
                     .enable_all()
                     .build()
                     .unwrap()
-                    .block_on(network::run(args, command_rx, event_tx))
+                    .block_on(network::run(args, remembered_session, command_rx, event_tx))
             })?;
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(size)
-            .with_min_inner_size([360.0, 520.0])
+            .with_min_inner_size([640.0, 480.0])
             .with_transparent(true),
         ..Default::default()
     };
@@ -80,10 +147,16 @@ fn main() -> Result<()> {
         "Chatty",
         options,
         Box::new(move |cc| {
-            configure_style(&cc.egui_ctx);
+            configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode);
             let mut app = ChattyApp::new(command_tx, event_rx);
+            app.light_mode = light_mode;
+            app.glass_mode = glass_mode;
+            app.preferences_path = preferences_path;
             if inspect {
                 app.load_inspection_demo();
+            } else if restoring_session {
+                app.restoring_session = true;
+                app.status = "Restoring saved session…".into();
             }
             Ok(Box::new(app))
         }),
@@ -91,17 +164,143 @@ fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-fn configure_style(ctx: &egui::Context) {
-    ctx.set_visuals(egui::Visuals {
-        panel_fill: egui::Color32::from_rgba_unmultiplied(13, 15, 20, 238),
-        window_fill: egui::Color32::from_rgba_unmultiplied(20, 23, 30, 242),
-        extreme_bg_color: egui::Color32::from_rgba_unmultiplied(8, 10, 14, 210),
-        ..egui::Visuals::dark()
-    });
-    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-    style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    ctx.set_style_of(egui::Theme::Dark, style);
+fn configure_style_with_surface(ctx: &egui::Context, light_mode: bool, glass_mode: bool) {
+    let mut visuals = if light_mode {
+        let mut visuals = egui::Visuals::light();
+        visuals.panel_fill = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(246, 248, 255, 205)
+        } else {
+            egui::Color32::from_rgb(246, 247, 251)
+        };
+        visuals.window_fill = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+        } else {
+            egui::Color32::WHITE
+        };
+        visuals.extreme_bg_color = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(230, 235, 247, 190)
+        } else {
+            egui::Color32::from_rgb(238, 240, 246)
+        };
+        visuals.faint_bg_color = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 125)
+        } else {
+            egui::Color32::from_rgb(235, 237, 245)
+        };
+        visuals.code_bg_color = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(238, 242, 252, 205)
+        } else {
+            egui::Color32::from_rgb(236, 238, 244)
+        };
+        visuals
+    } else {
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(10, 16, 29, 205)
+        } else {
+            egui::Color32::from_rgb(11, 15, 23)
+        };
+        visuals.window_fill = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(20, 29, 48, 220)
+        } else {
+            egui::Color32::from_rgb(17, 23, 34)
+        };
+        visuals.extreme_bg_color = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(7, 12, 23, 200)
+        } else {
+            egui::Color32::from_rgb(8, 12, 19)
+        };
+        visuals.faint_bg_color = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(65, 82, 122, 95)
+        } else {
+            egui::Color32::from_rgb(24, 32, 46)
+        };
+        visuals.code_bg_color = if glass_mode {
+            egui::Color32::from_rgba_unmultiplied(28, 40, 65, 205)
+        } else {
+            egui::Color32::from_rgb(20, 28, 41)
+        };
+        visuals
+    };
+    if glass_mode {
+        let subtle_fill = if light_mode {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 135)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(52, 66, 98, 135)
+        };
+        let border = if light_mode {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 210)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(176, 196, 235, 105)
+        };
+        visuals.widgets.noninteractive.bg_fill = subtle_fill;
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+        visuals.widgets.inactive.bg_fill = subtle_fill;
+        visuals.widgets.inactive.weak_bg_fill = subtle_fill;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+        visuals.widgets.hovered.bg_fill = if light_mode {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(83, 103, 150, 190)
+        };
+        visuals.widgets.hovered.weak_bg_fill = visuals.widgets.hovered.bg_fill;
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border);
+    }
+    visuals.selection.bg_fill = egui::Color32::from_rgb(37, 99, 235);
+    visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(191, 219, 254));
+    visuals.hyperlink_color = if light_mode {
+        egui::Color32::from_rgb(29, 78, 216)
+    } else {
+        egui::Color32::from_rgb(96, 165, 250)
+    };
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(37, 99, 235);
+    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(30, 64, 175);
+    visuals.widgets.active.bg_stroke =
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(96, 165, 250));
+    visuals.window_stroke = if glass_mode && light_mode {
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+        )
+    } else if glass_mode {
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(176, 196, 235, 115),
+        )
+    } else if light_mode {
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(203, 208, 220))
+    } else {
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 66, 86))
+    };
+    visuals.window_corner_radius = egui::CornerRadius::same(14);
+    visuals.weak_text_alpha = 0.74;
+    ctx.set_visuals(visuals);
+    let theme = if light_mode {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    let mut style = (*ctx.style_of(theme)).clone();
+    style.spacing.item_spacing = egui::vec2(10.0, 9.0);
+    style.spacing.button_padding = egui::vec2(14.0, 8.0);
+    style.spacing.interact_size.y = 36.0;
+    // Egui uses this margin on both sides of popup title text. Eight pixels
+    // trims the title bar from roughly 60 px to 44 px (about one quarter).
+    style.spacing.window_margin = egui::Margin::same(8);
+    style.visuals.menu_corner_radius = egui::CornerRadius::same(10);
+    style.text_styles.insert(
+        egui::TextStyle::Heading,
+        egui::FontId::new(24.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Body,
+        egui::FontId::new(15.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Button,
+        egui::FontId::new(14.0, egui::FontFamily::Proportional),
+    );
+    ctx.set_style_of(theme, style);
 }
 
 #[derive(Default, Clone)]
@@ -130,12 +329,14 @@ enum Screen {
     Chat,
     Characters,
     Admin,
+    Settings,
 }
 
 struct ChattyApp {
     commands: mpsc::UnboundedSender<Command>,
     events: std::sync::mpsc::Receiver<Event>,
     status: String,
+    restoring_session: bool,
     token: String,
     user_id: String,
     revision: i64,
@@ -148,6 +349,7 @@ struct ChattyApp {
     conversations: Vec<Conversation>,
     messages: Vec<ChatMessage>,
     selected_conversation: Option<String>,
+    auto_select_conversation: bool,
     selected_characters: HashSet<String>,
     input: String,
     stream_text: String,
@@ -160,7 +362,6 @@ struct ChattyApp {
     draft_character_open: bool,
     new_chat_open: bool,
     new_conversation_title: String,
-    new_conversation_kind: ConversationKind,
     users: Vec<UserAccount>,
     broker_config: BrokerConfig,
     broker_monitor: Option<BrokerMonitor>,
@@ -172,6 +373,10 @@ struct ChattyApp {
     admin_new_password: String,
     admin_new_role: Role,
     last_monitor_refresh: Option<Instant>,
+    account_usage: TokenUsage,
+    light_mode: bool,
+    glass_mode: bool,
+    preferences_path: Option<PathBuf>,
 }
 
 impl ChattyApp {
@@ -183,6 +388,7 @@ impl ChattyApp {
             commands,
             events,
             status: "Starting…".into(),
+            restoring_session: false,
             token: String::new(),
             user_id: String::new(),
             revision: 0,
@@ -195,6 +401,7 @@ impl ChattyApp {
             conversations: vec![],
             messages: vec![],
             selected_conversation: None,
+            auto_select_conversation: true,
             selected_characters: HashSet::new(),
             input: String::new(),
             stream_text: String::new(),
@@ -210,7 +417,6 @@ impl ChattyApp {
             draft_character_open: false,
             new_chat_open: false,
             new_conversation_title: String::new(),
-            new_conversation_kind: ConversationKind::Direct,
             users: vec![],
             broker_config: BrokerConfig {
                 adapter_enabled: false,
@@ -237,6 +443,10 @@ impl ChattyApp {
             admin_new_password: String::new(),
             admin_new_role: Role::User,
             last_monitor_refresh: None,
+            account_usage: TokenUsage::default(),
+            light_mode: false,
+            glass_mode: false,
+            preferences_path: None,
         }
     }
     fn send(&self, request: Request) {
@@ -257,19 +467,25 @@ impl ChattyApp {
         });
     }
     fn authenticated(&mut self, token: String, user_id: String, role: Role, revision: i64) {
+        self.restoring_session = false;
         self.token = token;
         self.user_id = user_id;
         self.role = Some(role);
         self.revision = revision;
+        self.auto_select_conversation = true;
         self.status = "Online · TLS 1.3".into();
         self.password.clear();
         self.refresh();
+        self.send(Request::GetAccountUsage {
+            session_token: self.token.clone(),
+        });
     }
     fn drain(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Status(s) => self.status = s,
                 Event::SessionExpired => {
+                    self.restoring_session = false;
                     self.token.clear();
                     self.role = None;
                     self.set_error("Saved session expired. Sign in again.");
@@ -295,10 +511,30 @@ impl ChattyApp {
                         } => self.registration_enabled = registration_enabled,
                         Response::Characters(v) => self.characters = v,
                         Response::Conversations(v) => {
-                            self.conversations = v;
-                            if self.selected_conversation.is_none() {
+                            self.conversations = v
+                                .into_iter()
+                                .filter(|conversation| {
+                                    conversation.kind == ConversationKind::Direct
+                                })
+                                .collect();
+                            if self.selected_conversation.as_ref().is_some_and(|selected| {
+                                !self
+                                    .conversations
+                                    .iter()
+                                    .any(|conversation| &conversation.id == selected)
+                            }) {
+                                self.selected_conversation = None;
+                                self.messages.clear();
+                                self.stream_text.clear();
+                                self.active_request = None;
+                                self.typing_character = None;
+                            }
+                            if self.selected_conversation.is_none() && self.auto_select_conversation
+                            {
                                 self.selected_conversation =
                                     self.conversations.first().map(|c| c.id.clone());
+                                self.messages.clear();
+                                self.stream_text.clear();
                                 if let Some(id) = self.selected_conversation.clone() {
                                     self.open_conversation(&id);
                                 }
@@ -309,7 +545,21 @@ impl ChattyApp {
                             self.messages = v.messages;
                             self.stream_text.clear();
                         }
+                        Response::ConversationNotFound { conversation_id } => {
+                            if self.selected_conversation.as_deref()
+                                == Some(conversation_id.as_str())
+                            {
+                                self.selected_conversation = None;
+                                self.messages.clear();
+                                self.stream_text.clear();
+                                self.active_request = None;
+                                self.typing_character = None;
+                                self.auto_select_conversation = false;
+                                self.refresh();
+                            }
+                        }
                         Response::Users(v) => self.users = v,
+                        Response::AccountUsage(v) => self.account_usage = v,
                         Response::BrokerConfig(v) => self.broker_config = v,
                         Response::BrokerMonitor(v) => self.broker_monitor = Some(v),
                         Response::OllamaState(v) => self.ollama_state = Some(v),
@@ -323,12 +573,23 @@ impl ChattyApp {
                             self.revision = self.revision.max(revision);
                             self.active_request = None;
                             self.typing_character = None;
+                            self.send(Request::GetAccountUsage {
+                                session_token: self.token.clone(),
+                            });
                             if let Some(id) = self.selected_conversation.clone() {
                                 self.open_conversation(&id)
                             }
                         }
-                        Response::Accepted { revision, .. }
-                        | Response::SyncComplete { revision } => {
+                        Response::Accepted { revision, .. } => {
+                            self.revision = self.revision.max(revision);
+                            if !self.token.is_empty() {
+                                self.refresh();
+                                if let Some(id) = self.selected_conversation.clone() {
+                                    self.open_conversation(&id)
+                                }
+                            }
+                        }
+                        Response::SyncComplete { revision } => {
                             self.revision = self.revision.max(revision);
                             self.refresh();
                             if let Some(id) = self.selected_conversation.clone() {
@@ -379,6 +640,7 @@ impl ChattyApp {
         }
     }
     fn open_conversation(&mut self, id: &str) {
+        self.auto_select_conversation = true;
         self.selected_conversation = Some(id.into());
         self.send(Request::GetConversation {
             session_token: self.token.clone(),
@@ -386,11 +648,35 @@ impl ChattyApp {
         });
     }
     fn load_inspection_demo(&mut self) {
+        self.restoring_session = false;
         self.status = "Online · inspection".into();
         self.token = "inspection".into();
         self.user_id = "admin".into();
         self.username = "admin".into();
         self.role = Some(Role::Admin);
+        self.account_usage = TokenUsage {
+            prompt_tokens: 128_450,
+            completion_tokens: 34_921,
+        };
+        self.users = vec![
+            UserAccount {
+                id: "admin".into(),
+                username: "admin".into(),
+                role: Role::Admin,
+                created_at: "2026-08-20 09:00:00 UTC".into(),
+                usage: self.account_usage,
+            },
+            UserAccount {
+                id: "reader".into(),
+                username: "reader".into(),
+                role: Role::User,
+                created_at: "2026-08-22 11:30:00 UTC".into(),
+                usage: TokenUsage {
+                    prompt_tokens: 8_412,
+                    completion_tokens: 2_301,
+                },
+            },
+        ];
         self.characters.push(Character {
             id: "assistant".into(),
             name: "Mara".into(),
@@ -484,13 +770,13 @@ impl ChattyApp {
 #[allow(clippy::items_after_test_module)]
 mod visual_tests {
     use super::*;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
 
     fn harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
         egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -503,7 +789,7 @@ mod visual_tests {
         egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -514,6 +800,188 @@ mod visual_tests {
                 });
                 app
             })
+    }
+
+    fn restoring_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, false, false);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.restoring_session = true;
+                app.status = "Restoring saved session…".into();
+                app
+            })
+    }
+
+    fn public_character_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, false, false);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.characters[0].owned_by_user = false;
+                app.draft = DraftCharacter::from(&app.characters[0]);
+                app.draft_character_open = true;
+                app
+            })
+    }
+
+    fn add_overflowing_conversations(app: &mut ChattyApp) {
+        for index in 1..=30 {
+            app.conversations.push(Conversation {
+                id: format!("overflow-{index}"),
+                title: format!("Conversation {index:02}"),
+                kind: ConversationKind::Direct,
+                participant_ids: vec!["assistant".into()],
+                state: String::new(),
+                summary: String::new(),
+                revision: index,
+            });
+        }
+    }
+
+    #[test]
+    fn missing_conversation_is_reconciled_without_an_error_notice() {
+        let (commands, mut requests) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+        let available_conversations = app.conversations.clone();
+
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 7,
+            payload: encode(&Response::ConversationNotFound {
+                conversation_id: "demo".into(),
+            })
+            .unwrap(),
+        });
+
+        assert!(app.error.is_none());
+        assert!(app.selected_conversation.is_none());
+        assert!(app.messages.is_empty());
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 8,
+            payload: encode(&Response::Conversations(available_conversations)).unwrap(),
+        });
+        assert!(app.selected_conversation.is_none());
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Command::Request(request) if matches!(*request, Request::ListCharacters { .. })
+        ));
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Command::Request(request) if matches!(*request, Request::ListConversations { .. })
+        ));
+    }
+
+    #[test]
+    fn group_conversations_are_hidden_from_the_gui() {
+        let (commands, mut requests) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.token = "session".into();
+        app.selected_conversation = Some("group".into());
+        let conversation = |id: &str, kind| Conversation {
+            id: id.into(),
+            title: id.into(),
+            kind,
+            participant_ids: vec!["assistant".into()],
+            state: String::new(),
+            summary: String::new(),
+            revision: 1,
+        };
+
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 10,
+            payload: encode(&Response::Conversations(vec![
+                conversation("group", ConversationKind::GroupManual),
+                conversation("direct", ConversationKind::Direct),
+            ]))
+            .unwrap(),
+        });
+
+        assert_eq!(app.conversations.len(), 1);
+        assert_eq!(app.conversations[0].id, "direct");
+        assert_eq!(app.selected_conversation.as_deref(), Some("direct"));
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Command::Request(request)
+                if matches!(
+                    *request,
+                    Request::GetConversation { ref conversation_id, .. }
+                        if conversation_id == "direct"
+                )
+        ));
+    }
+
+    #[test]
+    fn expired_saved_session_returns_to_login() {
+        let (commands, _) = mpsc::unbounded_channel();
+        let (event_tx, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.restoring_session = true;
+        event_tx.send(Event::SessionExpired).unwrap();
+
+        app.drain(&egui::Context::default());
+
+        assert!(!app.restoring_session);
+        assert!(app.token.is_empty());
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn logout_acknowledgement_does_not_refresh_with_an_empty_token() {
+        let (commands, mut requests) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 9,
+            payload: encode(&Response::Accepted {
+                entity_id: None,
+                revision: 0,
+            })
+            .unwrap(),
+        });
+
+        assert!(requests.try_recv().is_err());
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn visual_desktop_restoring_session() {
+        let mut restoring = restoring_harness(egui::vec2(1440.0, 900.0));
+        restoring.get_by_label("Signing you in");
+        restoring
+            .render()
+            .expect("render desktop session restore")
+            .save("/tmp/chatty-restoring-session-desktop.png")
+            .expect("save desktop session restore");
+    }
+
+    #[test]
+    fn visual_compact_restoring_session() {
+        let mut restoring = restoring_harness(egui::vec2(430.0, 760.0));
+        restoring.get_by_label("Signing you in");
+        restoring
+            .render()
+            .expect("render compact session restore")
+            .save("/tmp/chatty-restoring-session-compact.png")
+            .expect("save compact session restore");
     }
 
     #[test]
@@ -535,9 +1003,81 @@ mod visual_tests {
     }
 
     #[test]
+    fn visual_desktop_overflowing_conversation_list() {
+        let mut harness = harness(egui::vec2(1440.0, 900.0));
+        add_overflowing_conversations(harness.state_mut());
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
+            .scroll_to_me();
+        harness.run_ok();
+        let last = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
+            .rect();
+        let footer = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Manage characters")
+            .rect();
+        assert!(last.bottom() <= footer.top());
+        harness
+            .render()
+            .expect("render desktop overflowing conversation list")
+            .save("/tmp/chatty-overflowing-conversations-desktop.png")
+            .expect("save desktop overflowing conversation list");
+    }
+
+    #[test]
+    fn visual_compact_overflowing_conversation_list() {
+        let mut harness = harness(egui::vec2(430.0, 760.0));
+        add_overflowing_conversations(harness.state_mut());
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
+            .scroll_to_me();
+        harness.run_ok();
+        let last = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
+            .rect();
+        let footer = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Manage characters")
+            .rect();
+        assert!(last.bottom() <= footer.top());
+        harness
+            .render()
+            .expect("render compact overflowing conversation list")
+            .save("/tmp/chatty-overflowing-conversations-compact.png")
+            .expect("save compact overflowing conversation list");
+    }
+
+    #[test]
+    fn visual_minimum_height_sidebar() {
+        let mut harness = harness(egui::vec2(640.0, 480.0));
+        add_overflowing_conversations(harness.state_mut());
+        harness.run_ok();
+        harness
+            .render()
+            .expect("render minimum-height sidebar")
+            .save("/tmp/chatty-sidebar-minimum-height.png")
+            .expect("save minimum-height sidebar");
+    }
+
+    #[test]
+    fn visual_narrow_minimum_height_sidebar() {
+        let mut harness = harness(egui::vec2(320.0, 480.0));
+        add_overflowing_conversations(harness.state_mut());
+        harness.run_ok();
+        harness
+            .render()
+            .expect("render narrow minimum-height sidebar")
+            .save("/tmp/chatty-sidebar-narrow-minimum-height.png")
+            .expect("save narrow minimum-height sidebar");
+    }
+
+    #[test]
     fn visual_hover_chat_delete() {
         let mut harness = harness(egui::vec2(1440.0, 900.0));
-        harness.get_by_label("A quiet evening").hover();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "A quiet evening")
+            .hover();
         harness.run_ok();
         harness
             .render()
@@ -559,11 +1099,24 @@ mod visual_tests {
     }
 
     #[test]
+    fn visual_hover_assistant_message_actions() {
+        let mut harness = harness(egui::vec2(1440.0, 900.0));
+        harness.get_by_label("The old observatory").hover();
+        harness.run_ok();
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
+        harness
+            .render()
+            .expect("render hovered assistant message actions")
+            .save("/tmp/chatty-restored-hover-assistant-actions.png")
+            .expect("save hovered assistant message actions");
+    }
+
+    #[test]
     fn visual_compact_chat() {
         let mut compact = egui_kittest::Harness::builder()
             .with_size(egui::vec2(430.0, 760.0))
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -576,6 +1129,179 @@ mod visual_tests {
             .expect("render compact UI")
             .save("/tmp/chatty-restored-compact.png")
             .expect("save compact UI");
+    }
+
+    #[test]
+    fn visual_desktop_empty_chat() {
+        let mut empty = harness(egui::vec2(1440.0, 900.0));
+        empty.state_mut().selected_conversation = None;
+        empty.state_mut().messages.clear();
+        empty.run_ok();
+        empty
+            .render()
+            .expect("render desktop empty chat")
+            .save("/tmp/chatty-empty-desktop.png")
+            .expect("save desktop empty chat");
+    }
+
+    #[test]
+    fn visual_compact_empty_chat() {
+        let mut empty = harness(egui::vec2(430.0, 760.0));
+        empty.state_mut().sidebar_visible = false;
+        empty.state_mut().selected_conversation = None;
+        empty.state_mut().messages.clear();
+        empty.run_ok();
+        empty
+            .render()
+            .expect("render compact empty chat")
+            .save("/tmp/chatty-empty-compact.png")
+            .expect("save compact empty chat");
+    }
+
+    #[test]
+    fn visual_desktop_new_chat_dialog() {
+        let mut new_chat = harness(egui::vec2(1440.0, 900.0));
+        new_chat.state_mut().new_chat_open = true;
+        new_chat.run_ok();
+        new_chat.get_by_label("New chat");
+        new_chat
+            .render()
+            .expect("render desktop new chat dialog")
+            .save("/tmp/chatty-new-chat-desktop.png")
+            .expect("save desktop new chat dialog");
+    }
+
+    #[test]
+    fn creating_conversation_closes_new_chat_dialog() {
+        let (commands, mut requests) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut new_chat = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, false, false);
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app
+            });
+        new_chat.state_mut().new_chat_open = true;
+        new_chat
+            .state_mut()
+            .selected_characters
+            .insert("assistant".into());
+        new_chat.run_ok();
+
+        new_chat
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Create conversation")
+            .click();
+        new_chat.run_ok();
+
+        assert!(!new_chat.state().new_chat_open);
+        assert!(new_chat.query_by_label("New chat").is_none());
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Command::Request(request)
+                if matches!(
+                    *request,
+                    Request::CreateConversation {
+                        kind: ConversationKind::Direct,
+                        ref participant_ids,
+                        ..
+                    } if participant_ids == &["assistant"]
+                )
+        ));
+    }
+
+    #[test]
+    fn visual_compact_new_chat_dialog() {
+        let mut new_chat = harness(egui::vec2(430.0, 760.0));
+        new_chat.state_mut().sidebar_visible = false;
+        new_chat.state_mut().new_chat_open = true;
+        new_chat.run_ok();
+        new_chat.get_by_label("New chat");
+        new_chat
+            .render()
+            .expect("render compact new chat dialog")
+            .save("/tmp/chatty-new-chat-compact.png")
+            .expect("save compact new chat dialog");
+    }
+
+    #[test]
+    fn visual_small_phone_new_chat_dialog() {
+        let mut new_chat = harness(egui::vec2(375.0, 667.0));
+        new_chat.state_mut().sidebar_visible = false;
+        new_chat.state_mut().new_chat_open = true;
+        new_chat.run_ok();
+        new_chat.get_by_label("New chat");
+        new_chat
+            .render()
+            .expect("render small-phone new chat dialog")
+            .save("/tmp/chatty-new-chat-375.png")
+            .expect("save small-phone new chat dialog");
+    }
+
+    #[test]
+    fn visual_compact_landscape_chat() {
+        let mut landscape = harness(egui::vec2(667.0, 375.0));
+        landscape.state_mut().sidebar_visible = false;
+        landscape.run_ok();
+        landscape
+            .render()
+            .expect("render compact landscape chat")
+            .save("/tmp/chatty-chat-landscape.png")
+            .expect("save compact landscape chat");
+    }
+
+    #[test]
+    fn visual_compact_hover_assistant_message_actions() {
+        let mut compact = harness(egui::vec2(430.0, 760.0));
+        compact.state_mut().sidebar_visible = false;
+        compact.run_ok();
+        compact.get_by_label("The old observatory").hover();
+        compact.run_ok();
+        compact.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
+        compact
+            .render()
+            .expect("render compact hovered assistant message actions")
+            .save("/tmp/chatty-restored-compact-hover-assistant-actions.png")
+            .expect("save compact hovered assistant message actions");
+    }
+
+    #[test]
+    fn visual_minimum_chat() {
+        let mut minimum = harness(egui::vec2(640.0, 480.0));
+        minimum.state_mut().sidebar_visible = false;
+        minimum.run_ok();
+        minimum
+            .render()
+            .expect("render minimum-size UI")
+            .save("/tmp/chatty-minimum-640.png")
+            .expect("save minimum-size UI");
+    }
+
+    #[test]
+    fn visual_minimum_login() {
+        let mut login = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(640.0, 480.0))
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, false, false);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                ChattyApp::new(commands, events)
+            });
+        login
+            .render()
+            .expect("render minimum-size login")
+            .save("/tmp/chatty-minimum-login.png")
+            .expect("save minimum-size login");
+    }
+
+    #[test]
+    fn visual_8k_chat() {
+        harness(egui::vec2(7680.0, 4320.0))
+            .render()
+            .expect("render 8K UI")
+            .save("/tmp/chatty-8k.png")
+            .expect("save 8K UI");
     }
 
     #[test]
@@ -601,7 +1327,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(430.0, 760.0))
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -629,7 +1355,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1440.0, 900.0))
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -653,11 +1379,45 @@ mod visual_tests {
     }
 
     #[test]
+    fn public_character_is_read_only_for_non_owner() {
+        let mut harness = public_character_harness(egui::vec2(1440.0, 900.0));
+
+        harness.run_ok();
+        harness.get_by_label("View character");
+        harness.get_by_label("Public character · Only the owner can edit it.");
+        assert!(
+            harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, "Save")
+                .is_none()
+        );
+        let fields: Vec<_> = harness
+            .get_all_by_role(egui::accesskit::Role::TextInput)
+            .collect();
+        assert!(!fields.is_empty());
+        assert!(
+            fields
+                .iter()
+                .all(|field| field.accesskit_node().is_disabled())
+        );
+        harness
+            .render()
+            .expect("render desktop public character")
+            .save("/tmp/chatty-public-character-desktop.png")
+            .expect("save desktop public character");
+
+        public_character_harness(egui::vec2(430.0, 760.0))
+            .render()
+            .expect("render compact public character")
+            .save("/tmp/chatty-public-character-compact.png")
+            .expect("save compact public character");
+    }
+
+    #[test]
     fn visual_admin_monitoring() {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1440.0, 900.0))
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -677,7 +1437,7 @@ mod visual_tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(430.0, 760.0))
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -692,11 +1452,104 @@ mod visual_tests {
             .expect("save compact admin UI");
     }
 
+    fn render_settings(size: egui::Vec2, light_mode: bool, glass_mode: bool, path: &str) {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(move |creation| {
+                configure_style_with_surface(&creation.egui_ctx, light_mode, glass_mode);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.light_mode = light_mode;
+                app.glass_mode = glass_mode;
+                app.screen = Screen::Settings;
+                app
+            });
+        harness
+            .render()
+            .expect("render settings UI")
+            .save(path)
+            .expect("save settings UI");
+    }
+
+    #[test]
+    fn visual_settings_desktop_dark() {
+        render_settings(
+            egui::vec2(1440.0, 900.0),
+            false,
+            false,
+            "/tmp/chatty-settings-desktop-dark.png",
+        );
+    }
+
+    #[test]
+    fn visual_settings_compact_light() {
+        render_settings(
+            egui::vec2(430.0, 760.0),
+            true,
+            false,
+            "/tmp/chatty-settings-compact-light.png",
+        );
+    }
+
+    #[test]
+    fn visual_settings_glass_dark_desktop() {
+        render_settings(
+            egui::vec2(1440.0, 900.0),
+            false,
+            true,
+            "/tmp/chatty-settings-glass-dark-desktop.png",
+        );
+    }
+
+    #[test]
+    fn visual_settings_glass_light_compact() {
+        render_settings(
+            egui::vec2(430.0, 760.0),
+            true,
+            true,
+            "/tmp/chatty-settings-glass-light-compact.png",
+        );
+    }
+
+    #[test]
+    fn visual_admin_users_desktop_and_compact() {
+        for (size, path) in [
+            (
+                egui::vec2(1440.0, 900.0),
+                "/tmp/chatty-admin-users-desktop.png",
+            ),
+            (
+                egui::vec2(430.0, 760.0),
+                "/tmp/chatty-admin-users-compact.png",
+            ),
+        ] {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(size)
+                .build_eframe(|creation| {
+                    configure_style_with_surface(&creation.egui_ctx, false, false);
+                    let (commands, _) = mpsc::unbounded_channel();
+                    let (_, events) = std::sync::mpsc::channel();
+                    let mut app = ChattyApp::new(commands, events);
+                    app.load_inspection_demo();
+                    app.screen = Screen::Admin;
+                    app.admin_tab = 1;
+                    app
+                });
+            harness
+                .render()
+                .expect("render admin users UI")
+                .save(path)
+                .expect("save admin users UI");
+        }
+    }
+
     fn render_ollama_admin(size: egui::Vec2, path: &str) {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(size)
             .build_eframe(|creation| {
-                configure_style(&creation.egui_ctx);
+                configure_style_with_surface(&creation.egui_ctx, false, false);
                 let (commands, _) = mpsc::unbounded_channel();
                 let (_, events) = std::sync::mpsc::channel();
                 let mut app = ChattyApp::new(commands, events);
@@ -761,11 +1614,17 @@ impl eframe::App for ChattyApp {
         let ctx = ui.ctx().clone();
         self.drain(&ctx);
         self.refresh_admin_monitor_if_due(&ctx);
-        let edge_padding = if ui.available_width() < 720.0 { 8 } else { 12 };
+        if self.glass_mode {
+            paint_glass_background(ui, self.light_mode);
+        }
+        let edge_padding = if ui.available_width() < 760.0 { 8 } else { 12 };
         egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
             .inner_margin(edge_padding)
             .show(ui, |ui| {
-                if self.token.is_empty() {
+                if self.restoring_session {
+                    self.render_session_restore(ui)
+                } else if self.token.is_empty() {
                     self.render_login(ui)
                 } else {
                     self.render_shell(ui)
@@ -779,6 +1638,9 @@ impl eframe::App for ChattyApp {
         }
         if self.screen == Screen::Admin {
             self.render_admin_dialog(&ctx)
+        }
+        if self.screen == Screen::Settings {
+            self.render_settings_dialog(&ctx)
         }
         if let Some(error) = self.error.clone() {
             egui::Window::new("Notice")
@@ -798,6 +1660,18 @@ impl eframe::App for ChattyApp {
 }
 
 impl ChattyApp {
+    fn render_session_restore(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            let top = (ui.available_height() * 0.28).clamp(72.0, 220.0);
+            ui.add_space(top);
+            ui.spinner();
+            ui.add_space(14.0);
+            ui.heading(egui::RichText::new("Signing you in").size(30.0));
+            ui.add_space(6.0);
+            ui.label(&self.status);
+        });
+    }
+
     fn render_login(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             let top = (ui.available_height() * 0.18).clamp(36.0, 150.0);
@@ -820,7 +1694,11 @@ impl ChattyApp {
                 let submit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.add_space(10.0);
                 if ui
-                    .add_sized([ui.available_width(), 42.0], egui::Button::new("Sign in"))
+                    .add_sized(
+                        [ui.available_width(), 42.0],
+                        egui::Button::new(egui::RichText::new("Sign in").strong())
+                            .fill(egui::Color32::from_rgb(37, 99, 235)),
+                    )
                     .clicked()
                     || submit
                 {
@@ -845,24 +1723,33 @@ impl ChattyApp {
         });
     }
     fn render_shell(&mut self, ui: &mut egui::Ui) {
-        let compact = ui.available_width() < 720.0;
+        let compact = ui.available_width() < 760.0;
         if compact {
             if self.sidebar_visible {
-                self.render_sidebar(ui, true);
+                egui::Frame::new()
+                    .fill(ui.visuals().window_fill)
+                    .corner_radius(12.0)
+                    .inner_margin(12.0)
+                    .show(ui, |ui| self.render_sidebar(ui, true));
             } else {
                 self.render_chat(ui);
             }
             return;
         }
-        let sidebar = (ui.available_width() * 0.27).clamp(220.0, 320.0);
+        let sidebar = (ui.available_width() * 0.24).clamp(248.0, 320.0);
         let height = ui.available_height();
         ui.horizontal(|ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(sidebar, height),
                 egui::Layout::top_down(egui::Align::Min),
-                |ui| self.render_sidebar(ui, compact),
+                |ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().window_fill)
+                        .corner_radius(12.0)
+                        .inner_margin(12.0)
+                        .show(ui, |ui| self.render_sidebar(ui, compact));
+                },
             );
-            ui.separator();
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), height),
                 egui::Layout::top_down(egui::Align::Min),
@@ -871,67 +1758,69 @@ impl ChattyApp {
         });
     }
     fn render_sidebar(&mut self, ui: &mut egui::Ui, compact: bool) {
-        ui.set_min_height(ui.available_height());
-        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.heading(egui::RichText::new("Chatty").size(22.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new("AI CHARACTERS").size(10.0).weak());
+            });
+        });
+        ui.add_space(12.0);
         if ui
-            .add_sized([ui.available_width(), 40.0], egui::Button::new("New chat"))
+            .add_sized(
+                [ui.available_width(), 42.0],
+                egui::Button::new(egui::RichText::new("+  New chat").strong())
+                    .fill(COLOR_PRIMARY_STRONG)
+                    .corner_radius(10.0),
+            )
             .clicked()
         {
             self.new_chat_open = true;
         }
-        ui.add_space(8.0);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for c in self.conversations.clone() {
-                ui.push_id(&c.id, |ui| {
-                    let selected = self.selected_conversation.as_deref() == Some(&c.id);
-                    let (row_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 40.0),
-                        egui::Sense::hover(),
-                    );
-                    let tile_rect = row_rect.shrink2(egui::vec2(6.0, 2.0));
-                    let tile = ui.put(tile_rect, egui::Button::selectable(selected, &c.title));
-                    if tile.clicked() {
-                        self.open_conversation(&c.id);
-                        if compact {
-                            self.sidebar_visible = false;
-                        }
-                    }
-                    let hovered = ui
-                        .input(|input| input.pointer.hover_pos())
-                        .is_some_and(|pointer| tile_rect.contains(pointer));
-                    let delete_rect = egui::Rect::from_min_size(
-                        egui::pos2(tile_rect.right() - 28.0, tile_rect.top() + 4.0),
-                        egui::vec2(24.0, 28.0),
-                    );
-                    if hovered
-                        && ui
-                            .put(delete_rect, egui::Button::new("×").frame(false))
-                            .on_hover_text("Delete")
-                            .clicked()
-                    {
-                        self.send(Request::DeleteEntity {
-                            session_token: self.token.clone(),
-                            kind: EntityKind::Conversation,
-                            entity_id: c.id.clone(),
-                        });
-                    }
-                });
-            }
-        });
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&self.status);
-                if ui.button("Characters").clicked() {
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new("RECENT CHATS").size(11.0).weak());
+        ui.add_space(2.0);
+        let mut remaining = ui.available_rect_before_wrap();
+        remaining.max.y = (remaining.max.y - 12.0).max(remaining.min.y);
+        let footer_height = 90.0_f32.min(remaining.height());
+        let footer_rect = egui::Rect::from_min_max(
+            egui::pos2(remaining.left(), remaining.bottom() - footer_height),
+            remaining.max,
+        );
+        let list_rect = egui::Rect::from_min_max(
+            remaining.min,
+            egui::pos2(
+                remaining.right(),
+                (footer_rect.top() - 4.0).max(remaining.top()),
+            ),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(footer_rect), |ui| {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&self.status).size(12.0).weak());
+            });
+            ui.horizontal(|ui| {
+                if Self::footer_icon_button(ui, FooterIcon::Characters, "Manage characters")
+                    .clicked()
+                {
                     self.screen = Screen::Characters;
                     self.draft_character_open = true;
                 }
-                if self.role == Some(Role::Admin) && ui.button("Admin").clicked() {
+                if self.role == Some(Role::Admin)
+                    && Self::footer_icon_button(ui, FooterIcon::Admin, "Open admin portal")
+                        .clicked()
+                {
                     self.screen = Screen::Admin;
                     self.admin_tab = 0;
                     self.load_admin_tab();
                 }
-                if ui.button("Out").clicked() {
+                if Self::footer_icon_button(ui, FooterIcon::Settings, "Open settings").clicked() {
+                    self.screen = Screen::Settings;
+                    self.send(Request::GetAccountUsage {
+                        session_token: self.token.clone(),
+                    });
+                }
+                if Self::footer_icon_button(ui, FooterIcon::SignOut, "Sign out").clicked() {
                     self.send(Request::Logout {
                         session_token: self.token.clone(),
                     });
@@ -941,5 +1830,149 @@ impl ChattyApp {
                 }
             });
         });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(list_rect), |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("conversation-list")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for c in self.conversations.clone() {
+                        ui.push_id(&c.id, |ui| {
+                            let selected = self.selected_conversation.as_deref() == Some(&c.id);
+                            let (row_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 44.0),
+                                egui::Sense::hover(),
+                            );
+                            let tile_rect = row_rect.shrink2(egui::vec2(0.0, 2.0));
+                            let tile =
+                                ui.put(tile_rect, egui::Button::selectable(selected, &c.title));
+                            if tile.clicked() {
+                                self.open_conversation(&c.id);
+                                if compact {
+                                    self.sidebar_visible = false;
+                                }
+                            }
+                            let hovered = ui
+                                .input(|input| input.pointer.hover_pos())
+                                .is_some_and(|pointer| tile_rect.contains(pointer));
+                            let delete_rect = egui::Rect::from_min_size(
+                                egui::pos2(tile_rect.right() - 28.0, tile_rect.top() + 4.0),
+                                egui::vec2(24.0, 28.0),
+                            );
+                            if hovered
+                                && ui
+                                    .put(delete_rect, egui::Button::new("×").frame(false))
+                                    .on_hover_text("Delete")
+                                    .clicked()
+                            {
+                                self.send(Request::DeleteEntity {
+                                    session_token: self.token.clone(),
+                                    kind: EntityKind::Conversation,
+                                    entity_id: c.id.clone(),
+                                });
+                            }
+                        });
+                    }
+                });
+        });
     }
+
+    fn render_settings_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = self.screen == Screen::Settings;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.heading("Appearance");
+                ui.label("Choose how Chatty looks on this device.");
+                ui.add_space(6.0);
+                ui.weak("Theme");
+                let previous_light_mode = self.light_mode;
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_sized(
+                            [96.0, 40.0],
+                            egui::Button::selectable(!self.light_mode, "Dark"),
+                        )
+                        .clicked()
+                    {
+                        self.light_mode = false;
+                    }
+                    if ui
+                        .add_sized(
+                            [96.0, 40.0],
+                            egui::Button::selectable(self.light_mode, "Light"),
+                        )
+                        .clicked()
+                    {
+                        self.light_mode = true;
+                    }
+                });
+                ui.add_space(8.0);
+                ui.weak("Surface");
+                let previous_glass_mode = self.glass_mode;
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_sized(
+                            [96.0, 40.0],
+                            egui::Button::selectable(!self.glass_mode, "Solid"),
+                        )
+                        .clicked()
+                    {
+                        self.glass_mode = false;
+                    }
+                    if ui
+                        .add_sized(
+                            [96.0, 40.0],
+                            egui::Button::selectable(self.glass_mode, "Glass"),
+                        )
+                        .clicked()
+                    {
+                        self.glass_mode = true;
+                    }
+                });
+                if previous_light_mode != self.light_mode || previous_glass_mode != self.glass_mode
+                {
+                    configure_style_with_surface(ctx, self.light_mode, self.glass_mode);
+                    if let Some(path) = &self.preferences_path {
+                        network::save_preferences(path, self.light_mode, self.glass_mode);
+                    }
+                    ctx.request_repaint();
+                }
+                ui.add_space(18.0);
+                ui.separator();
+                ui.heading("Token usage");
+                egui::Grid::new("account-token-usage")
+                    .num_columns(2)
+                    .spacing([24.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Prompt tokens");
+                        ui.strong(format_token_count(self.account_usage.prompt_tokens));
+                        ui.end_row();
+                        ui.label("Completion tokens");
+                        ui.strong(format_token_count(self.account_usage.completion_tokens));
+                        ui.end_row();
+                        ui.label("Total");
+                        ui.strong(format_token_count(self.account_usage.total()));
+                        ui.end_row();
+                    });
+            });
+        if !open {
+            self.screen = Screen::Chat;
+        }
+    }
+}
+
+fn format_token_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(character);
+    }
+    formatted
 }

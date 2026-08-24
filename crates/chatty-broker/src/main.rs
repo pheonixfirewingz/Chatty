@@ -643,7 +643,7 @@ async fn dispatch(
         Request::AdminListUsers { session_token } => {
             require_admin(&app.db, &session_token).await?;
             let rows = sqlx::query(
-                "SELECT id,username,role,created_at FROM users ORDER BY created_at LIMIT 1000",
+                "SELECT id,username,role,created_at,prompt_tokens,completion_tokens FROM users ORDER BY created_at LIMIT 1000",
             )
             .fetch_all(&app.db)
             .await?;
@@ -658,6 +658,10 @@ async fn dispatch(
                         Role::User
                     },
                     created_at: r.get("created_at"),
+                    usage: TokenUsage {
+                        prompt_tokens: r.get::<i64, _>("prompt_tokens") as u64,
+                        completion_tokens: r.get::<i64, _>("completion_tokens") as u64,
+                    },
                 })
                 .collect();
             send!(MessageType::Response, Response::Users(users));
@@ -752,6 +756,20 @@ async fn dispatch(
                 permissions.push(Permission::ManageUsers);
             }
             send!(MessageType::Response, Response::Permissions(permissions));
+        }
+        Request::GetAccountUsage { session_token } => {
+            let uid = auth(&app.db, &session_token).await?;
+            let row = sqlx::query("SELECT prompt_tokens,completion_tokens FROM users WHERE id=?")
+                .bind(uid)
+                .fetch_one(&app.db)
+                .await?;
+            send!(
+                MessageType::Response,
+                Response::AccountUsage(TokenUsage {
+                    prompt_tokens: row.get::<i64, _>("prompt_tokens") as u64,
+                    completion_tokens: row.get::<i64, _>("completion_tokens") as u64,
+                })
+            );
         }
         Request::AdminSetRole {
             session_token,
@@ -968,11 +986,13 @@ async fn dispatch(
             conversation_id,
         } => {
             let uid = auth(&app.db, &session_token).await?;
-            own_conversation(&app.db, &uid, &conversation_id).await?;
-            send!(
-                MessageType::Response,
-                Response::ConversationView(load_conversation(&app.db, &conversation_id).await?)
-            );
+            match load_owned_conversation(&app.db, &conversation_id, &uid).await? {
+                Some(view) => send!(MessageType::Response, Response::ConversationView(view)),
+                None => send!(
+                    MessageType::Response,
+                    Response::ConversationNotFound { conversation_id }
+                ),
+            }
         }
         Request::UpdateConversationState {
             session_token,
@@ -1714,7 +1734,7 @@ async fn dispatch(
                     bail!("memory character is not a conversation participant")
                 }
             }
-            let content = extract_memory(&app, &conversation_id).await?;
+            let content = extract_memory(&app, &uid, &conversation_id).await?;
             let eid = Uuid::new_v4().to_string();
             let memory = MemoryInput {
                 id: Some(eid.clone()),
@@ -2256,9 +2276,33 @@ async fn load_conversation(db: &SqlitePool, id: &str) -> Result<ConversationView
         .bind(id)
         .fetch_one(db)
         .await?;
+    load_conversation_from_row(db, row).await
+}
+
+async fn load_owned_conversation(
+    db: &SqlitePool,
+    id: &str,
+    owner_id: &str,
+) -> Result<Option<ConversationView>> {
+    let row = sqlx::query("SELECT id,title,kind,CAST(state AS TEXT) AS state,summary,revision FROM conversations WHERE id=? AND owner_id=?")
+        .bind(id)
+        .bind(owner_id)
+        .fetch_optional(db)
+        .await?;
+    match row {
+        Some(row) => Ok(Some(load_conversation_from_row(db, row).await?)),
+        None => Ok(None),
+    }
+}
+
+async fn load_conversation_from_row(
+    db: &SqlitePool,
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<ConversationView> {
+    let id: String = row.get("id");
     let conversation = conversation_from_row(db, row).await?;
     let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY created_at,id LIMIT 2000")
-        .bind(id).fetch_all(db).await?;
+        .bind(&id).fetch_all(db).await?;
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
         let message_id: String = row.get("id");
@@ -2435,7 +2479,7 @@ async fn send_snapshot(
     Ok(())
 }
 
-async fn extract_memory(app: &App, conversation_id: &str) -> Result<String> {
+async fn extract_memory(app: &App, user_id: &str, conversation_id: &str) -> Result<String> {
     let model = selected_model(app).await?;
     let recent: Vec<String> = sqlx::query_scalar(
         "SELECT author_type || ': ' || COALESCE(v.content,m.content) FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.created_at DESC LIMIT 40",
@@ -2465,6 +2509,7 @@ async fn extract_memory(app: &App, conversation_id: &str) -> Result<String> {
         .error_for_status()?
         .json::<Value>()
         .await?;
+    record_token_usage(app, user_id, token_usage_from_openai(&response)).await?;
     validate_extracted_memory(
         response["choices"][0]["message"]["content"]
             .as_str()
@@ -2553,6 +2598,9 @@ async fn maybe_name_new_chat(
             .error_for_status()
             .ok()?
             .json::<Value>()
+            .await
+            .ok()?;
+        record_token_usage(app, user_id, token_usage_from_openai(&response))
             .await
             .ok()?;
         response["choices"][0]["message"]["content"]
@@ -2669,7 +2717,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     let config = load_broker_config(&app.db).await?;
     let model = selected_model(app).await?;
     let participants=sqlx::query("SELECT c.id,c.name,c.system_prompt,c.personality,c.scenario,c.appearance,c.example_dialogue FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id=? ORDER BY p.position").bind(cid).fetch_all(&app.db).await?;
-    let sid = select_speaker(app, cid, speaker, &participants).await?;
+    let sid = select_speaker(app, uid, cid, speaker, &participants).await?;
     let character = participants
         .iter()
         .find(|r| r.get::<String, _>("id") == sid)
@@ -2763,6 +2811,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
                 "model": &model,
                 "messages": messages,
                 "stream": true,
+                "stream_options": {"include_usage": true},
                 "temperature": config.temperature,
                 "top_p": config.top_p,
                 "seed": config.seed
@@ -2808,6 +2857,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     let mut deadline = Instant::now() + Duration::from_millis(60);
     let mut cancelled = false;
     let mut done = false;
+    let mut usage = TokenUsage::default();
     loop {
         enum Event<T> {
             Cancel,
@@ -2831,18 +2881,23 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             Event::Data(Some(chunk)) => {
                 sse_buffer.extend_from_slice(&chunk?);
                 done = if native_ollama {
-                    drain_ollama_stream(&mut sse_buffer, &mut pending, &mut complete)?
+                    drain_ollama_stream(&mut sse_buffer, &mut pending, &mut complete, &mut usage)?
                 } else {
-                    drain_sse(&mut sse_buffer, &mut pending, &mut complete)?
+                    drain_sse(&mut sse_buffer, &mut pending, &mut complete, &mut usage)?
                 };
             }
             Event::Data(None) => {
                 if !sse_buffer.is_empty() {
                     sse_buffer.push(b'\n');
                     let _ = if native_ollama {
-                        drain_ollama_stream(&mut sse_buffer, &mut pending, &mut complete)?
+                        drain_ollama_stream(
+                            &mut sse_buffer,
+                            &mut pending,
+                            &mut complete,
+                            &mut usage,
+                        )?
                     } else {
-                        drain_sse(&mut sse_buffer, &mut pending, &mut complete)?
+                        drain_sse(&mut sse_buffer, &mut pending, &mut complete, &mut usage)?
                     };
                 }
                 break;
@@ -2880,6 +2935,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         ))
         .await?;
     }
+    record_token_usage(app, uid, usage).await?;
     let delta = persist_generation(app, uid, cid, &sid, &mid, &complete, parent.as_deref()).await?;
     let rev = delta.revision;
     tx.send((MessageType::Delta, req_id, encode(&delta)?))
@@ -2986,7 +3042,32 @@ fn clip(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-fn drain_sse(buffer: &mut Vec<u8>, pending: &mut String, complete: &mut String) -> Result<bool> {
+fn token_usage_from_openai(value: &Value) -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+        completion_tokens: value["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+    }
+}
+
+async fn record_token_usage(app: &App, user_id: &str, usage: TokenUsage) -> Result<()> {
+    if usage.total() == 0 {
+        return Ok(());
+    }
+    sqlx::query("UPDATE users SET prompt_tokens=prompt_tokens+?,completion_tokens=completion_tokens+? WHERE id=?")
+        .bind(i64::try_from(usage.prompt_tokens).context("prompt token count overflow")?)
+        .bind(i64::try_from(usage.completion_tokens).context("completion token count overflow")?)
+        .bind(user_id)
+        .execute(&app.db)
+        .await?;
+    Ok(())
+}
+
+fn drain_sse(
+    buffer: &mut Vec<u8>,
+    pending: &mut String,
+    complete: &mut String,
+    usage: &mut TokenUsage,
+) -> Result<bool> {
     let mut consumed = 0;
     let mut done = false;
     while let Some(relative_end) = buffer[consumed..].iter().position(|b| *b == b'\n') {
@@ -3002,6 +3083,14 @@ fn drain_sse(buffer: &mut Vec<u8>, pending: &mut String, complete: &mut String) 
         }
         let value: Value =
             serde_json::from_str(data).context("malformed llama-server SSE event")?;
+        if let Some(value_usage) = value.get("usage") {
+            usage.prompt_tokens = value_usage["prompt_tokens"]
+                .as_u64()
+                .unwrap_or(usage.prompt_tokens);
+            usage.completion_tokens = value_usage["completion_tokens"]
+                .as_u64()
+                .unwrap_or(usage.completion_tokens);
+        }
         if let Some(text) = value["choices"][0]["delta"]["content"].as_str() {
             pending.push_str(text);
             complete.push_str(text);
@@ -3015,6 +3104,7 @@ fn drain_ollama_stream(
     buffer: &mut Vec<u8>,
     pending: &mut String,
     complete: &mut String,
+    usage: &mut TokenUsage,
 ) -> Result<bool> {
     let mut consumed = 0;
     let mut done = false;
@@ -3034,6 +3124,12 @@ fn drain_ollama_stream(
             pending.push_str(text);
             complete.push_str(text);
         }
+        usage.prompt_tokens = value["prompt_eval_count"]
+            .as_u64()
+            .unwrap_or(usage.prompt_tokens);
+        usage.completion_tokens = value["eval_count"]
+            .as_u64()
+            .unwrap_or(usage.completion_tokens);
         done |= value["done"].as_bool().unwrap_or(false);
         if done {
             break;
@@ -3045,6 +3141,7 @@ fn drain_ollama_stream(
 
 async fn select_speaker(
     app: &App,
+    user_id: &str,
     cid: &str,
     explicit: Option<String>,
     participants: &[sqlx::sqlite::SqliteRow],
@@ -3074,6 +3171,7 @@ async fn select_speaker(
         let choice = async {
             let model = selected_model(app).await.ok()?;
             let response=app.http.post(format!("{}/chat/completions",adapter_url(app).await.ok()?)).timeout(Duration::from_secs(15)).json(&json!({"model":model,"messages":[{"role":"system","content":"Choose exactly one next speaker name from the supplied list based on the recent roleplay. Output only the name."},{"role":"user","content":format!("Speakers: {}\nRecent roleplay:\n{}",names.join(", "),recent.into_iter().rev().collect::<Vec<_>>().join("\n"))}],"stream":false,"max_tokens":16})).send().await.ok()?.error_for_status().ok()?.json::<Value>().await.ok()?;
+            record_token_usage(app, user_id, token_usage_from_openai(&response)).await.ok()?;
             let answer = response["choices"][0]["message"]["content"].as_str()?.trim();
             participants.iter().find(|r|r.get::<String,_>("name").eq_ignore_ascii_case(answer)).map(|r|r.get("id"))
         }.await;
@@ -3128,12 +3226,17 @@ mod tests {
         let mut buffer = br#"data: {"choices":[{"delta":{"cont"#.to_vec();
         let mut pending = String::new();
         let mut complete = String::new();
-        assert!(!drain_sse(&mut buffer, &mut pending, &mut complete).unwrap());
+        let mut usage = TokenUsage::default();
+        assert!(!drain_sse(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap());
         buffer.extend_from_slice(br#"ent":"hello"}}]}"#);
-        buffer.extend_from_slice(b"\n\ndata: [DONE]\n\n");
-        assert!(drain_sse(&mut buffer, &mut pending, &mut complete).unwrap());
+        buffer.extend_from_slice(
+            b"\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n",
+        );
+        assert!(drain_sse(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap());
         assert_eq!(pending, "hello");
         assert_eq!(complete, "hello");
+        assert_eq!(usage.prompt_tokens, 21);
+        assert_eq!(usage.completion_tokens, 4);
     }
 
     #[test]
@@ -3143,12 +3246,18 @@ mod tests {
             .to_vec();
         let mut pending = String::new();
         let mut complete = String::new();
-        assert!(!drain_ollama_stream(&mut buffer, &mut pending, &mut complete).unwrap());
-        buffer.extend_from_slice(br#"ent":"lo"},"done":true}"#);
+        let mut usage = TokenUsage::default();
+        assert!(
+            !drain_ollama_stream(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap()
+        );
+        buffer
+            .extend_from_slice(br#"ent":"lo"},"done":true,"prompt_eval_count":19,"eval_count":3}"#);
         buffer.push(b'\n');
-        assert!(drain_ollama_stream(&mut buffer, &mut pending, &mut complete).unwrap());
+        assert!(drain_ollama_stream(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap());
         assert_eq!(pending, "hello");
         assert_eq!(complete, "hello");
+        assert_eq!(usage.prompt_tokens, 19);
+        assert_eq!(usage.completion_tokens, 3);
     }
 
     #[test]
@@ -3267,6 +3376,63 @@ mod tests {
             Response::Authenticated { session_token, .. } => session_token,
             other => panic!("unexpected response: {other:?}"),
         };
+        let user_id: String = sqlx::query_scalar("SELECT user_id FROM sessions WHERE token=?")
+            .bind(&token)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        record_token_usage(
+            &app,
+            &user_id,
+            TokenUsage {
+                prompt_tokens: 120,
+                completion_tokens: 30,
+            },
+        )
+        .await
+        .unwrap();
+        let (_, usage_response) = call(
+            &app,
+            Request::GetAccountUsage {
+                session_token: token.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            decode::<Response>(&usage_response).unwrap(),
+            Response::AccountUsage(TokenUsage {
+                prompt_tokens: 120,
+                completion_tokens: 30,
+            })
+        ));
+        let (_, users_response) = call(
+            &app,
+            Request::AdminListUsers {
+                session_token: token.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let Response::Users(users) = decode::<Response>(&users_response).unwrap() else {
+            panic!("expected users response")
+        };
+        assert_eq!(users[0].usage.total(), 150);
+        let (kind, missing) = call(
+            &app,
+            Request::GetConversation {
+                session_token: token.clone(),
+                conversation_id: "already-deleted".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(kind, MessageType::Response);
+        assert!(matches!(
+            decode::<Response>(&missing).unwrap(),
+            Response::ConversationNotFound { conversation_id }
+                if conversation_id == "already-deleted"
+        ));
 
         let (tx, mut rx) = mpsc::channel(32);
         let resume_app = app.clone();
@@ -3540,7 +3706,8 @@ mod tests {
                 other => panic!("unexpected response: {other:?}"),
             };
             let participants=sqlx::query("SELECT c.id,c.name,c.system_prompt,c.personality,c.scenario,c.appearance,c.example_dialogue FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id=? ORDER BY p.position").bind(&conversation_id).fetch_all(&app.db).await.unwrap();
-            let selection = select_speaker(&app, &conversation_id, None, &participants).await;
+            let selection =
+                select_speaker(&app, "test-user", &conversation_id, None, &participants).await;
             if should_select {
                 assert_eq!(selection.unwrap(), character_id);
             } else {
@@ -3654,6 +3821,21 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "{table} was not cascade-deleted");
         }
+        let (kind, deleted_conversation) = call(
+            &app,
+            Request::GetConversation {
+                session_token: first_token.clone(),
+                conversation_id: cascade_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(kind, MessageType::Response);
+        assert!(matches!(
+            decode::<Response>(&deleted_conversation).unwrap(),
+            Response::ConversationNotFound { conversation_id }
+                if conversation_id == cascade_id
+        ));
         let delete_types:Vec<String>=sqlx::query_scalar("SELECT entity_type FROM deltas WHERE operation=2 AND owner_id=(SELECT id FROM users WHERE username='first-user')").fetch_all(&app.db).await.unwrap();
         for expected in ["conversation", "message", "lore", "memory"] {
             assert!(
