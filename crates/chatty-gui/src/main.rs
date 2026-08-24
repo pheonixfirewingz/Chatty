@@ -164,6 +164,8 @@ struct ChattyApp {
     users: Vec<UserAccount>,
     broker_config: BrokerConfig,
     broker_monitor: Option<BrokerMonitor>,
+    ollama_state: Option<OllamaState>,
+    ollama_pull_model: String,
     admin_data: Vec<AdminDataRow>,
     admin_tab: usize,
     admin_new_username: String,
@@ -213,10 +215,22 @@ impl ChattyApp {
             broker_config: BrokerConfig {
                 adapter_enabled: false,
                 adapter_url: String::new(),
+                use_ollama_api: false,
+                model: String::new(),
+                temperature: 0.8,
+                top_p: 0.9,
+                top_k: 40,
+                num_ctx: 4096,
+                num_predict: -1,
+                repeat_penalty: 1.1,
+                seed: -1,
+                keep_alive: "5m".into(),
                 allow_public_characters: false,
                 allow_self_registration: true,
             },
             broker_monitor: None,
+            ollama_state: None,
+            ollama_pull_model: String::new(),
             admin_data: vec![],
             admin_tab: 0,
             admin_new_username: String::new(),
@@ -298,6 +312,7 @@ impl ChattyApp {
                         Response::Users(v) => self.users = v,
                         Response::BrokerConfig(v) => self.broker_config = v,
                         Response::BrokerMonitor(v) => self.broker_monitor = Some(v),
+                        Response::OllamaState(v) => self.ollama_state = Some(v),
                         Response::AdminDatabase(v) => self.admin_data = v,
                         Response::GenerationStarted { character_id, .. } => {
                             self.active_request = Some(frame.request_id);
@@ -434,6 +449,33 @@ impl ChattyApp {
             adapter_model_count: 1,
             adapter_latency_ms: Some(18),
             recent_errors: vec!["2026-08-24 14:32:07 UTC · Adapter request timed out".into()],
+        });
+        self.ollama_state = Some(OllamaState {
+            version: "0.12.6".into(),
+            models: vec![
+                OllamaModel {
+                    name: "llama3.2:3b".into(),
+                    size: 2_018_000_000,
+                    modified_at: "2026-08-23T18:30:00Z".into(),
+                    family: "llama".into(),
+                    parameter_size: "3.2B".into(),
+                    quantization_level: "Q4_K_M".into(),
+                },
+                OllamaModel {
+                    name: "gemma3:4b".into(),
+                    size: 3_330_000_000,
+                    modified_at: "2026-08-22T12:00:00Z".into(),
+                    family: "gemma3".into(),
+                    parameter_size: "4.3B".into(),
+                    quantization_level: "Q4_K_M".into(),
+                },
+            ],
+            running_models: vec![OllamaRunningModel {
+                name: "llama3.2:3b".into(),
+                size: 2_018_000_000,
+                size_vram: 1_840_000_000,
+                expires_at: "2026-08-24T15:05:00Z".into(),
+            }],
         });
     }
 }
@@ -613,7 +655,7 @@ mod visual_tests {
     #[test]
     fn visual_admin_monitoring() {
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(1100.0, 760.0))
+            .with_size(egui::vec2(1440.0, 900.0))
             .build_eframe(|creation| {
                 configure_style(&creation.egui_ctx);
                 let (commands, _) = mpsc::unbounded_channel();
@@ -628,6 +670,62 @@ mod visual_tests {
             .expect("render admin monitoring UI")
             .save("/tmp/chatty-restored-admin.png")
             .expect("save admin UI");
+    }
+
+    #[test]
+    fn visual_compact_admin_monitoring() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(430.0, 760.0))
+            .build_eframe(|creation| {
+                configure_style(&creation.egui_ctx);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.screen = Screen::Admin;
+                app
+            });
+        harness
+            .render()
+            .expect("render compact admin monitoring UI")
+            .save("/tmp/chatty-admin-broker-compact.png")
+            .expect("save compact admin UI");
+    }
+
+    fn render_ollama_admin(size: egui::Vec2, path: &str) {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(|creation| {
+                configure_style(&creation.egui_ctx);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.screen = Screen::Admin;
+                app.admin_tab = 2;
+                app
+            });
+        harness
+            .render()
+            .expect("render Ollama administration UI")
+            .save(path)
+            .expect("save Ollama administration UI");
+    }
+
+    #[test]
+    fn visual_desktop_ollama_admin() {
+        render_ollama_admin(
+            egui::vec2(1440.0, 900.0),
+            "/tmp/chatty-admin-ollama-desktop.png",
+        );
+    }
+
+    #[test]
+    fn visual_compact_ollama_admin() {
+        render_ollama_admin(
+            egui::vec2(430.0, 760.0),
+            "/tmp/chatty-admin-ollama-compact.png",
+        );
     }
 
     #[test]

@@ -118,6 +118,13 @@ pub enum Request {
         session_token: String,
         config: BrokerConfig,
     },
+    AdminGetOllamaState {
+        session_token: String,
+    },
+    AdminOllamaAction {
+        session_token: String,
+        action: OllamaAction,
+    },
     AdminSetCharacterPublic {
         session_token: String,
         character_id: String,
@@ -241,6 +248,7 @@ pub enum Response {
     Users(Vec<UserAccount>),
     BrokerConfig(BrokerConfig),
     BrokerMonitor(BrokerMonitor),
+    OllamaState(OllamaState),
     AdminDatabase(Vec<AdminDataRow>),
     ServerCapabilities {
         registration_enabled: bool,
@@ -502,12 +510,60 @@ pub struct UserAccount {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct BrokerConfig {
     pub adapter_enabled: bool,
     pub adapter_url: String,
+    /// Use Ollama's native `/api/chat` surface so all runtime options are honored.
+    pub use_ollama_api: bool,
+    /// Empty selects the first model returned by the adapter.
+    pub model: String,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: u32,
+    pub num_ctx: u32,
+    /// `-1` lets Ollama choose; positive values cap generated tokens.
+    pub num_predict: i32,
+    pub repeat_penalty: f32,
+    /// `-1` requests a random seed.
+    pub seed: i64,
+    /// Ollama duration such as `5m`, `1h`, or `0`.
+    pub keep_alive: String,
     pub allow_public_characters: bool,
     pub allow_self_registration: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum OllamaAction {
+    Pull { model: String },
+    Delete { model: String },
+    Load { model: String },
+    Unload { model: String },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct OllamaState {
+    pub version: String,
+    pub models: Vec<OllamaModel>,
+    pub running_models: Vec<OllamaRunningModel>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OllamaModel {
+    pub name: String,
+    pub size: u64,
+    pub modified_at: String,
+    pub family: String,
+    pub parameter_size: String,
+    pub quantization_level: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OllamaRunningModel {
+    pub name: String,
+    pub size: u64,
+    pub size_vram: u64,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

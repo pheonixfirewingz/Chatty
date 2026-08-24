@@ -5,7 +5,7 @@ This is the acceptance matrix for the restored MVP specification. “Verified”
 | Plan requirement | Status | Evidence |
 |---|---|---|
 | TLS 1.3 mandatory; no plaintext listener | Verified | Both rustls configs allow only TLS 1.3; pinned local-CA handshake passed and an invalid certificate was rejected |
-| Binary runtime protocol; JSON handshake only | Verified | Protocol-v8 handshake is JSON; every request, response, delta, and stream payload uses bincode |
+| Binary runtime protocol; JSON handshake only | Verified | Protocol-v9 handshake is JSON; every request, response, delta, and stream payload uses bincode |
 | Fixed length/flag/type/request-id frame | Verified | Shared 14-byte header implementation and fragmented round-trip tests |
 | zstd for streams, deltas, and large payloads | Verified | Stream/delta frames force zstd; compression activation and ratio tests pass |
 | 16–64 unit or 30–100 ms batching | Verified | Broker flushes at 32 whitespace units or 60 ms; no llama token event is sent directly |
@@ -48,4 +48,4 @@ cargo test --workspace
 cargo build --release --workspace
 ```
 
-Live protocol verification used a fresh database under `/tmp`, the pinned TLS client, and the configured llama-server. It covered registration, permissions, a complete character card, state/summary, system/user messages, lore, scoped memory, generation, a new-process typed snapshot, broker restart, and incremental resume. Current local broker/GUI/client builds use protocol version 8.
+Live protocol verification used a fresh database under `/tmp`, the pinned TLS client, and the configured llama-server. It covered registration, permissions, a complete character card, state/summary, system/user messages, lore, scoped memory, generation, a new-process typed snapshot, broker restart, and incremental resume. Current local broker/GUI/client builds use protocol version 9.

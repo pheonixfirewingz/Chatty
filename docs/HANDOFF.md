@@ -28,7 +28,7 @@ Chatty is a usable native Rust roleplay-chat MVP with three separate runtimes:
 - `chatty-client`: terminal diagnostic/automation client.
 - External inference remains an OpenAI-compatible llama.cpp/llama-server. It is never linked into the broker or clients.
 
-The current binary wire contract is protocol **version 8**. Broker and clients must be rebuilt together after protocol enum changes.
+The current binary wire contract is protocol **version 9**. Broker and clients must be rebuilt together after protocol enum changes.
 
 ## Start here
 
@@ -97,7 +97,8 @@ The default inference URL is `http://192.168.0.97:11434/v1`. Environment overrid
 
 The role-gated central Admin dialog has three tabs:
 
-- **Broker**: enable/disable inference adapter, edit adapter base URL, allow/disallow non-admin public character publishing, allow/disallow public self-registration. Settings persist in SQLite and are enforced by the broker.
+- **Broker**: enable/disable inference, edit the adapter URL, select generic OpenAI or native Ollama mode, select a model, configure generation defaults, and control publishing/registration policy. Settings persist in SQLite and are enforced by the broker.
+- **Ollama**: inspect the server version and installed/running models, pull models, load/reload or unload them, and delete them. Every operation is admin-authorized by the broker; the GUI never talks directly to Ollama.
 - **Users**: refresh users, create User/Admin accounts even when public registration is disabled, promote/demote, and reveal a borderless `×` on row hover to delete an account. The active admin cannot demote or delete itself.
 - **Data**: sanitized read-only view of user metadata, character metadata and adapter status. It deliberately excludes password hashes, session tokens, credentials, messages and conversation content. Character public state can be toggled here by an admin.
 
@@ -110,7 +111,7 @@ User deletion is transactional. It removes sessions, owned lore/memory/conversat
 ## Broker and protocol facts
 
 - TLS 1.3 only using rustls; clients pin the configured CA. There is no plaintext mode.
-- One JSON handshake only: `{protocol:8, encoding:bincode2, compression:zstd, tls:1.3}`.
+- One JSON handshake only: `{protocol:9, encoding:bincode2, compression:zstd, tls:1.3}`.
 - Runtime frames: `[length:u32 BE][flags:u8][message_type:u8][request_id:u64 BE][payload]` (14-byte header).
 - Runtime serialization: bincode 2. zstd is forced for stream/delta frames and used for payloads at least 256 bytes.
 - Payload limit is 8 MiB; decompression is bounded.
@@ -133,6 +134,7 @@ Migrations live in `crates/chatty-broker/migrations/`:
 3. `0003_normalize_variants.sql`: normalized swipe/variant persistence.
 4. `0004_public_characters.sql`: public character flag/index.
 5. `0005_broker_settings.sql`: singleton adapter and policy settings.
+6. `0006_ollama_configuration.sql`: provider/model selection and generation defaults.
 
 The broker opens a five-connection pool, runs migrations, enables WAL and is authoritative. Queries are owner-scoped and bounded. Do not expose raw tables through admin UI: sessions and password hashes are sensitive, and chat content was explicitly excluded from the admin database view.
 

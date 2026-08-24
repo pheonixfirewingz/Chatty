@@ -225,7 +225,7 @@ async fn serve(
         MessageType::Handshake,
         0,
         serde_json::to_vec(
-            &json!({"protocol":8,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
+            &json!({"protocol":9,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
         )?,
     ))
     .await?;
@@ -813,19 +813,50 @@ async fn dispatch(
         } => {
             require_admin(&app.db, &session_token).await?;
             config.adapter_url = config.adapter_url.trim().trim_end_matches('/').to_owned();
+            config.model = config.model.trim().to_owned();
+            config.keep_alive = config.keep_alive.trim().to_owned();
             if !config.adapter_url.starts_with("http://")
                 && !config.adapter_url.starts_with("https://")
             {
                 bail!("adapter URL must use http or https")
             }
-            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,allow_public_characters=?,allow_self_registration=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
+            validate_broker_config(&config)?;
+            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,use_ollama_api=?,model=?,temperature=?,top_p=?,top_k=?,num_ctx=?,num_predict=?,repeat_penalty=?,seed=?,keep_alive=?,allow_public_characters=?,allow_self_registration=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
                 .bind(config.adapter_enabled)
                 .bind(&config.adapter_url)
+                .bind(config.use_ollama_api)
+                .bind(&config.model)
+                .bind(config.temperature)
+                .bind(config.top_p)
+                .bind(config.top_k)
+                .bind(config.num_ctx)
+                .bind(config.num_predict)
+                .bind(config.repeat_penalty)
+                .bind(config.seed)
+                .bind(&config.keep_alive)
                 .bind(config.allow_public_characters)
                 .bind(config.allow_self_registration)
                 .execute(&app.db)
                 .await?;
             send!(MessageType::Response, Response::BrokerConfig(config));
+        }
+        Request::AdminGetOllamaState { session_token } => {
+            require_admin(&app.db, &session_token).await?;
+            send!(
+                MessageType::Response,
+                Response::OllamaState(load_ollama_state(&app).await?)
+            );
+        }
+        Request::AdminOllamaAction {
+            session_token,
+            action,
+        } => {
+            require_admin(&app.db, &session_token).await?;
+            run_ollama_action(&app, action).await?;
+            send!(
+                MessageType::Response,
+                Response::OllamaState(load_ollama_state(&app).await?)
+            );
         }
         Request::AdminSetCharacterPublic {
             session_token,
@@ -1775,6 +1806,7 @@ fn is_mutating(request: &Request) -> bool {
             | Request::AdminCreateUser { .. }
             | Request::AdminDeleteUser { .. }
             | Request::AdminSetBrokerConfig { .. }
+            | Request::AdminOllamaAction { .. }
             | Request::AdminSetCharacterPublic { .. }
             | Request::UpsertCharacter { .. }
             | Request::CreateConversation { .. }
@@ -1852,15 +1884,181 @@ async fn require_admin(db: &SqlitePool, token: &str) -> Result<String> {
 }
 
 async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> {
-    let row = sqlx::query("SELECT adapter_enabled,adapter_url,allow_public_characters,allow_self_registration FROM broker_settings WHERE singleton=1")
+    let row = sqlx::query("SELECT adapter_enabled,adapter_url,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration FROM broker_settings WHERE singleton=1")
         .fetch_one(db)
         .await?;
     Ok(BrokerConfig {
         adapter_enabled: row.get("adapter_enabled"),
         adapter_url: row.get("adapter_url"),
+        use_ollama_api: row.get("use_ollama_api"),
+        model: row.get("model"),
+        temperature: row.get("temperature"),
+        top_p: row.get("top_p"),
+        top_k: row.get::<i64, _>("top_k") as u32,
+        num_ctx: row.get::<i64, _>("num_ctx") as u32,
+        num_predict: row.get::<i64, _>("num_predict") as i32,
+        repeat_penalty: row.get("repeat_penalty"),
+        seed: row.get("seed"),
+        keep_alive: row.get("keep_alive"),
         allow_public_characters: row.get("allow_public_characters"),
         allow_self_registration: row.get("allow_self_registration"),
     })
+}
+
+fn validate_broker_config(config: &BrokerConfig) -> Result<()> {
+    if config.model.len() > 256 {
+        bail!("model name must not exceed 256 bytes")
+    }
+    if !config.temperature.is_finite() || !(0.0..=2.0).contains(&config.temperature) {
+        bail!("temperature must be between 0 and 2")
+    }
+    if !config.top_p.is_finite() || !(0.0..=1.0).contains(&config.top_p) {
+        bail!("top-p must be between 0 and 1")
+    }
+    if config.top_k > 10_000 {
+        bail!("top-k must be between 0 and 10000")
+    }
+    if !(128..=1_048_576).contains(&config.num_ctx) {
+        bail!("context length must be between 128 and 1048576")
+    }
+    if config.num_predict < -1 || config.num_predict > 1_048_576 {
+        bail!("prediction limit must be -1 or between 0 and 1048576")
+    }
+    if !config.repeat_penalty.is_finite() || !(0.0..=2.0).contains(&config.repeat_penalty) {
+        bail!("repeat penalty must be between 0 and 2")
+    }
+    if config.keep_alive.is_empty() || config.keep_alive.len() > 32 {
+        bail!("keep-alive must be an Ollama duration such as 5m, 1h, or 0")
+    }
+    Ok(())
+}
+
+fn ollama_base_url(adapter_url: &str) -> String {
+    adapter_url
+        .trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or(adapter_url.trim_end_matches('/'))
+        .to_owned()
+}
+
+async fn ollama_url(app: &App) -> Result<String> {
+    let config = load_broker_config(&app.db).await?;
+    Ok(ollama_base_url(&config.adapter_url))
+}
+
+fn required_model_name(model: String) -> Result<String> {
+    let model = model.trim();
+    if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+        bail!("model name is invalid")
+    }
+    Ok(model.to_owned())
+}
+
+async fn load_ollama_state(app: &App) -> Result<OllamaState> {
+    let base = ollama_url(app).await?;
+    let (version, tags, running) = tokio::try_join!(
+        app.http.get(format!("{base}/api/version")).send(),
+        app.http.get(format!("{base}/api/tags")).send(),
+        app.http.get(format!("{base}/api/ps")).send(),
+    )?;
+    let version: Value = version.error_for_status()?.json().await?;
+    let tags: Value = tags.error_for_status()?.json().await?;
+    let running: Value = running.error_for_status()?.json().await?;
+    let models = tags["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            Some(OllamaModel {
+                name: model.get("name")?.as_str()?.to_owned(),
+                size: model.get("size").and_then(Value::as_u64).unwrap_or(0),
+                modified_at: model
+                    .get("modified_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                family: model["details"]["family"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                parameter_size: model["details"]["parameter_size"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                quantization_level: model["details"]["quantization_level"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect();
+    let running_models = running["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            Some(OllamaRunningModel {
+                name: model.get("name")?.as_str()?.to_owned(),
+                size: model.get("size").and_then(Value::as_u64).unwrap_or(0),
+                size_vram: model.get("size_vram").and_then(Value::as_u64).unwrap_or(0),
+                expires_at: model
+                    .get("expires_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect();
+    Ok(OllamaState {
+        version: version["version"].as_str().unwrap_or("unknown").to_owned(),
+        models,
+        running_models,
+    })
+}
+
+async fn run_ollama_action(app: &App, action: OllamaAction) -> Result<()> {
+    let base = ollama_url(app).await?;
+    let response = match action {
+        OllamaAction::Pull { model } => {
+            app.http
+                .post(format!("{base}/api/pull"))
+                .json(&json!({"model": required_model_name(model)?, "stream": false}))
+                .send()
+                .await?
+        }
+        OllamaAction::Delete { model } => {
+            app.http
+                .delete(format!("{base}/api/delete"))
+                .json(&json!({"model": required_model_name(model)?}))
+                .send()
+                .await?
+        }
+        OllamaAction::Load { model } => {
+            let config = load_broker_config(&app.db).await?;
+            app.http
+                .post(format!("{base}/api/generate"))
+                .json(&json!({
+                    "model": required_model_name(model)?,
+                    "keep_alive": config.keep_alive,
+                    "stream": false
+                }))
+                .send()
+                .await?
+        }
+        OllamaAction::Unload { model } => {
+            app.http
+                .post(format!("{base}/api/generate"))
+                .json(&json!({
+                    "model": required_model_name(model)?,
+                    "keep_alive": 0,
+                    "stream": false
+                }))
+                .send()
+                .await?
+        }
+    };
+    response.error_for_status()?;
+    Ok(())
 }
 
 async fn adapter_url(app: &App) -> Result<String> {
@@ -2238,8 +2436,7 @@ async fn send_snapshot(
 }
 
 async fn extract_memory(app: &App, conversation_id: &str) -> Result<String> {
-    let models = probe_backend(app).await?;
-    let model = models.first().context("no model loaded")?;
+    let model = selected_model(app).await?;
     let recent: Vec<String> = sqlx::query_scalar(
         "SELECT author_type || ': ' || COALESCE(v.content,m.content) FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.created_at DESC LIMIT 40",
     )
@@ -2254,7 +2451,7 @@ async fn extract_memory(app: &App, conversation_id: &str) -> Result<String> {
         .post(format!("{}/chat/completions", adapter_url(app).await?))
         .timeout(Duration::from_secs(30))
         .json(&json!({
-            "model": model,
+            "model": &model,
             "messages": [
                 {"role":"system","content":"Extract exactly one durable roleplay fact worth remembering from the transcript. Return only the fact as one concise sentence. Do not add labels, markdown, instructions, guesses, or private reasoning. If there is no durable fact, return NONE."},
                 {"role":"user","content":recent.into_iter().rev().collect::<Vec<_>>().join("\n")}
@@ -2335,14 +2532,13 @@ async fn maybe_name_new_chat(
 
     let fallback = fallback_chat_title(first_message);
     let generated = async {
-        let models = probe_backend(app).await.ok()?;
-        let model = models.first()?;
+        let model = selected_model(app).await.ok()?;
         let response = app
             .http
             .post(format!("{}/chat/completions", adapter_url(app).await.ok()?))
             .timeout(Duration::from_secs(12))
             .json(&json!({
-                "model": model,
+                "model": &model,
                 "messages": [
                     {"role":"system","content":"Name this conversation in 2 to 6 words. Return only the title, without quotes or punctuation."},
                     {"role":"user","content": first_message}
@@ -2446,6 +2642,19 @@ async fn probe_backend(app: &App) -> Result<Vec<String>> {
         .collect())
 }
 
+async fn selected_model(app: &App) -> Result<String> {
+    let config = load_broker_config(&app.db).await?;
+    let models = probe_backend(app).await?;
+    if config.model.is_empty() {
+        return models.into_iter().next().context("no model loaded");
+    }
+    if models.iter().any(|model| model == &config.model) {
+        Ok(config.model)
+    } else {
+        bail!("configured model '{}' is not installed", config.model)
+    }
+}
+
 async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     let Generation {
         tx,
@@ -2457,8 +2666,8 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         mut cancel,
         origin,
     } = job;
-    let models = probe_backend(app).await?;
-    let model = models.first().context("no model loaded")?;
+    let config = load_broker_config(&app.db).await?;
+    let model = selected_model(app).await?;
     let participants=sqlx::query("SELECT c.id,c.name,c.system_prompt,c.personality,c.scenario,c.appearance,c.example_dialogue FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id=? ORDER BY p.position").bind(cid).fetch_all(&app.db).await?;
     let sid = select_speaker(app, cid, speaker, &participants).await?;
     let character = participants
@@ -2527,11 +2736,44 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         })?,
     ))
     .await?;
-    let response_future = app
-        .http
-        .post(format!("{}/chat/completions", adapter_url(app).await?))
-        .json(&json!({"model":model,"messages":messages,"stream":true}))
-        .send();
+    let (request_url, mut request_body, native_ollama) = if config.use_ollama_api {
+        (
+            format!("{}/api/chat", ollama_base_url(&config.adapter_url)),
+            json!({
+                "model": &model,
+                "messages": messages,
+                "stream": true,
+                "keep_alive": config.keep_alive,
+                "options": {
+                    "temperature": config.temperature,
+                    "top_p": config.top_p,
+                    "top_k": config.top_k,
+                    "num_ctx": config.num_ctx,
+                    "num_predict": config.num_predict,
+                    "repeat_penalty": config.repeat_penalty,
+                    "seed": config.seed
+                }
+            }),
+            true,
+        )
+    } else {
+        (
+            format!("{}/chat/completions", config.adapter_url),
+            json!({
+                "model": &model,
+                "messages": messages,
+                "stream": true,
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "seed": config.seed
+            }),
+            false,
+        )
+    };
+    if !native_ollama && config.num_predict >= 0 {
+        request_body["max_tokens"] = json!(config.num_predict);
+    }
+    let response_future = app.http.post(request_url).json(&request_body).send();
     let response=tokio::select!{biased;
         changed=cancel.changed()=>{
             if changed.is_err()||*cancel.borrow(){
@@ -2548,10 +2790,14 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !content_type
-        .to_ascii_lowercase()
-        .starts_with("text/event-stream")
-    {
+    let lower_content_type = content_type.to_ascii_lowercase();
+    if native_ollama {
+        if !lower_content_type.starts_with("application/x-ndjson")
+            && !lower_content_type.starts_with("application/json")
+        {
+            bail!("Ollama does not support streaming NDJSON (content-type: {content_type})")
+        }
+    } else if !lower_content_type.starts_with("text/event-stream") {
         bail!("backend does not support streaming SSE (content-type: {content_type})")
     }
     let mut stream = response.bytes_stream();
@@ -2584,12 +2830,20 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             Event::Timeout => {}
             Event::Data(Some(chunk)) => {
                 sse_buffer.extend_from_slice(&chunk?);
-                done = drain_sse(&mut sse_buffer, &mut pending, &mut complete)?;
+                done = if native_ollama {
+                    drain_ollama_stream(&mut sse_buffer, &mut pending, &mut complete)?
+                } else {
+                    drain_sse(&mut sse_buffer, &mut pending, &mut complete)?
+                };
             }
             Event::Data(None) => {
                 if !sse_buffer.is_empty() {
                     sse_buffer.push(b'\n');
-                    let _ = drain_sse(&mut sse_buffer, &mut pending, &mut complete)?;
+                    let _ = if native_ollama {
+                        drain_ollama_stream(&mut sse_buffer, &mut pending, &mut complete)?
+                    } else {
+                        drain_sse(&mut sse_buffer, &mut pending, &mut complete)?
+                    };
                 }
                 break;
             }
@@ -2757,6 +3011,38 @@ fn drain_sse(buffer: &mut Vec<u8>, pending: &mut String, complete: &mut String) 
     Ok(done)
 }
 
+fn drain_ollama_stream(
+    buffer: &mut Vec<u8>,
+    pending: &mut String,
+    complete: &mut String,
+) -> Result<bool> {
+    let mut consumed = 0;
+    let mut done = false;
+    while let Some(relative_end) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
+        let end = consumed + relative_end;
+        let line = std::str::from_utf8(&buffer[consumed..end])?.trim();
+        consumed = end + 1;
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(line).context("malformed Ollama NDJSON stream event")?;
+        if let Some(error) = value["error"].as_str() {
+            bail!("Ollama generation failed: {error}")
+        }
+        if let Some(text) = value["message"]["content"].as_str() {
+            pending.push_str(text);
+            complete.push_str(text);
+        }
+        done |= value["done"].as_bool().unwrap_or(false);
+        if done {
+            break;
+        }
+    }
+    buffer.drain(..consumed);
+    Ok(done)
+}
+
 async fn select_speaker(
     app: &App,
     cid: &str,
@@ -2786,8 +3072,7 @@ async fn select_speaker(
             .collect::<Vec<_>>();
         let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY created_at DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
         let choice = async {
-            let models = probe_backend(app).await.ok()?;
-            let model = models.first()?;
+            let model = selected_model(app).await.ok()?;
             let response=app.http.post(format!("{}/chat/completions",adapter_url(app).await.ok()?)).timeout(Duration::from_secs(15)).json(&json!({"model":model,"messages":[{"role":"system","content":"Choose exactly one next speaker name from the supplied list based on the recent roleplay. Output only the name."},{"role":"user","content":format!("Speakers: {}\nRecent roleplay:\n{}",names.join(", "),recent.into_iter().rev().collect::<Vec<_>>().join("\n"))}],"stream":false,"max_tokens":16})).send().await.ok()?.error_for_status().ok()?.json::<Value>().await.ok()?;
             let answer = response["choices"][0]["message"]["content"].as_str()?.trim();
             participants.iter().find(|r|r.get::<String,_>("name").eq_ignore_ascii_case(answer)).map(|r|r.get("id"))
@@ -2849,6 +3134,33 @@ mod tests {
         assert!(drain_sse(&mut buffer, &mut pending, &mut complete).unwrap());
         assert_eq!(pending, "hello");
         assert_eq!(complete, "hello");
+    }
+
+    #[test]
+    fn fragmented_ollama_stream_is_buffered_without_data_loss() {
+        let mut buffer = br#"{"message":{"content":"hel"},"done":false}
+{"message":{"cont"#
+            .to_vec();
+        let mut pending = String::new();
+        let mut complete = String::new();
+        assert!(!drain_ollama_stream(&mut buffer, &mut pending, &mut complete).unwrap());
+        buffer.extend_from_slice(br#"ent":"lo"},"done":true}"#);
+        buffer.push(b'\n');
+        assert!(drain_ollama_stream(&mut buffer, &mut pending, &mut complete).unwrap());
+        assert_eq!(pending, "hello");
+        assert_eq!(complete, "hello");
+    }
+
+    #[test]
+    fn ollama_native_base_is_derived_from_openai_url() {
+        assert_eq!(
+            ollama_base_url("http://127.0.0.1:11434/v1"),
+            "http://127.0.0.1:11434"
+        );
+        assert_eq!(
+            ollama_base_url("https://ollama.example.test/"),
+            "https://ollama.example.test"
+        );
     }
 
     #[test]
@@ -3436,6 +3748,16 @@ mod tests {
                 config: BrokerConfig {
                     adapter_enabled: false,
                     adapter_url: "http://127.0.0.1:11434/v1".into(),
+                    use_ollama_api: false,
+                    model: String::new(),
+                    temperature: 0.8,
+                    top_p: 0.9,
+                    top_k: 40,
+                    num_ctx: 4096,
+                    num_predict: -1,
+                    repeat_penalty: 1.1,
+                    seed: -1,
+                    keep_alive: "5m".into(),
                     allow_public_characters: false,
                     allow_self_registration: false,
                 },
