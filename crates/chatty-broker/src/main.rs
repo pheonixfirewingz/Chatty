@@ -2321,7 +2321,7 @@ async fn load_conversation_from_row(
 ) -> Result<ConversationView> {
     let id: String = row.get("id");
     let conversation = conversation_from_row(db, row).await?;
-    let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY created_at,id LIMIT 2000")
+    let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY revision,id LIMIT 2000")
         .bind(&id).fetch_all(db).await?;
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
@@ -2507,7 +2507,7 @@ async fn send_snapshot(
 async fn extract_memory(app: &App, user_id: &str, conversation_id: &str) -> Result<String> {
     let model = selected_model(app).await?;
     let recent: Vec<String> = sqlx::query_scalar(
-        "SELECT author_type || ': ' || COALESCE(v.content,m.content) FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.created_at DESC LIMIT 40",
+        "SELECT author_type || ': ' || COALESCE(v.content,m.content) FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 40",
     )
     .bind(conversation_id)
     .fetch_all(&app.db)
@@ -2747,7 +2747,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         .iter()
         .find(|r| r.get::<String, _>("id") == sid)
         .context("speaker is not a participant")?;
-    let recent=sqlx::query("SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.created_at DESC LIMIT 80").bind(cid).fetch_all(&app.db).await?;
+    let recent=sqlx::query("SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 80").bind(cid).fetch_all(&app.db).await?;
     let joined = recent
         .iter()
         .map(|r| clip(&r.get::<String, _>("content"), 4096))
@@ -3198,7 +3198,7 @@ async fn select_speaker(
             .iter()
             .map(|r| r.get::<String, _>("name"))
             .collect::<Vec<_>>();
-        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY created_at DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
+        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY revision DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
         let choice = async {
             let model = selected_model(app).await.ok()?;
             let response=app.http.post(format!("{}/chat/completions",adapter_url(app).await.ok()?)).timeout(Duration::from_secs(15)).json(&json!({"model":model,"messages":[{"role":"system","content":"Choose exactly one next speaker name from the supplied list based on the recent roleplay. Output only the name."},{"role":"user","content":format!("Speakers: {}\nRecent roleplay:\n{}",names.join(", "),recent.into_iter().rev().collect::<Vec<_>>().join("\n"))}],"stream":false,"max_tokens":16})).send().await.ok()?.error_for_status().ok()?.json::<Value>().await.ok()?;

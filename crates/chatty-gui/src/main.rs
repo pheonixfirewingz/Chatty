@@ -23,7 +23,7 @@ mod characters;
 mod conversation;
 mod network;
 mod ui;
-use network::{Command, ConnectionTarget, Event};
+use network::{Command, ConnectionTarget, Event, EventSender};
 use ui::FooterIcon;
 
 const COLOR_PRIMARY: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);
@@ -147,7 +147,9 @@ fn main() -> Result<()> {
     let size = [args.width, args.height];
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let repaint_context = Arc::new(std::sync::Mutex::new(None));
     if !inspect {
+        let network_events = EventSender::new(event_tx, repaint_context.clone());
         thread::Builder::new()
             .name("chatty-network".into())
             .spawn(move || {
@@ -155,7 +157,12 @@ fn main() -> Result<()> {
                     .enable_all()
                     .build()
                     .unwrap()
-                    .block_on(network::run(args, remembered_session, command_rx, event_tx))
+                    .block_on(network::run(
+                        args,
+                        remembered_session,
+                        command_rx,
+                        network_events,
+                    ))
             })?;
     }
     let options = eframe::NativeOptions {
@@ -170,6 +177,9 @@ fn main() -> Result<()> {
         options,
         Box::new(move |cc| {
             configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode, transparency);
+            if let Ok(mut context) = repaint_context.lock() {
+                *context = Some(cc.egui_ctx.clone());
+            }
             let mut app = ChattyApp::new(command_tx, event_rx);
             app.server_address = initial_server;
             app.light_mode = light_mode;
@@ -684,15 +694,7 @@ impl ChattyApp {
                             self.stream_text.clear();
                         }
                         Response::GenerationFinished { revision, .. } => {
-                            self.revision = self.revision.max(revision);
-                            self.active_request = None;
-                            self.typing_character = None;
-                            self.send(Request::GetAccountUsage {
-                                session_token: self.token.clone(),
-                            });
-                            if let Some(id) = self.selected_conversation.clone() {
-                                self.open_conversation(&id)
-                            }
+                            self.finish_generation(revision);
                         }
                         Response::Accepted { revision, .. } => {
                             self.revision = self.revision.max(revision);
@@ -720,8 +722,14 @@ impl ChattyApp {
                 }
             }
             MessageType::StreamEnd => {
-                self.active_request = None;
-                self.typing_character = None;
+                if let Ok(Response::GenerationFinished { revision, .. }) =
+                    decode::<Response>(&frame.payload)
+                {
+                    self.finish_generation(revision);
+                } else {
+                    self.active_request = None;
+                    self.typing_character = None;
+                }
             }
             MessageType::Delta => {
                 if let Ok(d) = decode::<StateDelta>(&frame.payload) {
@@ -751,6 +759,17 @@ impl ChattyApp {
             self.state.remove(&key);
         } else if let Ok(p) = decode::<DeltaPayload>(&d.changed_fields) {
             self.state.insert(key, p);
+        }
+    }
+    fn finish_generation(&mut self, revision: i64) {
+        self.revision = self.revision.max(revision);
+        self.active_request = None;
+        self.typing_character = None;
+        self.send(Request::GetAccountUsage {
+            session_token: self.token.clone(),
+        });
+        if let Some(id) = self.selected_conversation.clone() {
+            self.open_conversation(&id);
         }
     }
     fn open_conversation(&mut self, id: &str) {
@@ -1156,6 +1175,75 @@ mod visual_tests {
     }
 
     #[test]
+    fn stream_end_reloads_the_finished_generation_instead_of_reusing_stream_text() {
+        let (commands, mut requests) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+        app.stream_text = "the first streamed reply".into();
+        app.active_request = Some(42);
+        app.typing_character = Some("assistant".into());
+
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::StreamEnd,
+            request_id: 42,
+            payload: encode(&Response::GenerationFinished {
+                message_id: "second-reply".into(),
+                revision: 9,
+                cancelled: false,
+            })
+            .unwrap(),
+        });
+
+        assert_eq!(app.revision, 9);
+        assert!(app.active_request.is_none());
+        assert!(app.typing_character.is_none());
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Command::Request(request) if matches!(*request, Request::GetAccountUsage { .. })
+        ));
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            Command::Request(request)
+                if matches!(
+                    *request,
+                    Request::GetConversation { ref conversation_id, .. }
+                        if conversation_id == "demo"
+                )
+        ));
+
+        let mut messages = app.messages.clone();
+        messages.push(ChatMessage {
+            id: "second-reply".into(),
+            author_type: "character".into(),
+            author_id: Some("assistant".into()),
+            content: "a newly generated reply".into(),
+            parent_id: None,
+            selected_variant_id: None,
+            created_at: String::new(),
+            revision: 9,
+            variants: vec![],
+        });
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 43,
+            payload: encode(&Response::ConversationView(ConversationView {
+                conversation: app.conversations[0].clone(),
+                messages,
+            }))
+            .unwrap(),
+        });
+
+        assert!(app.stream_text.is_empty());
+        assert_eq!(
+            app.messages.last().map(|message| message.content.as_str()),
+            Some("a newly generated reply")
+        );
+    }
+
+    #[test]
     fn visual_desktop_restoring_session() {
         let mut restoring = restoring_harness(egui::vec2(1440.0, 900.0));
         restoring.get_by_label("Signing you in");
@@ -1557,11 +1645,47 @@ mod visual_tests {
                 app.draft_character_open = true;
                 app
             });
+        harness.run_ok();
+        let age = harness
+            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
+            .rect();
+        let gender = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Gender")
+            .rect();
+        assert!(age.bottom() < gender.top());
+        assert!((age.width() - gender.width()).abs() <= 1.0);
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
+            .scroll_to_me();
+        harness.run_ok();
         harness
             .render()
             .expect("render compact character popup")
             .save("/tmp/chatty-restored-compact-characters.png")
             .expect("save compact character popup");
+    }
+
+    #[test]
+    fn character_age_is_a_typed_numeric_spinner_backed_by_a_string() {
+        let mut harness =
+            egui_kittest::Harness::new_ui_state(ChattyApp::age_field, "29".to_owned());
+
+        let age = harness.get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age");
+        age.focus();
+        harness.run_ok();
+        harness.key_press(egui::Key::ArrowUp);
+        harness.run_ok();
+        assert_eq!(harness.state(), "30");
+
+        let age = harness.get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age");
+        age.focus();
+        harness.run_ok();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
+            .type_text("42");
+        harness.run_ok();
+        assert_eq!(harness.state(), "42");
     }
 
     #[test]
@@ -1585,6 +1709,23 @@ mod visual_tests {
                 app.draft_character_open = true;
                 app
             });
+        harness.run_ok();
+        let age = harness
+            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
+            .rect();
+        let gender = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Gender")
+            .rect();
+        let race = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Race")
+            .rect();
+        assert!((age.width() - gender.width()).abs() <= 1.0);
+        assert!((gender.width() - race.width()).abs() <= 1.0);
+        assert!(
+            (age.center().y - gender.center().y).abs() <= 1.0,
+            "age {age:?}, gender {gender:?}"
+        );
+        assert!((gender.center().y - race.center().y).abs() <= 1.0);
         harness
             .render()
             .expect("render desktop character popup")

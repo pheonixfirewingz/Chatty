@@ -25,6 +25,38 @@ pub(super) enum Event {
     SessionExpired,
 }
 
+#[derive(Clone)]
+pub(super) struct EventSender {
+    events: std::sync::mpsc::Sender<Event>,
+    repaint_context: Arc<std::sync::Mutex<Option<egui::Context>>>,
+}
+
+impl EventSender {
+    pub(super) fn new(
+        events: std::sync::mpsc::Sender<Event>,
+        repaint_context: Arc<std::sync::Mutex<Option<egui::Context>>>,
+    ) -> Self {
+        Self {
+            events,
+            repaint_context,
+        }
+    }
+
+    pub(super) fn send(
+        &self,
+        event: Event,
+    ) -> std::result::Result<(), std::sync::mpsc::SendError<Event>> {
+        let result = self.events.send(event);
+        if result.is_ok()
+            && let Ok(context) = self.repaint_context.lock()
+            && let Some(context) = context.as_ref()
+        {
+            context.request_repaint();
+        }
+        result
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ConnectionTarget {
     pub broker: String,
@@ -267,7 +299,7 @@ pub(super) async fn run(
     args: Args,
     mut remembered: Option<SavedSession>,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    events: std::sync::mpsc::Sender<Event>,
+    events: EventSender,
 ) {
     let path = match session_path(&args) {
         Ok(path) => path,
@@ -374,6 +406,7 @@ pub(super) async fn run(
             .await;
         }
         let mut reconnect = false;
+        let mut pending_generations = HashMap::<u64, Box<Request>>::new();
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -393,7 +426,15 @@ pub(super) async fn run(
                         }
                         if write_message(&mut stream, MessageType::Request, next_id, &*request).await.is_err() { reconnect = true; break; }
                     }
-                    Some(Command::SendThenGenerate { message, generate }) => { next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*message).await.is_err() { reconnect = true; break; } next_id += 1; if write_message(&mut stream, MessageType::Request, next_id, &*generate).await.is_err() { reconnect = true; break; } }
+                    Some(Command::SendThenGenerate { message, generate }) => {
+                        next_id += 1;
+                        let message_request_id = next_id;
+                        if write_message(&mut stream, MessageType::Request, message_request_id, &*message).await.is_err() {
+                            reconnect = true;
+                            break;
+                        }
+                        pending_generations.insert(message_request_id, generate);
+                    }
                     Some(Command::Cancel(id)) => if write_payload(&mut stream, MessageType::Cancel, id, vec![]).await.is_err() { reconnect = true; break; },
                     Some(Command::Reconnect) => {
                         let _ = events.send(Event::Status("Reconnecting…".into()));
@@ -409,12 +450,21 @@ pub(super) async fn run(
                 },
                 result = read_frame(&mut stream) => match result {
                     Ok(frame) => {
+                        let pending_generation =
+                            take_accepted_generation(&frame, &mut pending_generations);
                         if frame.message_type == MessageType::Response { if let Ok(Response::Authenticated { session_token, .. }) = decode::<Response>(&frame.payload) { let session = SavedSession { broker: active_target.broker.clone(), token: session_token.clone() }; remembered = Some(session.clone()); signed_out_through_request = None; if !args.inspect { save_session(&path, &session); } } }
                         if frame.message_type == MessageType::Error { if let Ok(error) = decode::<WireError>(&frame.payload) { if matches!(error.code, ErrorCode::Unauthorized) && remembered.as_ref().is_some_and(|session| session.broker == active_target.broker) { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } } }
                         if is_expected_post_logout_unauthorized(&frame, signed_out_through_request) {
                             continue;
                         }
                         if events.send(Event::Frame(frame)).is_err() { return; }
+                        if let Some(generate) = pending_generation {
+                            next_id += 1;
+                            if write_message(&mut stream, MessageType::Request, next_id, &*generate).await.is_err() {
+                                reconnect = true;
+                                break;
+                            }
+                        }
                     }
                     Err(e) => {
                         let _ = events.send(Event::Status(format!(
@@ -433,6 +483,27 @@ pub(super) async fn run(
     }
 }
 
+fn take_accepted_generation(
+    frame: &Frame,
+    pending: &mut HashMap<u64, Box<Request>>,
+) -> Option<Box<Request>> {
+    match frame.message_type {
+        MessageType::Response
+            if matches!(
+                decode::<Response>(&frame.payload),
+                Ok(Response::Accepted { .. })
+            ) =>
+        {
+            pending.remove(&frame.request_id)
+        }
+        MessageType::Error => {
+            pending.remove(&frame.request_id);
+            None
+        }
+        _ => None,
+    }
+}
+
 fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> bool {
     frame.message_type == MessageType::Error
         && cutoff.is_some_and(|request_id| frame.request_id <= request_id)
@@ -443,13 +514,80 @@ fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> b
 #[cfg(test)]
 mod tests {
     use super::{
-        SavedSession, default_server_ca_path, default_session_path,
+        Event, EventSender, SavedSession, default_server_ca_path, default_session_path,
         is_expected_post_logout_unauthorized, last_server_path, load_glass_mode, load_last_server,
         load_light_mode, load_session, load_transparency, save_last_server, save_preferences,
-        save_session,
+        save_session, take_accepted_generation,
     };
-    use chatty_protocol::{ErrorCode, Frame, MessageType, WireError, encode};
-    use std::path::PathBuf;
+    use chatty_protocol::{ErrorCode, Frame, MessageType, Request, Response, WireError, encode};
+    use eframe::egui;
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    #[test]
+    fn generation_is_released_only_after_its_user_message_is_accepted() {
+        let mut pending = HashMap::new();
+        pending.insert(
+            21,
+            Box::new(Request::Generate {
+                session_token: "session".into(),
+                conversation_id: "conversation".into(),
+                speaker_id: Some("character".into()),
+                parent_id: None,
+            }),
+        );
+        let unrelated = Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 20,
+            payload: encode(&Response::Accepted {
+                entity_id: Some("other".into()),
+                revision: 1,
+            })
+            .unwrap(),
+        };
+        assert!(take_accepted_generation(&unrelated, &mut pending).is_none());
+
+        let message_accepted = Frame {
+            request_id: 21,
+            payload: encode(&Response::Accepted {
+                entity_id: Some("message".into()),
+                revision: 2,
+            })
+            .unwrap(),
+            ..unrelated
+        };
+        assert!(matches!(
+            take_accepted_generation(&message_accepted, &mut pending),
+            Some(request) if matches!(*request, Request::Generate { .. })
+        ));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn network_events_wake_the_egui_event_loop() {
+        let context = egui::Context::default();
+        let repaint_count = Arc::new(AtomicUsize::new(0));
+        let callback_count = repaint_count.clone();
+        context.set_request_repaint_callback(move |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
+        let repaint_context = Arc::new(Mutex::new(Some(context)));
+        let (events, received) = std::sync::mpsc::channel();
+        let sender = EventSender::new(events, repaint_context);
+        let before = repaint_count.load(Ordering::SeqCst);
+
+        sender.send(Event::Status("Online".into())).unwrap();
+
+        assert!(matches!(received.recv().unwrap(), Event::Status(status) if status == "Online"));
+        assert!(repaint_count.load(Ordering::SeqCst) > before);
+    }
 
     #[test]
     fn session_uses_absolute_xdg_state_home() {

@@ -136,29 +136,7 @@ impl ChattyApp {
             ui.add(
                 egui::TextEdit::multiline(&mut self.draft.appearance).desired_width(f32::INFINITY),
             );
-            ui.horizontal_wrapped(|ui| {
-                ui.allocate_ui(egui::vec2(ui.available_width() / 3.0, 0.0), |ui| {
-                    ui.label("Age");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.draft.age)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
-                ui.allocate_ui(egui::vec2(ui.available_width() / 3.0, 0.0), |ui| {
-                    ui.label("Gender");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.draft.gender)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
-                ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
-                    ui.label("Race");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.draft.race)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
-            });
+            self.character_identity_fields(ui);
             ui.label("Misc");
             ui.add(egui::TextEdit::multiline(&mut self.draft.misc).desired_width(f32::INFINITY));
             ui.label("Scenario");
@@ -178,6 +156,64 @@ impl ChattyApp {
             ui.label("Tags");
             ui.add(egui::TextEdit::singleline(&mut self.draft.tags).desired_width(f32::INFINITY));
         });
+    }
+    fn character_identity_fields(&mut self, ui: &mut egui::Ui) {
+        const THREE_COLUMN_MIN_WIDTH: f32 = 560.0;
+
+        if ui.available_width() < THREE_COLUMN_MIN_WIDTH {
+            Self::age_field(ui, &mut self.draft.age);
+            Self::text_field(ui, "Gender", &mut self.draft.gender);
+            Self::text_field(ui, "Race", &mut self.draft.race);
+            return;
+        }
+
+        let spacing = ui.spacing().item_spacing.x;
+        let field_width = (ui.available_width() - spacing * 2.0) / 3.0;
+        let field_height = ui.text_style_height(&egui::TextStyle::Body)
+            + ui.spacing().item_spacing.y
+            + ui.spacing().interact_size.y;
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(field_width, field_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| Self::age_field(ui, &mut self.draft.age),
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(field_width, field_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| Self::text_field(ui, "Gender", &mut self.draft.gender),
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(field_width, field_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| Self::text_field(ui, "Race", &mut self.draft.race),
+            );
+        });
+    }
+    pub(super) fn age_field(ui: &mut egui::Ui, age: &mut String) {
+        let label = ui.label("Age");
+        ui.add_sized(
+            [ui.available_width(), ui.spacing().interact_size.y],
+            egui::DragValue::from_get_set(|new_value| {
+                if let Some(new_value) = new_value {
+                    *age = (new_value.round().clamp(0.0, u32::MAX as f64) as u32).to_string();
+                }
+                age.parse::<u32>().unwrap_or_default() as f64
+            })
+            .range(0..=u32::MAX)
+            .speed(1)
+            .max_decimals(0),
+        )
+        .labelled_by(label.id)
+        .on_hover_text("Drag to adjust, or click and type an age");
+    }
+    fn text_field(ui: &mut egui::Ui, label_text: &str, value: &mut String) {
+        let label = ui.label(label_text);
+        ui.add_sized(
+            [ui.available_width(), ui.spacing().interact_size.y],
+            egui::TextEdit::singleline(value),
+        )
+        .labelled_by(label.id);
     }
     fn character_actions(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
