@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -92,6 +92,18 @@ struct App {
 /// Caps concurrent Argon2 computations so login/register bursts hold a fixed
 /// memory ceiling (10 x ~19 MiB) instead of one hash per in-flight attempt.
 const ARGON2_CONCURRENCY: usize = 10;
+
+/// Closes connections that go quiet in both directions. Clients hold their
+/// session token and Resume on demand; generation streams and admin monitor
+/// polling keep their own connection alive through traffic.
+const IDLE_CLOSE: Duration = Duration::from_secs(120);
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 async fn argon_permit(app: &App) -> Result<OwnedSemaphorePermit> {
     app.argon_gate
@@ -226,12 +238,18 @@ async fn serve(
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::channel::<Out>(32); // bounded queue is transport backpressure
     let mut codec = ProtocolCodec::new()?;
-    let writer = tokio::spawn(async move {
-        while let Some((ty, id, payload)) = rx.recv().await {
-            codec.write_payload(&mut wr, ty, id, &payload).await?
-        }
-        Ok::<_, ProtocolError>(())
-    });
+    // Millis of the last byte activity in either direction; drives idle close.
+    let last_activity = Arc::new(AtomicU64::new(unix_ms()));
+    let writer = {
+        let last_activity = last_activity.clone();
+        tokio::spawn(async move {
+            while let Some((ty, id, payload)) = rx.recv().await {
+                codec.write_payload(&mut wr, ty, id, &payload).await?;
+                last_activity.store(unix_ms(), Ordering::Relaxed);
+            }
+            Ok::<_, ProtocolError>(())
+        })
+    };
     // The sole JSON use is the version handshake.
     tx.send((
         MessageType::Handshake,
@@ -275,14 +293,29 @@ async fn serve(
         }
         Ok::<_, ProtocolError>(())
     });
+    let idle = tokio::time::sleep(IDLE_CLOSE);
+    tokio::pin!(idle);
     loop {
         let incoming = tokio::select! {
-            frame = read_frame(&mut rd) => frame,
+            frame = read_frame(&mut rd) => {
+                last_activity.store(unix_ms(), Ordering::Relaxed);
+                idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
+                frame
+            }
             changed = lag_rx.changed() => {
                 if changed.is_ok() && *lag_rx.borrow() {
                     break;
                 }
                 continue;
+            }
+            _ = &mut idle => {
+                if unix_ms().saturating_sub(last_activity.load(Ordering::Relaxed)) < IDLE_CLOSE.as_millis() as u64 {
+                    // Outbound traffic (e.g. a generation stream) kept the
+                    // connection warm; wait out the remaining quiet period.
+                    idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
+                    continue;
+                }
+                break;
             }
         };
         let frame = match incoming {

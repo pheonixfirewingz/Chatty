@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 
@@ -217,8 +218,16 @@ pub(super) fn save_preferences(
     );
 }
 
-async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<TcpStream>> {
+/// One config per CA so rustls session resumption survives reconnects; a
+/// fresh config per connection would pay a full TLS handshake every time.
+fn client_config(args: &Args, target: &ConnectionTarget) -> Result<Arc<ClientConfig>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<ClientConfig>>>> =
+        std::sync::OnceLock::new();
     let ca_path = ca_path(args, target)?;
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(&ca_path) {
+        return Ok(hit.clone());
+    }
     let mut roots = RootCertStore::empty();
     let ca_file = File::open(&ca_path)
         .with_context(|| format!("could not open CA certificate {}", ca_path.display()))?;
@@ -228,10 +237,16 @@ async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<Tcp
     let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_root_certificates(roots)
         .with_no_client_auth();
+    let config = Arc::new(config);
+    cache.lock().unwrap().insert(ca_path, config.clone());
+    Ok(config)
+}
+
+async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<TcpStream>> {
     let tcp = TcpStream::connect(&target.broker).await?;
     tcp.set_nodelay(true)?;
     let name = ServerName::try_from(target.server_name.clone()).context("invalid server name")?;
-    let mut stream = TlsConnector::from(Arc::new(config))
+    let mut stream = TlsConnector::from(client_config(args, target)?)
         .connect(name, tcp)
         .await
         .context("TLS certificate verification failed")?;
@@ -295,6 +310,33 @@ fn default_server_ca_path(
         })
 }
 
+/// Favors queued commands over the live channel so nothing typed while the
+/// link is down is lost.
+async fn next_command(
+    pending: &mut VecDeque<Command>,
+    commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> Option<Command> {
+    if let Some(command) = pending.pop_front() {
+        return Some(command);
+    }
+    commands.recv().await
+}
+
+/// Waits for user action instead of holding an idle wire. Returns `None`
+/// only when the app asked to stop.
+async fn park_for_command(
+    pending: &mut VecDeque<Command>,
+    commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> Option<()> {
+    match commands.recv().await {
+        Some(Command::Stop) | None => None,
+        Some(command) => {
+            pending.push_back(command);
+            Some(())
+        }
+    }
+}
+
 pub(super) async fn run(
     args: Args,
     mut remembered: Option<SavedSession>,
@@ -315,6 +357,7 @@ pub(super) async fn run(
     let mut signed_out_through_request = None;
     let mut target: Option<ConnectionTarget> = None;
     let mut established_for_target = false;
+    let mut pending = VecDeque::<Command>::new();
     let last_server = last_server_path(&path);
     loop {
         if target.is_none() {
@@ -348,7 +391,12 @@ pub(super) async fn run(
                         "{} · Offline: {error:#}",
                         current_utc_timestamp()
                     )));
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if park_for_command(&mut pending, &mut commands)
+                        .await
+                        .is_none()
+                    {
+                        return;
+                    }
                 } else {
                     target = None;
                     let _ = events.send(Event::ConnectionFailed(format!(
@@ -363,7 +411,12 @@ pub(super) async fn run(
                         "{} · Offline: connection timed out",
                         current_utc_timestamp()
                     )));
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if park_for_command(&mut pending, &mut commands)
+                        .await
+                        .is_none()
+                    {
+                        return;
+                    }
                 } else {
                     target = None;
                     let _ = events.send(Event::ConnectionFailed(
@@ -422,7 +475,7 @@ pub(super) async fn run(
         let mut pending_generations = HashMap::<u64, Box<Request>>::new();
         loop {
             tokio::select! {
-                command = commands.recv() => match command {
+                command = next_command(&mut pending, &mut commands) => match command {
                     Some(Command::Connect(_)) => {}
                     Some(Command::Disconnect) => {
                         target = None;
@@ -491,8 +544,14 @@ pub(super) async fn run(
                         }
                     }
                     Err(e) => {
+                        let idle_close = matches!(
+                            &e,
+                            chatty_protocol::ProtocolError::Io(io)
+                                if io.kind() == std::io::ErrorKind::UnexpectedEof
+                        );
+                        let state = if idle_close { "Idle · offline" } else { "Offline" };
                         let _ = events.send(Event::Status(format!(
-                            "{} · Offline: {e}",
+                            "{} · {state}: {e}",
                             current_utc_timestamp()
                         )));
                         reconnect = true;
@@ -502,7 +561,14 @@ pub(super) async fn run(
             }
         }
         if reconnect && target.is_some() {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // The broker closes quiet connections; go on-demand until the
+            // client acts again.
+            if park_for_command(&mut pending, &mut commands)
+                .await
+                .is_none()
+            {
+                return;
+            }
         }
     }
 }
