@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, RwLock, broadcast, mpsc, watch},
+    sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc, watch},
     time::Instant,
 };
 use tokio_rustls::TlsAcceptor;
@@ -86,6 +86,19 @@ struct App {
     snapshot_gate: Arc<RwLock<()>>,
     deltas: broadcast::Sender<PublishedDelta>,
     recent_errors: Arc<Mutex<Vec<String>>>,
+    argon_gate: Arc<Semaphore>,
+}
+
+/// Caps concurrent Argon2 computations so login/register bursts hold a fixed
+/// memory ceiling (10 x ~19 MiB) instead of one hash per in-flight attempt.
+const ARGON2_CONCURRENCY: usize = 10;
+
+async fn argon_permit(app: &App) -> Result<OwnedSemaphorePermit> {
+    app.argon_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| anyhow::anyhow!("argon gate unavailable: {error}"))
 }
 type Out = (MessageType, u64, Bytes);
 type CancellationRegistry = Arc<Mutex<HashMap<(Uuid, u64), watch::Sender<bool>>>>;
@@ -158,6 +171,7 @@ async fn main() -> Result<()> {
         snapshot_gate: Arc::new(RwLock::new(())),
         deltas: delta_tx,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
     };
     let probe_app = app.clone();
     tokio::spawn(async move {
@@ -544,10 +558,13 @@ async fn dispatch(
             let uid = Uuid::new_v4().to_string();
             let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            let hash = Argon2::default()
-                .hash_password(password.as_bytes(), &salt)
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?
-                .to_string();
+            let hash = {
+                let _argon_permit = argon_permit(&app).await?;
+                Argon2::default()
+                    .hash_password(password.as_bytes(), &salt)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                    .to_string()
+            };
             sqlx::query("INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,CASE WHEN EXISTS(SELECT 1 FROM users) THEN 'user' ELSE 'admin' END)")
                 .bind(&uid)
                 .bind(username)
@@ -583,9 +600,12 @@ async fn dispatch(
             let stored: String = row.get("password_hash");
             let parsed =
                 PasswordHash::new(&stored).map_err(|_| anyhow::anyhow!("invalid credentials"))?;
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed)
-                .map_err(|_| anyhow::anyhow!("invalid credentials"))?;
+            {
+                let _argon_permit = argon_permit(&app).await?;
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &parsed)
+                    .map_err(|_| anyhow::anyhow!("invalid credentials"))?;
+            }
             let uid: String = row.get("id");
             let role: String = row.get("role");
             let (token, rev) = new_session(&app.db, &uid).await?;
@@ -668,10 +688,13 @@ async fn dispatch(
             let uid = Uuid::new_v4().to_string();
             let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let hash = Argon2::default()
-                .hash_password(password.as_bytes(), &salt)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                .to_string();
+            let hash = {
+                let _argon_permit = argon_permit(&app).await?;
+                Argon2::default()
+                    .hash_password(password.as_bytes(), &salt)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                    .to_string()
+            };
             sqlx::query("INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,?)")
                 .bind(&uid)
                 .bind(username.trim())
@@ -3385,6 +3408,7 @@ mod tests {
             snapshot_gate: Arc::new(RwLock::new(())),
             deltas,
             recent_errors: Arc::new(Mutex::new(Vec::new())),
+            argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         };
         let (_, registered) = call(
             &app,
@@ -3521,6 +3545,7 @@ mod tests {
             snapshot_gate: Arc::new(RwLock::new(())),
             deltas,
             recent_errors: Arc::new(Mutex::new(Vec::new())),
+            argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         };
         let (_, first) = call(
             &app,
