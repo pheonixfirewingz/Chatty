@@ -1,5 +1,4 @@
 use super::*;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 impl From<&Character> for DraftCharacter {
     fn from(c: &Character) -> Self {
@@ -379,7 +378,8 @@ fn png_card_json(bytes: &[u8]) -> Option<Vec<u8>> {
             let data = &bytes[at + 8..at + 8 + len];
             if let Some(zero) = data.iter().position(|b| *b == 0) {
                 if &data[..zero] == b"chara" {
-                    return STANDARD.decode(&data[zero + 1..]).ok();
+                    let text = std::str::from_utf8(&data[zero + 1..]).ok()?;
+                    return chatty_protocol::util::base64::decode(text);
                 }
             }
         }

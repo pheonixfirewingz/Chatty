@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 
@@ -217,21 +218,35 @@ pub(super) fn save_preferences(
     );
 }
 
-async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<TcpStream>> {
+/// One config per CA so rustls session resumption survives reconnects; a
+/// fresh config per connection would pay a full TLS handshake every time.
+fn client_config(args: &Args, target: &ConnectionTarget) -> Result<Arc<ClientConfig>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<ClientConfig>>>> =
+        std::sync::OnceLock::new();
     let ca_path = ca_path(args, target)?;
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(&ca_path) {
+        return Ok(hit.clone());
+    }
     let mut roots = RootCertStore::empty();
     let ca_file = File::open(&ca_path)
         .with_context(|| format!("could not open CA certificate {}", ca_path.display()))?;
-    for cert in rustls_pemfile::certs(&mut BufReader::new(ca_file)) {
+    for cert in chatty_protocol::util::pemfile::certs(&mut BufReader::new(ca_file)) {
         roots.add(cert?).context("invalid pinned CA")?;
     }
     let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_root_certificates(roots)
         .with_no_client_auth();
+    let config = Arc::new(config);
+    cache.lock().unwrap().insert(ca_path, config.clone());
+    Ok(config)
+}
+
+async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<TcpStream>> {
     let tcp = TcpStream::connect(&target.broker).await?;
     tcp.set_nodelay(true)?;
     let name = ServerName::try_from(target.server_name.clone()).context("invalid server name")?;
-    let mut stream = TlsConnector::from(Arc::new(config))
+    let mut stream = TlsConnector::from(client_config(args, target)?)
         .connect(name, tcp)
         .await
         .context("TLS certificate verification failed")?;
@@ -241,7 +256,7 @@ async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<Tcp
         || value["protocol"] != 9
         || value["encoding"] != "bincode2"
     {
-        anyhow::bail!("unsupported broker handshake");
+        bail!("unsupported broker handshake");
     }
     Ok(stream)
 }
@@ -257,7 +272,7 @@ fn ca_path(args: &Args, target: &ConnectionTarget) -> Result<PathBuf> {
         || server_name == ".."
         || server_name.contains(['/', '\\'])
     {
-        anyhow::bail!("invalid server name for CA certificate lookup");
+        bail!("invalid server name for CA certificate lookup");
     }
 
     let server_ca = default_server_ca_path(
@@ -295,6 +310,33 @@ fn default_server_ca_path(
         })
 }
 
+/// Favors queued commands over the live channel so nothing typed while the
+/// link is down is lost.
+async fn next_command(
+    pending: &mut VecDeque<Command>,
+    commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> Option<Command> {
+    if let Some(command) = pending.pop_front() {
+        return Some(command);
+    }
+    commands.recv().await
+}
+
+/// Waits for user action instead of holding an idle wire. Returns `None`
+/// only when the app asked to stop.
+async fn park_for_command(
+    pending: &mut VecDeque<Command>,
+    commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> Option<()> {
+    match commands.recv().await {
+        Some(Command::Stop) | None => None,
+        Some(command) => {
+            pending.push_back(command);
+            Some(())
+        }
+    }
+}
+
 pub(super) async fn run(
     args: Args,
     mut remembered: Option<SavedSession>,
@@ -315,6 +357,7 @@ pub(super) async fn run(
     let mut signed_out_through_request = None;
     let mut target: Option<ConnectionTarget> = None;
     let mut established_for_target = false;
+    let mut pending = VecDeque::<Command>::new();
     let last_server = last_server_path(&path);
     loop {
         if target.is_none() {
@@ -348,7 +391,12 @@ pub(super) async fn run(
                         "{} · Offline: {error:#}",
                         current_utc_timestamp()
                     )));
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if park_for_command(&mut pending, &mut commands)
+                        .await
+                        .is_none()
+                    {
+                        return;
+                    }
                 } else {
                     target = None;
                     let _ = events.send(Event::ConnectionFailed(format!(
@@ -363,7 +411,12 @@ pub(super) async fn run(
                         "{} · Offline: connection timed out",
                         current_utc_timestamp()
                     )));
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if park_for_command(&mut pending, &mut commands)
+                        .await
+                        .is_none()
+                    {
+                        return;
+                    }
                 } else {
                     target = None;
                     let _ = events.send(Event::ConnectionFailed(
@@ -376,6 +429,17 @@ pub(super) async fn run(
 
         established_for_target = true;
         save_last_server(&last_server, &active_target.server_name);
+        // Persistent zstd contexts + scratch buffers for this connection.
+        let mut codec = match ProtocolCodec::new() {
+            Ok(codec) => codec,
+            Err(error) => {
+                let _ = events.send(Event::ConnectionFailed(format!(
+                    "Could not connect: {error}"
+                )));
+                target = None;
+                continue;
+            }
+        };
         let resume_token = remembered
             .as_ref()
             .filter(|session| session.broker == active_target.broker)
@@ -385,31 +449,33 @@ pub(super) async fn run(
         });
         let _ = events.send(Event::Status("Online · TLS 1.3".into()));
         next_id += 1;
-        let _ = write_message(
-            &mut stream,
-            MessageType::Request,
-            next_id,
-            &Request::GetServerCapabilities,
-        )
-        .await;
-        if let Some(token) = resume_token {
-            next_id += 1;
-            let _ = write_message(
+        let _ = codec
+            .write_message(
                 &mut stream,
                 MessageType::Request,
                 next_id,
-                &Request::Resume {
-                    session_token: token,
-                    since_revision: 0,
-                },
+                &Request::GetServerCapabilities,
             )
             .await;
+        if let Some(token) = resume_token {
+            next_id += 1;
+            let _ = codec
+                .write_message(
+                    &mut stream,
+                    MessageType::Request,
+                    next_id,
+                    &Request::Resume {
+                        session_token: token,
+                        since_revision: 0,
+                    },
+                )
+                .await;
         }
         let mut reconnect = false;
         let mut pending_generations = HashMap::<u64, Box<Request>>::new();
         loop {
             tokio::select! {
-                command = commands.recv() => match command {
+                command = next_command(&mut pending, &mut commands) => match command {
                     Some(Command::Connect(_)) => {}
                     Some(Command::Disconnect) => {
                         target = None;
@@ -424,18 +490,18 @@ pub(super) async fn run(
                             signed_out_through_request = Some(next_id);
                             let _ = fs::remove_file(&path);
                         }
-                        if write_message(&mut stream, MessageType::Request, next_id, &*request).await.is_err() { reconnect = true; break; }
+                        if codec.write_message(&mut stream, MessageType::Request, next_id, &*request).await.is_err() { reconnect = true; break; }
                     }
                     Some(Command::SendThenGenerate { message, generate }) => {
                         next_id += 1;
                         let message_request_id = next_id;
-                        if write_message(&mut stream, MessageType::Request, message_request_id, &*message).await.is_err() {
+                        if codec.write_message(&mut stream, MessageType::Request, message_request_id, &*message).await.is_err() {
                             reconnect = true;
                             break;
                         }
                         pending_generations.insert(message_request_id, generate);
                     }
-                    Some(Command::Cancel(id)) => if write_payload(&mut stream, MessageType::Cancel, id, vec![]).await.is_err() { reconnect = true; break; },
+                    Some(Command::Cancel(id)) => if codec.write_payload(&mut stream, MessageType::Cancel, id, &[]).await.is_err() { reconnect = true; break; },
                     Some(Command::Reconnect) => {
                         let _ = events.send(Event::Status("Reconnecting…".into()));
                         reconnect = true;
@@ -448,27 +514,44 @@ pub(super) async fn run(
                     }
                     Some(Command::Stop) | None => return,
                 },
-                result = read_frame(&mut stream) => match result {
+                result = codec.read_frame(&mut stream) => match result {
                     Ok(frame) => {
-                        let pending_generation =
-                            take_accepted_generation(&frame, &mut pending_generations);
-                        if frame.message_type == MessageType::Response { if let Ok(Response::Authenticated { session_token, .. }) = decode::<Response>(&frame.payload) { let session = SavedSession { broker: active_target.broker.clone(), token: session_token.clone() }; remembered = Some(session.clone()); signed_out_through_request = None; if !args.inspect { save_session(&path, &session); } } }
-                        if frame.message_type == MessageType::Error { if let Ok(error) = decode::<WireError>(&frame.payload) { if matches!(error.code, ErrorCode::Unauthorized) && remembered.as_ref().is_some_and(|session| session.broker == active_target.broker) { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } } }
-                        if is_expected_post_logout_unauthorized(&frame, signed_out_through_request) {
+                        // Decode each frame at most once in this loop.
+                        let response = (frame.message_type == MessageType::Response)
+                            .then(|| decode::<Response>(&frame.payload).ok())
+                            .flatten();
+                        let error = (frame.message_type == MessageType::Error)
+                            .then(|| decode::<WireError>(&frame.payload).ok())
+                            .flatten();
+                        let pending_generation = take_accepted_generation(
+                            response.as_ref(),
+                            frame.request_id,
+                            frame.message_type == MessageType::Error,
+                            &mut pending_generations,
+                        );
+                        if let Some(Response::Authenticated { session_token, .. }) = response { let session = SavedSession { broker: active_target.broker.clone(), token: session_token }; remembered = Some(session.clone()); signed_out_through_request = None; if !args.inspect { save_session(&path, &session); } }
+                        if let Some(error) = &error { if matches!(error.code, ErrorCode::Unauthorized) && remembered.as_ref().is_some_and(|session| session.broker == active_target.broker) { remembered = None; let _ = fs::remove_file(&path); let _ = events.send(Event::SessionExpired); } }
+                        if is_expected_post_logout_unauthorized(frame.request_id, error.as_ref(), signed_out_through_request) {
                             continue;
                         }
                         if events.send(Event::Frame(frame)).is_err() { return; }
                         if let Some(generate) = pending_generation {
                             next_id += 1;
-                            if write_message(&mut stream, MessageType::Request, next_id, &*generate).await.is_err() {
+                            if codec.write_message(&mut stream, MessageType::Request, next_id, &*generate).await.is_err() {
                                 reconnect = true;
                                 break;
                             }
                         }
                     }
                     Err(e) => {
+                        let idle_close = matches!(
+                            &e,
+                            chatty_protocol::ProtocolError::Io(io)
+                                if io.kind() == std::io::ErrorKind::UnexpectedEof
+                        );
+                        let state = if idle_close { "Idle · offline" } else { "Offline" };
                         let _ = events.send(Event::Status(format!(
-                            "{} · Offline: {e}",
+                            "{} · {state}: {e}",
                             current_utc_timestamp()
                         )));
                         reconnect = true;
@@ -478,37 +561,41 @@ pub(super) async fn run(
             }
         }
         if reconnect && target.is_some() {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // The broker closes quiet connections; go on-demand until the
+            // client acts again.
+            if park_for_command(&mut pending, &mut commands)
+                .await
+                .is_none()
+            {
+                return;
+            }
         }
     }
 }
 
 fn take_accepted_generation(
-    frame: &Frame,
+    response: Option<&Response>,
+    request_id: u64,
+    is_error_frame: bool,
     pending: &mut HashMap<u64, Box<Request>>,
 ) -> Option<Box<Request>> {
-    match frame.message_type {
-        MessageType::Response
-            if matches!(
-                decode::<Response>(&frame.payload),
-                Ok(Response::Accepted { .. })
-            ) =>
-        {
-            pending.remove(&frame.request_id)
-        }
-        MessageType::Error => {
-            pending.remove(&frame.request_id);
+    match response {
+        Some(Response::Accepted { .. }) => pending.remove(&request_id),
+        _ if is_error_frame => {
+            pending.remove(&request_id);
             None
         }
         _ => None,
     }
 }
 
-fn is_expected_post_logout_unauthorized(frame: &Frame, cutoff: Option<u64>) -> bool {
-    frame.message_type == MessageType::Error
-        && cutoff.is_some_and(|request_id| frame.request_id <= request_id)
-        && decode::<WireError>(&frame.payload)
-            .is_ok_and(|error| matches!(error.code, ErrorCode::Unauthorized))
+fn is_expected_post_logout_unauthorized(
+    request_id: u64,
+    error: Option<&WireError>,
+    cutoff: Option<u64>,
+) -> bool {
+    cutoff.is_some_and(|cutoff| request_id <= cutoff)
+        && error.is_some_and(|error| matches!(error.code, ErrorCode::Unauthorized))
 }
 
 #[cfg(test)]
@@ -519,7 +606,7 @@ mod tests {
         load_light_mode, load_session, load_transparency, save_last_server, save_preferences,
         save_session, take_accepted_generation,
     };
-    use chatty_protocol::{ErrorCode, Frame, MessageType, Request, Response, WireError, encode};
+    use chatty_protocol::{ErrorCode, Request, Response, WireError};
     use eframe::egui;
     use std::{
         collections::HashMap,
@@ -542,29 +629,23 @@ mod tests {
                 parent_id: None,
             }),
         );
-        let unrelated = Frame {
-            compressed: false,
-            message_type: MessageType::Response,
-            request_id: 20,
-            payload: encode(&Response::Accepted {
-                entity_id: Some("other".into()),
-                revision: 1,
-            })
-            .unwrap(),
+        let other_accepted = Response::Accepted {
+            entity_id: Some("other".into()),
+            revision: 1,
         };
-        assert!(take_accepted_generation(&unrelated, &mut pending).is_none());
+        assert!(take_accepted_generation(Some(&other_accepted), 20, false, &mut pending).is_none());
 
-        let message_accepted = Frame {
-            request_id: 21,
-            payload: encode(&Response::Accepted {
-                entity_id: Some("message".into()),
-                revision: 2,
-            })
-            .unwrap(),
-            ..unrelated
+        let accepted = Response::Accepted {
+            entity_id: Some("message".into()),
+            revision: 2,
         };
         assert!(matches!(
-            take_accepted_generation(&message_accepted, &mut pending),
+            take_accepted_generation(
+                Some(&accepted),
+                21,
+                false,
+                &mut pending
+            ),
             Some(request) if matches!(*request, Request::Generate { .. })
         ));
         assert!(pending.is_empty());
@@ -633,21 +714,28 @@ mod tests {
 
     #[test]
     fn unauthorized_from_pre_logout_request_is_expected() {
-        let frame = Frame {
-            compressed: false,
-            message_type: MessageType::Error,
-            request_id: 12,
-            payload: encode(&WireError {
-                code: ErrorCode::Unauthorized,
-                message: "unauthorized".into(),
-                retryable: false,
-            })
-            .unwrap(),
+        let error = WireError {
+            code: ErrorCode::Unauthorized,
+            message: "unauthorized".into(),
+            retryable: false,
         };
 
-        assert!(is_expected_post_logout_unauthorized(&frame, Some(12)));
-        assert!(!is_expected_post_logout_unauthorized(&frame, Some(11)));
-        assert!(!is_expected_post_logout_unauthorized(&frame, None));
+        assert!(is_expected_post_logout_unauthorized(
+            12,
+            Some(&error),
+            Some(12)
+        ));
+        assert!(!is_expected_post_logout_unauthorized(
+            12,
+            Some(&error),
+            Some(11)
+        ));
+        assert!(!is_expected_post_logout_unauthorized(
+            12,
+            Some(&error),
+            None
+        ));
+        assert!(!is_expected_post_logout_unauthorized(12, None, Some(12)));
     }
 
     #[test]

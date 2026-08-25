@@ -1,8 +1,8 @@
 #![allow(clippy::collapsible_if)]
 
-use anyhow::{Context, Result};
+use chatty_protocol::util::args::ParsedArgs;
+use chatty_protocol::util::{bail, format_err, Context, Error, Result};
 use chatty_protocol::*;
-use clap::Parser;
 use eframe::egui;
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use std::{
@@ -88,29 +88,46 @@ fn modal_frame(ctx: &egui::Context, light_mode: bool, glass_mode: bool) -> egui:
     }
 }
 
-#[derive(Parser, Clone)]
 struct Args {
-    #[arg(long, env = "CHATTY_BROKER", default_value = "")]
     broker: String,
-    #[arg(long, env = "CHATTY_CA")]
     ca: Option<PathBuf>,
-    #[arg(long)]
     inspect: bool,
-    #[arg(long, default_value = "/tmp/chatty-gui-control")]
     inspect_control: PathBuf,
-    #[arg(long, default_value_t = 1100.0)]
     width: f32,
-    #[arg(long, default_value_t = 720.0)]
     height: f32,
-    #[arg(long, env = "CHATTY_SESSION_FILE")]
     session_file: Option<PathBuf>,
 }
+
+const USAGE: &str = "chatty-gui -- Chatty client\n\n\
+Options:\n\
+  --broker <addr>         Broker address [env: CHATTY_BROKER]\n\
+  --ca <path>             Pinned CA certificate PEM [env: CHATTY_CA]\n\
+  --inspect               Open the inspection harness instead of the app\n\
+  --inspect-control <path> Control socket path [default: /tmp/chatty-gui-control]\n\
+  --width <px>            Initial window width [default: 1100]\n\
+  --height <px>           Initial window height [default: 720]\n\
+  --session-file <path>   Session storage path [env: CHATTY_SESSION_FILE]\n";
 
 fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .map_err(|_| anyhow::anyhow!("failed to install TLS provider"))?;
-    let mut args = Args::parse();
+        .map_err(|_| format_err!("failed to install TLS provider"))?;
+    let parsed = ParsedArgs::parse(USAGE)?;
+    let mut args = Args {
+        broker: parsed.string("broker", "CHATTY_BROKER", ""),
+        ca: parsed.optional("ca", "CHATTY_CA").map(PathBuf::from),
+        inspect: parsed.flag("inspect"),
+        inspect_control: PathBuf::from(parsed.string(
+            "inspect-control",
+            "",
+            "/tmp/chatty-gui-control",
+        )),
+        width: parsed.number("width", 1100.0),
+        height: parsed.number("height", 720.0),
+        session_file: parsed
+            .optional("session-file", "CHATTY_SESSION_FILE")
+            .map(PathBuf::from),
+    };
     let inspect = args.inspect;
     let mut initial_server = broker_host(&args.broker).unwrap_or_default();
     let mut initial_broker = connection_target(&initial_server).map(|target| target.broker);
@@ -192,7 +209,7 @@ fn main() -> Result<()> {
             Ok(Box::new(app))
         }),
     )
-    .map_err(|e| anyhow::anyhow!(e.to_string()))
+    .map_err(|e| Error::msg(e.to_string()))
 }
 
 fn broker_host(value: &str) -> Option<String> {

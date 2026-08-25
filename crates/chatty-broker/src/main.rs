@@ -1,7 +1,7 @@
-use anyhow::{Context, Result, bail};
+use chatty_protocol::util::{bail, format_err, new_uuid, pemfile, args::ParsedArgs, Context, Error, Result};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use bytes::Bytes;
 use chatty_protocol::*;
-use clap::Parser;
 use futures_util::{StreamExt, TryStreamExt};
 use rustls::{
     ServerConfig,
@@ -16,36 +16,34 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, RwLock, broadcast, mpsc, watch},
+    sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc, watch},
     time::Instant,
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
-use uuid::Uuid;
 
-#[derive(Parser, Clone)]
 struct Args {
-    #[arg(long, env = "CHATTY_LISTEN", default_value = "0.0.0.0:7443")]
     listen: String,
-    #[arg(long, env = "CHATTY_DATABASE")]
     database: Option<String>,
-    #[arg(long, env = "CHATTY_CERT", default_value = "certs/server.pem")]
     cert: String,
-    #[arg(long, env = "CHATTY_KEY", default_value = "certs/server.key")]
     key: String,
-    #[arg(
-        long,
-        env = "CHATTY_LLAMA_URL",
-        default_value = "http://192.168.0.97:11434/v1"
-    )]
     llama_url: String,
 }
+
+/// Usage text printed for `--help` (hand-rolled clap replacement).
+const USAGE: &str = "chatty-broker -- TLS 1.3 chat broker\n\n\
+Options:\n\
+  --listen <addr>     Listen address [env: CHATTY_LISTEN] [default: 0.0.0.0:7443]\n\
+  --database <path>   SQLite database URL [env: CHATTY_DATABASE]\n\
+  --cert <path>       TLS certificate PEM [default: certs/server.pem]\n\
+  --key <path>        TLS private key PEM [default: certs/server.key]\n\
+  --llama-url <url>   Inference adapter base URL [env: CHATTY_LLAMA_URL]\n";
 
 fn default_user_data_dir(
     xdg_data_home: Option<PathBuf>,
@@ -85,9 +83,34 @@ struct App {
     snapshot_gate: Arc<RwLock<()>>,
     deltas: broadcast::Sender<PublishedDelta>,
     recent_errors: Arc<Mutex<Vec<String>>>,
+    argon_gate: Arc<Semaphore>,
 }
-type Out = (MessageType, u64, Vec<u8>);
-type CancellationRegistry = Arc<Mutex<HashMap<(Uuid, u64), watch::Sender<bool>>>>;
+
+/// Caps concurrent Argon2 computations so login/register bursts hold a fixed
+/// memory ceiling (10 x ~19 MiB) instead of one hash per in-flight attempt.
+const ARGON2_CONCURRENCY: usize = 10;
+
+/// Closes connections that go quiet in both directions. Clients hold their
+/// session token and Resume on demand; generation streams and admin monitor
+/// polling keep their own connection alive through traffic.
+const IDLE_CLOSE: Duration = Duration::from_secs(120);
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn argon_permit(app: &App) -> Result<OwnedSemaphorePermit> {
+    app.argon_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| format_err!("argon gate unavailable: {error}"))
+}
+type Out = (MessageType, u64, Bytes);
+type CancellationRegistry = Arc<Mutex<HashMap<(String, u64), watch::Sender<bool>>>>;
 static ACTIVE_CONNECTIONS: AtomicU32 = AtomicU32::new(0);
 static STARTED_AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static CPU_SAMPLE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, u64)>>> =
@@ -96,11 +119,13 @@ static CPU_SAMPLE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Insta
 #[derive(Clone)]
 struct PublishedDelta {
     owner_id: String,
-    origin: Uuid,
-    delta: StateDelta,
+    origin: String,
+    /// Bincode encoding of the delta, computed once at publish time so every
+    /// subscriber clones a refcounted buffer instead of re-encoding.
+    encoded: Bytes,
 }
 
-fn delta_visible(identity: Option<&str>, connection_id: Uuid, event: &PublishedDelta) -> bool {
+fn delta_visible(identity: Option<&str>, connection_id: &str, event: &PublishedDelta) -> bool {
     event.origin != connection_id && identity == Some(event.owner_id.as_str())
 }
 
@@ -112,21 +137,43 @@ struct Generation<'a> {
     speaker_id: Option<String>,
     parent_id: Option<String>,
     cancel: watch::Receiver<bool>,
-    origin: Uuid,
+    origin: String,
+    /// While >0 the connection must not be idle-closed: a slow model load
+    /// can leave the wire silent far past IDLE_CLOSE.
+    busy: Arc<AtomicU64>,
+}
+
+struct BusyGuard(Arc<AtomicU64>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .map_err(|_| anyhow::anyhow!("failed to install TLS crypto provider"))?;
+        .map_err(|_| format_err!("failed to install TLS crypto provider"))?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("chatty_broker=info".parse()?),
         )
         .init();
-    let args = Args::parse();
+    let parsed = ParsedArgs::parse(USAGE)?;
+    let args = Args {
+        listen: parsed.string("listen", "CHATTY_LISTEN", "0.0.0.0:7443"),
+        database: parsed.optional("database", "CHATTY_DATABASE"),
+        cert: parsed.string("cert", "CHATTY_CERT", "certs/server.pem"),
+        key: parsed.string("key", "CHATTY_KEY", "certs/server.key"),
+        llama_url: parsed.string(
+            "llama-url",
+            "CHATTY_LLAMA_URL",
+            "http://192.168.0.97:11434/v1",
+        ),
+    };
     let _ = STARTED_AT.set(std::time::Instant::now());
     let database = match args.database.as_deref() {
         Some(database) => database.to_owned(),
@@ -155,6 +202,7 @@ async fn main() -> Result<()> {
         snapshot_gate: Arc::new(RwLock::new(())),
         deltas: delta_tx,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
     };
     let probe_app = app.clone();
     tokio::spawn(async move {
@@ -187,10 +235,10 @@ async fn main() -> Result<()> {
 
 fn tls_config(cert: &str, key: &str) -> Result<ServerConfig> {
     let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut BufReader::new(File::open(cert)?))
+        pemfile::certs(&mut BufReader::new(File::open(cert)?))
             .collect::<std::result::Result<_, _>>()?;
     let key: PrivateKeyDer<'static> =
-        rustls_pemfile::private_key(&mut BufReader::new(File::open(key)?))?
+        pemfile::private_key(&mut BufReader::new(File::open(key)?))?
             .context("missing private key")?;
     Ok(
         ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -204,45 +252,49 @@ async fn serve(
     app: App,
 ) -> Result<()> {
     ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
-    let connection_id = Uuid::new_v4();
+    let connection_id = new_uuid();
     let identity = Arc::new(RwLock::new(None::<String>));
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::channel::<Out>(32); // bounded queue is transport backpressure
-    let writer = tokio::spawn(async move {
-        while let Some((ty, id, payload)) = rx.recv().await {
-            if ty == MessageType::Handshake {
-                // Handshake is the only client/broker JSON payload.
-                write_payload(&mut wr, ty, id, payload).await?
-            } else {
-                // payload is already bincode: frame without re-encoding
-                write_raw(&mut wr, ty, id, payload).await?;
+    let mut codec = ProtocolCodec::new()?;
+    // Millis of the last byte activity in either direction; drives idle close.
+    let last_activity = Arc::new(AtomicU64::new(unix_ms()));
+    let busy = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let last_activity = last_activity.clone();
+        tokio::spawn(async move {
+            while let Some((ty, id, payload)) = rx.recv().await {
+                codec.write_payload(&mut wr, ty, id, &payload).await?;
+                last_activity.store(unix_ms(), Ordering::Relaxed);
             }
-        }
-        Ok::<_, ProtocolError>(())
-    });
+            Ok::<_, ProtocolError>(())
+        })
+    };
     // The sole JSON use is the version handshake.
     tx.send((
         MessageType::Handshake,
         0,
         serde_json::to_vec(
             &json!({"protocol":9,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
-        )?,
+        )?
+        .into(),
     ))
     .await?;
     let mut published = app.deltas.subscribe();
     let forward_tx = tx.clone();
     let forward_identity = identity.clone();
     let (lag_tx, mut lag_rx) = watch::channel(false);
+    let forwarder_connection_id = connection_id.clone();
     let forwarder = tokio::spawn(async move {
         loop {
             match published.recv().await {
-                Ok(event) if event.origin != connection_id => {
+                Ok(event) if event.origin != forwarder_connection_id => {
                     if delta_visible(
                         forward_identity.read().await.as_deref(),
-                        connection_id,
+                        &forwarder_connection_id,
                         &event,
                     ) && forward_tx
-                        .send((MessageType::Delta, 0, encode(&event.delta)?))
+                        .send((MessageType::Delta, 0, event.encoded.clone()))
                         .await
                         .is_err()
                     {
@@ -262,14 +314,32 @@ async fn serve(
         }
         Ok::<_, ProtocolError>(())
     });
+    let idle = tokio::time::sleep(IDLE_CLOSE);
+    tokio::pin!(idle);
     loop {
         let incoming = tokio::select! {
-            frame = read_frame(&mut rd) => frame,
+            frame = read_frame(&mut rd) => {
+                last_activity.store(unix_ms(), Ordering::Relaxed);
+                idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
+                frame
+            }
             changed = lag_rx.changed() => {
                 if changed.is_ok() && *lag_rx.borrow() {
                     break;
                 }
                 continue;
+            }
+            _ = &mut idle => {
+                let recent = unix_ms().saturating_sub(last_activity.load(Ordering::Relaxed))
+                    < IDLE_CLOSE.as_millis() as u64;
+                if recent || busy.load(Ordering::Relaxed) > 0 {
+                    // Outbound traffic or an in-flight generation (a slow
+                    // model load can silence the wire for minutes) keeps the
+                    // connection warm; wait out the remaining quiet period.
+                    idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
+                    continue;
+                }
+                break;
             }
         };
         let frame = match incoming {
@@ -284,6 +354,8 @@ async fn serve(
                 let error_log = app.recent_errors.clone();
                 let tx = tx.clone();
                 let identity = identity.clone();
+                let busy = busy.clone();
+                let connection_id = connection_id.clone();
                 tokio::spawn(async move {
                     if let Err(e) = dispatch(
                         app,
@@ -292,6 +364,7 @@ async fn serve(
                         connection_id,
                         frame.request_id,
                         req,
+                        busy,
                     )
                     .await
                     {
@@ -305,7 +378,7 @@ async fn serve(
                             .send((
                                 MessageType::Error,
                                 frame.request_id,
-                                encode(&w).unwrap_or_default(),
+                                encode(&w).unwrap_or_default().into(),
                             ))
                             .await;
                     }
@@ -316,7 +389,7 @@ async fn serve(
                     .cancellations
                     .lock()
                     .await
-                    .remove(&(connection_id, frame.request_id))
+                    .remove(&(connection_id.clone(), frame.request_id))
                 {
                     let _ = cancel.send(true);
                 }
@@ -445,7 +518,7 @@ async fn adapter_health(app: &App) -> (AdapterStatus, u32, Option<u64>) {
     )
 }
 
-async fn cancel_connection(registry: &CancellationRegistry, connection_id: Uuid) {
+async fn cancel_connection(registry: &CancellationRegistry, connection_id: String) {
     let mut cancellations = registry.lock().await;
     cancellations.retain(|(id, _), cancel| {
         if *id == connection_id {
@@ -457,16 +530,7 @@ async fn cancel_connection(registry: &CancellationRegistry, connection_id: Uuid)
     });
 }
 
-async fn write_raw<W: tokio::io::AsyncWrite + Unpin>(
-    w: &mut W,
-    ty: MessageType,
-    id: u64,
-    raw: Vec<u8>,
-) -> Result<(), ProtocolError> {
-    write_payload(w, ty, id, raw).await
-}
-
-fn classify_error(error: &anyhow::Error) -> WireError {
+fn classify_error(error: &Error) -> WireError {
     let message = error.to_string();
     let lower = message.to_lowercase();
     let (code, retryable) = if lower.contains("unauthorized") || lower.contains("credentials") {
@@ -500,9 +564,10 @@ async fn dispatch(
     app: App,
     tx: mpsc::Sender<Out>,
     identity: Arc<RwLock<Option<String>>>,
-    connection_id: Uuid,
+    connection_id: String,
     id: u64,
     req: Request,
+    busy: Arc<AtomicU64>,
 ) -> Result<()> {
     let _snapshot_guard = if matches!(&req, Request::Snapshot { .. }) {
         Some(app.snapshot_gate.write().await)
@@ -516,7 +581,7 @@ async fn dispatch(
     };
     macro_rules! send {
         ($ty:expr,$v:expr) => {{
-            tx.send(($ty, id, encode(&$v)?)).await?;
+            tx.send(($ty, id, encode(&$v)?.into())).await?;
         }};
     }
     macro_rules! send_delta {
@@ -528,11 +593,12 @@ async fn dispatch(
                 operation: $operation,
                 changed_fields: $changed.clone(),
             };
-            tx.send((MessageType::Delta, id, encode(&delta)?)).await?;
+            let encoded: Bytes = encode(&delta)?.into();
+            tx.send((MessageType::Delta, id, encoded.clone())).await?;
             let _ = app.deltas.send(PublishedDelta {
                 owner_id: $owner.to_string(),
-                origin: connection_id,
-                delta,
+                origin: connection_id.clone(),
+                encoded,
             });
         }};
     }
@@ -550,13 +616,16 @@ async fn dispatch(
             if user_count > 0 && !registration_enabled {
                 bail!("self registration is disabled")
             }
-            let uid = Uuid::new_v4().to_string();
-            let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            let hash = Argon2::default()
-                .hash_password(password.as_bytes(), &salt)
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?
-                .to_string();
+            let uid = new_uuid();
+            let salt = SaltString::encode_b64(new_uuid().as_bytes())
+                .map_err(|e| Error::msg(e.to_string()))?;
+            let hash = {
+                let _argon_permit = argon_permit(&app).await?;
+                Argon2::default()
+                    .hash_password(password.as_bytes(), &salt)
+                    .map_err(|e| Error::msg(e.to_string()))?
+                    .to_string()
+            };
             sqlx::query("INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,CASE WHEN EXISTS(SELECT 1 FROM users) THEN 'user' ELSE 'admin' END)")
                 .bind(&uid)
                 .bind(username)
@@ -591,10 +660,13 @@ async fn dispatch(
                 .context("invalid credentials")?;
             let stored: String = row.get("password_hash");
             let parsed =
-                PasswordHash::new(&stored).map_err(|_| anyhow::anyhow!("invalid credentials"))?;
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed)
-                .map_err(|_| anyhow::anyhow!("invalid credentials"))?;
+                PasswordHash::new(&stored).map_err(|_| format_err!("invalid credentials"))?;
+            {
+                let _argon_permit = argon_permit(&app).await?;
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &parsed)
+                    .map_err(|_| format_err!("invalid credentials"))?;
+            }
             let uid: String = row.get("id");
             let role: String = row.get("role");
             let (token, rev) = new_session(&app.db, &uid).await?;
@@ -674,13 +746,16 @@ async fn dispatch(
         } => {
             require_admin(&app.db, &session_token).await?;
             validate_credentials(&username, &password)?;
-            let uid = Uuid::new_v4().to_string();
-            let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let hash = Argon2::default()
-                .hash_password(password.as_bytes(), &salt)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                .to_string();
+            let uid = new_uuid();
+            let salt = SaltString::encode_b64(new_uuid().as_bytes())
+                .map_err(|error| Error::msg(error.to_string()))?;
+            let hash = {
+                let _argon_permit = argon_permit(&app).await?;
+                Argon2::default()
+                    .hash_password(password.as_bytes(), &salt)
+                    .map_err(|error| Error::msg(error.to_string()))?
+                    .to_string()
+            };
             sqlx::query("INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,?)")
                 .bind(&uid)
                 .bind(username.trim())
@@ -1079,11 +1154,12 @@ async fn dispatch(
             }
             transaction.commit().await?;
             for delta in outgoing {
-                tx.send((MessageType::Delta, id, encode(&delta)?)).await?;
+                let encoded: Bytes = encode(&delta)?.into();
+                tx.send((MessageType::Delta, id, encoded.clone())).await?;
                 let _ = app.deltas.send(PublishedDelta {
                     owner_id: uid.clone(),
-                    origin: connection_id,
-                    delta,
+                    origin: connection_id.clone(),
+                    encoded,
                 });
             }
             send!(
@@ -1181,7 +1257,7 @@ async fn dispatch(
             let mut visible_character = character.clone();
             visible_character.owned_by_user = true;
             let changed = encode(&DeltaPayload::Character(visible_character))?;
-            let eid = character.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            let eid = character.id.unwrap_or_else(|| new_uuid());
             let fields = encode(&character.tags)?;
             let mut transaction = app.db.begin().await?;
             let rev = delta_tx(
@@ -1224,7 +1300,7 @@ async fn dispatch(
                 let participant_id = if let Some(id) = existing {
                     id
                 } else {
-                    let id = Uuid::new_v4().to_string();
+                    let id = new_uuid();
                     let character = CharacterInput {
                         id: Some(id.clone()),
                         name: "Assistant".into(),
@@ -1290,7 +1366,7 @@ async fn dispatch(
             if owned_count != participant_ids.len() as i64 {
                 bail!("one or more participants are missing or forbidden")
             }
-            let eid = Uuid::new_v4().to_string();
+            let eid = new_uuid();
             let changed = encode(&DeltaPayload::Conversation {
                 title: title.clone(),
                 kind,
@@ -1431,7 +1507,7 @@ async fn dispatch(
                     bail!("message speaker is not a conversation participant")
                 }
             }
-            let eid = Uuid::new_v4().to_string();
+            let eid = new_uuid();
             let author_type = if speaker_id.is_some() {
                 "character"
             } else {
@@ -1469,11 +1545,12 @@ async fn dispatch(
                 && let Some(delta) =
                     maybe_name_new_chat(&app, &uid, &conversation_id, &content).await?
             {
-                tx.send((MessageType::Delta, id, encode(&delta)?)).await?;
+                let encoded: Bytes = encode(&delta)?.into();
+                tx.send((MessageType::Delta, id, encoded.clone())).await?;
                 let _ = app.deltas.send(PublishedDelta {
                     owner_id: uid,
-                    origin: connection_id,
-                    delta,
+                    origin: connection_id.clone(),
+                    encoded,
                 });
             }
         }
@@ -1487,7 +1564,7 @@ async fn dispatch(
                 bail!("message length invalid")
             }
             own_conversation(&app.db, &uid, &conversation_id).await?;
-            let eid = Uuid::new_v4().to_string();
+            let eid = new_uuid();
             let changed = encode(&DeltaPayload::Message {
                 conversation_id: conversation_id.clone(),
                 author_type: "system".into(),
@@ -1541,7 +1618,7 @@ async fn dispatch(
             app.cancellations
                 .lock()
                 .await
-                .insert((connection_id, id), cancel);
+                .insert((connection_id.clone(), id), cancel);
             let result = generate(
                 &app,
                 Generation {
@@ -1549,10 +1626,11 @@ async fn dispatch(
                     request_id: id,
                     user_id: &uid,
                     conversation_id: &conversation_id,
+                    busy: busy.clone(),
                     speaker_id,
                     parent_id,
                     cancel: cancel_rx,
-                    origin: connection_id,
+                    origin: connection_id.clone(),
                 },
             )
             .await;
@@ -1659,7 +1737,7 @@ async fn dispatch(
                 }
             }
             let changed = encode(&DeltaPayload::Lore(lore.clone()))?;
-            let eid = lore.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            let eid = lore.id.unwrap_or_else(|| new_uuid());
             let kw = encode(&lore.keywords)?;
             let mut transaction = app.db.begin().await?;
             let rev = delta_tx(&mut transaction, &uid, "lore", &eid, operation, &changed).await?;
@@ -1721,7 +1799,7 @@ async fn dispatch(
                 }
             }
             let changed = encode(&DeltaPayload::Memory(memory.clone()))?;
-            let eid = memory.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            let eid = memory.id.unwrap_or_else(|| new_uuid());
             let mut transaction = app.db.begin().await?;
             let rev = delta_tx(&mut transaction, &uid, "memory", &eid, operation, &changed).await?;
             sqlx::query("INSERT INTO memories VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content,revision=excluded.revision WHERE owner_id=excluded.owner_id").bind(&eid).bind(&uid).bind(memory.conversation_id).bind(memory.character_id).bind(memory.content).bind(rev).execute(&mut *transaction).await?;
@@ -1750,7 +1828,7 @@ async fn dispatch(
                 }
             }
             let content = extract_memory(&app, &uid, &conversation_id).await?;
-            let eid = Uuid::new_v4().to_string();
+            let eid = new_uuid();
             let memory = MemoryInput {
                 id: Some(eid.clone()),
                 conversation_id: Some(conversation_id),
@@ -1897,7 +1975,7 @@ fn validate_character(character: &CharacterInput) -> Result<()> {
     Ok(())
 }
 async fn new_session(db: &SqlitePool, uid: &str) -> Result<(String, i64)> {
-    let token = Uuid::new_v4().to_string() + &Uuid::new_v4().to_string();
+    let token = new_uuid() + &new_uuid();
     sqlx::query("INSERT INTO sessions(token,user_id) VALUES(?,?)")
         .bind(&token)
         .bind(uid)
@@ -2403,7 +2481,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(characters);
@@ -2426,7 +2504,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(conversations);
@@ -2448,7 +2526,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(messages);
@@ -2470,7 +2548,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(lore);
@@ -2490,7 +2568,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     tx.send((
@@ -2498,7 +2576,8 @@ async fn send_snapshot(
         request_id,
         encode(&Response::SyncComplete {
             revision: snapshot_revision,
-        })?,
+        })?
+        .into(),
     ))
     .await?;
     Ok(())
@@ -2729,6 +2808,8 @@ async fn selected_model(app: &App) -> Result<String> {
 }
 
 async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
+    job.busy.fetch_add(1, Ordering::Relaxed);
+    let _busy_guard = BusyGuard(job.busy.clone());
     let Generation {
         tx,
         request_id: req_id,
@@ -2738,6 +2819,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         parent_id: parent,
         mut cancel,
         origin,
+        busy: _,
     } = job;
     let config = load_broker_config(&app.db).await?;
     let model = selected_model(app).await?;
@@ -2805,14 +2887,15 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         };
         messages.push(json!({"role":role,"content":clip(&r.get::<String,_>("content"),8192)}));
     }
-    let mid = Uuid::new_v4().to_string();
+    let mid = new_uuid();
     tx.send((
         MessageType::Response,
         req_id,
         encode(&Response::GenerationStarted {
             message_id: mid.clone(),
             character_id: sid.clone(),
-        })?,
+        })?
+        .into(),
     ))
     .await?;
     let (request_url, mut request_body, native_ollama) = if config.use_ollama_api {
@@ -2858,7 +2941,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         changed=cancel.changed()=>{
             if changed.is_err()||*cancel.borrow(){
                 let revision:i64=sqlx::query_scalar("SELECT COALESCE(MAX(revision),0) FROM deltas WHERE owner_id=?").bind(uid).fetch_one(&app.db).await?;
-                tx.send((MessageType::StreamEnd,req_id,encode(&Response::GenerationFinished{message_id:mid,revision,cancelled:true})?)).await?;
+                tx.send((MessageType::StreamEnd,req_id,encode(&Response::GenerationFinished{message_id:mid,revision,cancelled:true})?.into())).await?;
                 return Ok(());
             }
             bail!("generation cancellation channel changed unexpectedly")
@@ -2943,7 +3026,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
                 sequence: seq,
                 text: std::mem::take(&mut pending),
             };
-            tx.send((MessageType::StreamChunk, req_id, encode(&out)?))
+            tx.send((MessageType::StreamChunk, req_id, encode(&out)?.into()))
                 .await?;
             deadline = Instant::now() + Duration::from_millis(60);
         } else if Instant::now() >= deadline {
@@ -2962,19 +3045,21 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
                 message_id: mid.clone(),
                 sequence: seq,
                 text: pending,
-            })?,
+            })?
+            .into(),
         ))
         .await?;
     }
     record_token_usage(app, uid, usage).await?;
     let delta = persist_generation(app, uid, cid, &sid, &mid, &complete, parent.as_deref()).await?;
     let rev = delta.revision;
-    tx.send((MessageType::Delta, req_id, encode(&delta)?))
+    let encoded: Bytes = encode(&delta)?.into();
+    tx.send((MessageType::Delta, req_id, encoded.clone()))
         .await?;
     let _ = app.deltas.send(PublishedDelta {
         owner_id: uid.into(),
         origin,
-        delta,
+        encoded,
     });
     tx.send((
         MessageType::StreamEnd,
@@ -2983,7 +3068,8 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             message_id: mid,
             revision: rev,
             cancelled,
-        })?,
+        })?
+        .into(),
     ))
     .await?;
     Ok(())
@@ -3305,23 +3391,17 @@ mod tests {
 
     #[test]
     fn live_delta_visibility_is_owner_and_origin_scoped() {
-        let origin = Uuid::new_v4();
-        let peer = Uuid::new_v4();
+        let origin = new_uuid();
+        let peer = new_uuid();
         let event = PublishedDelta {
             owner_id: "owner-a".into(),
-            origin,
-            delta: StateDelta {
-                revision: 1,
-                entity_type: "memory".into(),
-                entity_id: "m1".into(),
-                operation: DeltaOperation::Add,
-                changed_fields: vec![],
-            },
+            origin: origin.clone(),
+            encoded: Bytes::new(),
         };
-        assert!(delta_visible(Some("owner-a"), peer, &event));
-        assert!(!delta_visible(Some("owner-b"), peer, &event));
-        assert!(!delta_visible(None, peer, &event));
-        assert!(!delta_visible(Some("owner-a"), origin, &event));
+        assert!(delta_visible(Some("owner-a"), &peer, &event));
+        assert!(!delta_visible(Some("owner-b"), &peer, &event));
+        assert!(!delta_visible(None, &peer, &event));
+        assert!(!delta_visible(Some("owner-a"), &origin, &event));
     }
 
     #[test]
@@ -3348,7 +3428,7 @@ mod tests {
         assert!(validate_extracted_memory(&"x".repeat(1025)).is_err());
     }
 
-    async fn call(app: &App, request: Request) -> Result<(MessageType, Vec<u8>)> {
+    async fn call(app: &App, request: Request) -> Result<(MessageType, Bytes)> {
         let (tx, mut rx) = mpsc::channel(32);
         let dispatch_app = app.clone();
         let task = tokio::spawn(async move {
@@ -3356,9 +3436,10 @@ mod tests {
                 dispatch_app,
                 tx,
                 Arc::new(RwLock::new(None)),
-                Uuid::new_v4(),
+                new_uuid(),
                 1,
                 request,
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
             )
             .await
         });
@@ -3393,6 +3474,7 @@ mod tests {
             snapshot_gate: Arc::new(RwLock::new(())),
             deltas,
             recent_errors: Arc::new(Mutex::new(Vec::new())),
+            argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         };
         let (_, registered) = call(
             &app,
@@ -3472,12 +3554,13 @@ mod tests {
                 resume_app,
                 tx,
                 Arc::new(RwLock::new(None)),
-                Uuid::new_v4(),
+                new_uuid(),
                 2,
                 Request::Resume {
                     session_token: token,
                     since_revision: 0,
                 },
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
             )
             .await
         });
@@ -3529,6 +3612,7 @@ mod tests {
             snapshot_gate: Arc::new(RwLock::new(())),
             deltas,
             recent_errors: Arc::new(Mutex::new(Vec::new())),
+            argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         };
         let (_, first) = call(
             &app,
@@ -3887,11 +3971,12 @@ mod tests {
                 snapshot_app,
                 snapshot_tx,
                 Arc::new(RwLock::new(None)),
-                Uuid::new_v4(),
+                new_uuid(),
                 77,
                 Request::Snapshot {
                     session_token: snapshot_token,
                 },
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
             )
             .await
         });
@@ -4107,18 +4192,18 @@ mod tests {
     #[tokio::test]
     async fn cancellation_registry_stress_is_connection_scoped() {
         let registry: CancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
-        let target = Uuid::new_v4();
-        let survivor = Uuid::new_v4();
+        let target = new_uuid();
+        let survivor = new_uuid();
         let mut receivers = Vec::new();
         {
             let mut map = registry.lock().await;
             for request_id in 0..1_000 {
                 let (sender, receiver) = watch::channel(false);
-                map.insert((target, request_id), sender);
+                map.insert((target.clone(), request_id), sender);
                 receivers.push(receiver);
             }
             let (sender, _) = watch::channel(false);
-            map.insert((survivor, 1), sender);
+            map.insert((survivor.clone(), 1), sender);
         }
         cancel_connection(&registry, target).await;
         assert_eq!(registry.lock().await.len(), 1);

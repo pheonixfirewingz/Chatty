@@ -7,8 +7,7 @@ license.workspace = true
 [dependencies]
 bincode.workspace = true
 bytes.workspace = true
+rustls.workspace = true
 serde.workspace = true
-thiserror.workspace = true
-time.workspace = true
 tokio.workspace = true
 zstd.workspace = true
