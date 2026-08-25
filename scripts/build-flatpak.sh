@@ -93,7 +93,6 @@ flatpak build-finish \
     --command=chatty-gui \
     --share=network \
     --socket=wayland \
-    --socket=fallback-x11 \
     --device=dri \
     "$app_dir"
 

@@ -1,9 +1,9 @@
 //! Deterministic OpenAI-compatible test server for transport/streaming soaks.
 //! This executable is test support, never embedded in the broker or client.
 
-use anyhow::{Context, Result};
+use chatty_protocol::util::args::ParsedArgs;
+use chatty_protocol::util::{bail, Context, Result};
 use chatty_protocol::current_utc_timestamp;
-use clap::Parser;
 use serde_json::json;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -11,19 +11,26 @@ use tokio::{
     time::{Duration, sleep},
 };
 
-#[derive(Parser)]
 struct Args {
-    #[arg(long, default_value = "127.0.0.1:18114")]
     listen: String,
-    #[arg(long, default_value_t = 48)]
     words: usize,
-    #[arg(long, default_value_t = 5)]
     chunk_delay_ms: u64,
 }
 
+const USAGE: &str = "chatty-mock-llama -- deterministic OpenAI-compatible test server\n\n\
+Options:\n\
+  --listen <addr>        Bind address [default: 127.0.0.1:18114]\n\
+  --words <n>            Words per completion [default: 48]\n\
+  --chunk-delay-ms <ms>  Delay between stream chunks [default: 5]\n";
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let parsed = ParsedArgs::parse(USAGE)?;
+    let args = Args {
+        listen: parsed.string("listen", "", "127.0.0.1:18114"),
+        words: parsed.number("words", 48),
+        chunk_delay_ms: parsed.number("chunk-delay-ms", 5),
+    };
     let listener = TcpListener::bind(&args.listen).await?;
     loop {
         let (stream, _) = listener.accept().await?;
@@ -43,14 +50,14 @@ async fn respond(stream: &mut TcpStream, words: usize, delay_ms: u64) -> Result<
     let header_end = loop {
         let count = stream.read(&mut buffer).await?;
         if count == 0 {
-            anyhow::bail!("request ended before headers")
+            bail!("request ended before headers")
         }
         request.extend_from_slice(&buffer[..count]);
         if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
             break index + 4;
         }
         if request.len() > 64 * 1024 {
-            anyhow::bail!("request headers too large")
+            bail!("request headers too large")
         }
     };
     let headers = std::str::from_utf8(&request[..header_end])?;
@@ -70,7 +77,7 @@ async fn respond(stream: &mut TcpStream, words: usize, delay_ms: u64) -> Result<
     while request.len() < header_end + content_length {
         let count = stream.read(&mut buffer).await?;
         if count == 0 {
-            anyhow::bail!("request body truncated")
+            bail!("request body truncated")
         }
         request.extend_from_slice(&buffer[..count]);
     }

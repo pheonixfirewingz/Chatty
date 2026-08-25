@@ -1,5 +1,7 @@
 use std::io::Cursor;
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::util::format_utc_timestamp;
@@ -7,7 +9,7 @@ use crate::*;
 
 #[test]
 fn utc_error_timestamp_is_stable_and_readable() {
-    let timestamp = time::macros::datetime!(2026-08-24 14:32:07 UTC);
+    let timestamp = UNIX_EPOCH + Duration::from_secs(1_787_581_927);
     assert_eq!(format_utc_timestamp(timestamp), "2026-08-24 14:32:07 UTC");
 }
 

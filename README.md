@@ -93,8 +93,8 @@ cp /trusted/path/ca.pem \
 For a domain, use a name such as `broker.example.test.ca.pem`. The `--ca` option
 or `CHATTY_CA` environment variable can still select an explicit certificate.
 
-The declared runtime permissions are limited to network access, Wayland with
-fallback X11, and DRI rendering. Host files selected through the desktop portal
+The declared runtime permissions are limited to network access, Wayland, and
+DRI rendering. Host files selected through the desktop portal
 are granted individually; no broad host filesystem or D-Bus access is declared.
 
 Set `CHATTY_FLATPAK_BRANCH` to use another installed matching Freedesktop

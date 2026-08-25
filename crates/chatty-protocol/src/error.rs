@@ -1,16 +1,41 @@
 //! Error types shared by every protocol message.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+use std::error::Error as StdError;
+use std::fmt;
 
-#[derive(Debug, Error)]
+/// Hand-written in place of a `thiserror` derive: `Display` text per variant
+/// plus the standard `source()`/`From<io::Error>` plumbing.
+#[derive(Debug)]
 pub enum ProtocolError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("invalid frame: {0}")]
+    Io(std::io::Error),
     Invalid(&'static str),
-    #[error("codec error: {0}")]
     Codec(String),
+}
+
+impl fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Invalid(reason) => write!(f, "invalid frame: {reason}"),
+            Self::Codec(reason) => write!(f, "codec error: {reason}"),
+        }
+    }
+}
+
+impl StdError for ProtocolError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ProtocolError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

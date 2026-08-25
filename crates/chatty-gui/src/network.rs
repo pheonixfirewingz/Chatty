@@ -231,7 +231,7 @@ fn client_config(args: &Args, target: &ConnectionTarget) -> Result<Arc<ClientCon
     let mut roots = RootCertStore::empty();
     let ca_file = File::open(&ca_path)
         .with_context(|| format!("could not open CA certificate {}", ca_path.display()))?;
-    for cert in rustls_pemfile::certs(&mut BufReader::new(ca_file)) {
+    for cert in chatty_protocol::util::pemfile::certs(&mut BufReader::new(ca_file)) {
         roots.add(cert?).context("invalid pinned CA")?;
     }
     let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -256,7 +256,7 @@ async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<Tcp
         || value["protocol"] != 9
         || value["encoding"] != "bincode2"
     {
-        anyhow::bail!("unsupported broker handshake");
+        bail!("unsupported broker handshake");
     }
     Ok(stream)
 }
@@ -272,7 +272,7 @@ fn ca_path(args: &Args, target: &ConnectionTarget) -> Result<PathBuf> {
         || server_name == ".."
         || server_name.contains(['/', '\\'])
     {
-        anyhow::bail!("invalid server name for CA certificate lookup");
+        bail!("invalid server name for CA certificate lookup");
     }
 
     let server_ca = default_server_ca_path(
