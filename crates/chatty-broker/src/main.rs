@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use bytes::Bytes;
 use chatty_protocol::*;
 use clap::Parser;
 use futures_util::{StreamExt, TryStreamExt};
@@ -86,7 +87,7 @@ struct App {
     deltas: broadcast::Sender<PublishedDelta>,
     recent_errors: Arc<Mutex<Vec<String>>>,
 }
-type Out = (MessageType, u64, Vec<u8>);
+type Out = (MessageType, u64, Bytes);
 type CancellationRegistry = Arc<Mutex<HashMap<(Uuid, u64), watch::Sender<bool>>>>;
 static ACTIVE_CONNECTIONS: AtomicU32 = AtomicU32::new(0);
 static STARTED_AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -97,7 +98,9 @@ static CPU_SAMPLE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Insta
 struct PublishedDelta {
     owner_id: String,
     origin: Uuid,
-    delta: StateDelta,
+    /// Bincode encoding of the delta, computed once at publish time so every
+    /// subscriber clones a refcounted buffer instead of re-encoding.
+    encoded: Bytes,
 }
 
 fn delta_visible(identity: Option<&str>, connection_id: Uuid, event: &PublishedDelta) -> bool {
@@ -208,15 +211,10 @@ async fn serve(
     let identity = Arc::new(RwLock::new(None::<String>));
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::channel::<Out>(32); // bounded queue is transport backpressure
+    let mut codec = ProtocolCodec::new()?;
     let writer = tokio::spawn(async move {
         while let Some((ty, id, payload)) = rx.recv().await {
-            if ty == MessageType::Handshake {
-                // Handshake is the only client/broker JSON payload.
-                write_payload(&mut wr, ty, id, payload).await?
-            } else {
-                // payload is already bincode: frame without re-encoding
-                write_raw(&mut wr, ty, id, payload).await?;
-            }
+            codec.write_payload(&mut wr, ty, id, &payload).await?
         }
         Ok::<_, ProtocolError>(())
     });
@@ -226,7 +224,8 @@ async fn serve(
         0,
         serde_json::to_vec(
             &json!({"protocol":9,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
-        )?,
+        )?
+        .into(),
     ))
     .await?;
     let mut published = app.deltas.subscribe();
@@ -242,7 +241,7 @@ async fn serve(
                         connection_id,
                         &event,
                     ) && forward_tx
-                        .send((MessageType::Delta, 0, encode(&event.delta)?))
+                        .send((MessageType::Delta, 0, event.encoded.clone()))
                         .await
                         .is_err()
                     {
@@ -305,7 +304,7 @@ async fn serve(
                             .send((
                                 MessageType::Error,
                                 frame.request_id,
-                                encode(&w).unwrap_or_default(),
+                                encode(&w).unwrap_or_default().into(),
                             ))
                             .await;
                     }
@@ -457,15 +456,6 @@ async fn cancel_connection(registry: &CancellationRegistry, connection_id: Uuid)
     });
 }
 
-async fn write_raw<W: tokio::io::AsyncWrite + Unpin>(
-    w: &mut W,
-    ty: MessageType,
-    id: u64,
-    raw: Vec<u8>,
-) -> Result<(), ProtocolError> {
-    write_payload(w, ty, id, raw).await
-}
-
 fn classify_error(error: &anyhow::Error) -> WireError {
     let message = error.to_string();
     let lower = message.to_lowercase();
@@ -516,7 +506,7 @@ async fn dispatch(
     };
     macro_rules! send {
         ($ty:expr,$v:expr) => {{
-            tx.send(($ty, id, encode(&$v)?)).await?;
+            tx.send(($ty, id, encode(&$v)?.into())).await?;
         }};
     }
     macro_rules! send_delta {
@@ -528,11 +518,12 @@ async fn dispatch(
                 operation: $operation,
                 changed_fields: $changed.clone(),
             };
-            tx.send((MessageType::Delta, id, encode(&delta)?)).await?;
+            let encoded: Bytes = encode(&delta)?.into();
+            tx.send((MessageType::Delta, id, encoded.clone())).await?;
             let _ = app.deltas.send(PublishedDelta {
                 owner_id: $owner.to_string(),
                 origin: connection_id,
-                delta,
+                encoded,
             });
         }};
     }
@@ -1079,11 +1070,12 @@ async fn dispatch(
             }
             transaction.commit().await?;
             for delta in outgoing {
-                tx.send((MessageType::Delta, id, encode(&delta)?)).await?;
+                let encoded: Bytes = encode(&delta)?.into();
+                tx.send((MessageType::Delta, id, encoded.clone())).await?;
                 let _ = app.deltas.send(PublishedDelta {
                     owner_id: uid.clone(),
                     origin: connection_id,
-                    delta,
+                    encoded,
                 });
             }
             send!(
@@ -1469,11 +1461,12 @@ async fn dispatch(
                 && let Some(delta) =
                     maybe_name_new_chat(&app, &uid, &conversation_id, &content).await?
             {
-                tx.send((MessageType::Delta, id, encode(&delta)?)).await?;
+                let encoded: Bytes = encode(&delta)?.into();
+                tx.send((MessageType::Delta, id, encoded.clone())).await?;
                 let _ = app.deltas.send(PublishedDelta {
                     owner_id: uid,
                     origin: connection_id,
-                    delta,
+                    encoded,
                 });
             }
         }
@@ -2403,7 +2396,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(characters);
@@ -2426,7 +2419,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(conversations);
@@ -2448,7 +2441,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(messages);
@@ -2470,7 +2463,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     drop(lore);
@@ -2490,7 +2483,7 @@ async fn send_snapshot(
             operation: DeltaOperation::Add,
             changed_fields: encode(&payload)?,
         };
-        tx.send((MessageType::Delta, request_id, encode(&delta)?))
+        tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
     tx.send((
@@ -2498,7 +2491,8 @@ async fn send_snapshot(
         request_id,
         encode(&Response::SyncComplete {
             revision: snapshot_revision,
-        })?,
+        })?
+        .into(),
     ))
     .await?;
     Ok(())
@@ -2812,7 +2806,8 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         encode(&Response::GenerationStarted {
             message_id: mid.clone(),
             character_id: sid.clone(),
-        })?,
+        })?
+        .into(),
     ))
     .await?;
     let (request_url, mut request_body, native_ollama) = if config.use_ollama_api {
@@ -2858,7 +2853,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         changed=cancel.changed()=>{
             if changed.is_err()||*cancel.borrow(){
                 let revision:i64=sqlx::query_scalar("SELECT COALESCE(MAX(revision),0) FROM deltas WHERE owner_id=?").bind(uid).fetch_one(&app.db).await?;
-                tx.send((MessageType::StreamEnd,req_id,encode(&Response::GenerationFinished{message_id:mid,revision,cancelled:true})?)).await?;
+                tx.send((MessageType::StreamEnd,req_id,encode(&Response::GenerationFinished{message_id:mid,revision,cancelled:true})?.into())).await?;
                 return Ok(());
             }
             bail!("generation cancellation channel changed unexpectedly")
@@ -2943,7 +2938,7 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
                 sequence: seq,
                 text: std::mem::take(&mut pending),
             };
-            tx.send((MessageType::StreamChunk, req_id, encode(&out)?))
+            tx.send((MessageType::StreamChunk, req_id, encode(&out)?.into()))
                 .await?;
             deadline = Instant::now() + Duration::from_millis(60);
         } else if Instant::now() >= deadline {
@@ -2962,19 +2957,21 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
                 message_id: mid.clone(),
                 sequence: seq,
                 text: pending,
-            })?,
+            })?
+            .into(),
         ))
         .await?;
     }
     record_token_usage(app, uid, usage).await?;
     let delta = persist_generation(app, uid, cid, &sid, &mid, &complete, parent.as_deref()).await?;
     let rev = delta.revision;
-    tx.send((MessageType::Delta, req_id, encode(&delta)?))
+    let encoded: Bytes = encode(&delta)?.into();
+    tx.send((MessageType::Delta, req_id, encoded.clone()))
         .await?;
     let _ = app.deltas.send(PublishedDelta {
         owner_id: uid.into(),
         origin,
-        delta,
+        encoded,
     });
     tx.send((
         MessageType::StreamEnd,
@@ -2983,7 +2980,8 @@ async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             message_id: mid,
             revision: rev,
             cancelled,
-        })?,
+        })?
+        .into(),
     ))
     .await?;
     Ok(())
@@ -3310,13 +3308,7 @@ mod tests {
         let event = PublishedDelta {
             owner_id: "owner-a".into(),
             origin,
-            delta: StateDelta {
-                revision: 1,
-                entity_type: "memory".into(),
-                entity_id: "m1".into(),
-                operation: DeltaOperation::Add,
-                changed_fields: vec![],
-            },
+            encoded: Bytes::new(),
         };
         assert!(delta_visible(Some("owner-a"), peer, &event));
         assert!(!delta_visible(Some("owner-b"), peer, &event));
@@ -3348,7 +3340,7 @@ mod tests {
         assert!(validate_extracted_memory(&"x".repeat(1025)).is_err());
     }
 
-    async fn call(app: &App, request: Request) -> Result<(MessageType, Vec<u8>)> {
+    async fn call(app: &App, request: Request) -> Result<(MessageType, Bytes)> {
         let (tx, mut rx) = mpsc::channel(32);
         let dispatch_app = app.clone();
         let task = tokio::spawn(async move {

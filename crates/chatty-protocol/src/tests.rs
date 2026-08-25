@@ -168,3 +168,60 @@ async fn rejects_zstd_expansion_beyond_limit() {
         Err(ProtocolError::Invalid("decompressed payload too large"))
     ));
 }
+
+#[tokio::test]
+async fn codec_reuse_round_trips_many_frames() {
+    let mut codec = ProtocolCodec::new().unwrap();
+    let (mut a, mut b) = tokio::io::duplex(1024 * 1024);
+    for sequence in 0..200u32 {
+        let value = StreamChunk {
+            message_id: "m".into(),
+            sequence,
+            text: "batch ".repeat(sequence as usize % 300 + 1),
+        };
+        codec
+            .write_message(&mut a, MessageType::StreamChunk, sequence as u64, &value)
+            .await
+            .unwrap();
+        let frame = codec.read_frame(&mut b).await.unwrap();
+        assert!(frame.compressed);
+        assert_eq!(frame.request_id, sequence as u64);
+        assert_eq!(
+            decode::<StreamChunk>(&frame.payload).unwrap().sequence,
+            sequence
+        );
+    }
+}
+
+#[tokio::test]
+async fn codec_uncompressed_small_frames_stay_raw() {
+    let mut codec = ProtocolCodec::new().unwrap();
+    let (mut a, mut b) = tokio::io::duplex(4096);
+    codec
+        .write_message(&mut a, MessageType::Response, 5, &Response::Pong)
+        .await
+        .unwrap();
+    let frame = codec.read_frame(&mut b).await.unwrap();
+    assert!(!frame.compressed);
+    assert!(matches!(
+        decode::<Response>(&frame.payload).unwrap(),
+        Response::Pong
+    ));
+}
+
+#[tokio::test]
+async fn codec_rejects_oversized_frame_before_allocation() {
+    let mut codec = ProtocolCodec::new().unwrap();
+    let (mut a, mut b) = tokio::io::duplex(64);
+    tokio::spawn(async move {
+        a.write_all(&((MAX_PAYLOAD as u32) + 1).to_be_bytes())
+            .await
+            .unwrap();
+        a.write_all(&[0, MessageType::Request as u8]).await.unwrap();
+        a.write_all(&0u64.to_be_bytes()).await.unwrap();
+    });
+    assert!(matches!(
+        codec.read_frame(&mut b).await,
+        Err(ProtocolError::Invalid("payload too large"))
+    ));
+}

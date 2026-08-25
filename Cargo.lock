@@ -805,6 +805,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "base64",
+ "bytes",
  "chatty-protocol",
  "clap",
  "futures-util",

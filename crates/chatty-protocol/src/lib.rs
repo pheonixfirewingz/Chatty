@@ -26,8 +26,8 @@ pub use conversation::{
 pub use delta::{DeltaOperation, DeltaPayload, StateDelta, StreamChunk};
 pub use error::{ErrorCode, ProtocolError, WireError};
 pub use frame::{
-    COMPRESSION_THRESHOLD, FLAG_ZSTD, Frame, HEADER_LEN, MAX_PAYLOAD, MessageType, decode, encode,
-    read_frame, write_message, write_payload,
+    COMPRESSION_THRESHOLD, FLAG_ZSTD, Frame, HEADER_LEN, MAX_PAYLOAD, MessageType, ProtocolCodec,
+    decode, encode, read_frame, write_message, write_payload,
 };
 pub use lore::{LoreEntry, LoreInput};
 pub use memory::{MemoryEntry, MemoryInput};
