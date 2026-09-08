@@ -1,12 +1,26 @@
 flowchart LR
-  C[Native Rust GUI and terminal clients] -->|Persistent TLS 1.3\nBinary bincode frames\nzstd stream and deltas| B[Rust broker]
-  B --> A[Authentication and roles]
-  B --> M[Admin policy and adapter configuration]
-  B --> R[RP orchestration and context compiler]
-  B --> T[Batching, cancellation and delta engine]
-  A --> S[(SQLite WAL)]
-  M --> S
-  R --> S
-  T --> S
-  M -->|enabled and URL| R
-  R -->|OpenAI-compatible HTTP\nmodel probe and SSE| L[External llama-server]
+    subgraph ClientHost[Client host]
+        GUI[Native egui GUI]
+        Session[(Session token and preferences)]
+        CA[Pinned public CA]
+        GUI --- Session
+        GUI --- CA
+    end
+
+    subgraph BrokerHost[Broker trust boundary]
+        Broker[Chatty broker]
+        DB[(SQLite database)]
+        Broker <--> DB
+    end
+
+    subgraph ModelHost[External inference boundary]
+        Model[Ollama or OpenAI-compatible server]
+    end
+
+    GUI <-->|TLS 1.3\nJSON handshake then bincode/zstd frames| Broker
+    Broker <-->|HTTP streamed generation\nmodel discovery and optional Ollama controls| Model
+
+    Broker --> Auth[Auth and authorization]
+    Broker --> RP[Context compiler and RP orchestration]
+    Broker --> Sync[Revision log and live deltas]
+    Broker --> Stream[Batching, cancellation, backpressure]

@@ -1,85 +1,102 @@
-# Operations and verification
+# Operations
 
-The broker is event-driven: no poller, heartbeat, maintenance loop, or idle timer runs. SQLite uses a five-connection pool and WAL. `packaging/chatty-broker.service` provides a hardened ARM64-compatible systemd unit.
+## Runtime topology
 
-On the `rasp-server` deployment, the broker is installed as the lingering user service `packaging/chatty-broker-user.service`. Its executable is `%h/.local/libexec/chatty/chatty-broker`, state is in `%h/.local/share/chatty`, and TLS material is in `%h/.config/chatty`. The service listens on `0.0.0.0:7443`; the GUI asks for the server's static IP and verifies the matching IP SAN in the server certificate. Use the system unit instead when a privileged system-wide installation is available.
+Operate the broker separately from the desktop clients and inference service:
 
-## Broker resource rules
-
-The service is capped at 256 MiB by systemd. Monitoring reports RSS (`VmRSS`) and
-the detected cgroup limit; it does not allocate or retain conversation content.
-CPU is sampled as a low-cost process average. The broker must remain event-driven:
-admin refresh is explicit, and the GUI must not create a connected-state polling
-loop. Streaming remains bounded by the 32-frame writer queue and batched-token
-rules below. Treat sustained memory near the service cap or sustained high CPU as
-an operational incident, not as a reason to raise the cap automatically.
-
-## Local startup and state
-
-Use `./start-chatty.sh` to create missing development certificates, build missing release binaries, launch the broker and GUI, and stop the broker when the GUI exits. The per-user database is `$XDG_DATA_HOME/chatty/chatty.db` (fallback `~/.local/share/chatty/chatty.db`), while the launcher log and GUI session are under `$XDG_STATE_HOME/chatty/` (fallback `~/.local/state/chatty/`). Debug and release builds use the same locations. On first use, the launcher copies an existing `.chatty/chatty.db` and its SQLite sidecars to the XDG data directory, retaining the originals as a backup. The script respects existing `CHATTY_LISTEN`, `CHATTY_BROKER`, `CHATTY_DATABASE`, `CHATTY_LOG_FILE`, `CHATTY_CERT`, `CHATTY_KEY`, `CHATTY_CA` and `CHATTY_LLAMA_URL` values.
-
-The current client/broker handshake protocol is version 9. A version mismatch is intentionally fatal; rebuild all Rust components together. On a fresh database, `CHATTY_LLAMA_URL` seeds the singleton broker settings row. Later URL/enabled, provider, model, generation-default and policy changes are persistent and should be made from Admin > Broker. Admin > Ollama controls models through the configured server's native API.
-
-The GUI saves an opaque session token, never a password, at `$XDG_STATE_HOME/chatty/session` (falling back to `~/.local/state/chatty/session`). Debug and release builds use the same location and never save relative to the build/current directory. Logout removes it. For isolated GUI automation/tests, set `CHATTY_SESSION_FILE` to a temporary path or use inspection mode so a real login is neither loaded nor overwritten.
-
-Admin > Data is deliberately not a raw database console. Password hashes, session tokens, messages and conversation bodies must remain unavailable. Account deletion is destructive and transactional; the active admin cannot delete itself.
-
-On the development x86-64 host, the stripped release broker measured 9.7 MiB RSS and 0.0% settled idle CPU after 30 seconds with no clients. Release artifact sizes were approximately 11 MiB for the broker and 5.3 MiB for the client.
-
-The ARM64 release is built natively on an `aarch64-unknown-linux-gnu` host (this project's current build host is aarch64). `cargo build --release --workspace` produces ARM64 `chatty-broker` (8.5 MiB stripped) and `chatty-gui` (13 MiB stripped) ELF executables targeting `aarch64`. No cross toolchain is required when building on arm64; deploy the binaries with `packaging/chatty-broker.service` and `packaging/chatty.desktop` as on x86-64.
-
-## Network simulation
-
-The privilege-free harness has been executed successfully on this host. It
-forces one reconnect and relays real TLS traffic in 113-byte fragments with a
-75±25 ms delay, deterministic 3% retransmission-delay loss simulation, and a
-256 kbit/s ceiling:
-
-```sh
-./scripts/userspace-network-test.sh
+```text
+Chatty GUI -- TLS 1.3 / binary frames --> Chatty broker -- HTTP streaming --> inference service
+                                               |
+                                               +--> SQLite
 ```
 
-For kernel-level loss, duplication, jitter, and reordering, use either the
-disposable namespace harness (safest) or the dedicated-interface helper. The
-namespace command requires administrator privileges:
+The broker is the security and data boundary. Do not expose SQLite or inference management endpoints to clients as substitutes for broker requests.
+
+## Broker startup
+
+Required inputs are a writable SQLite location and a server certificate/private key pair. Example:
 
 ```sh
-sudo ./scripts/network-namespace-test.sh
+CHATTY_LISTEN=0.0.0.0:7443 \
+CHATTY_DATABASE='sqlite:///var/lib/chatty/chatty.db?mode=rwc' \
+CHATTY_CERT=/etc/chatty/server.pem \
+CHATTY_KEY=/etc/chatty/server.key \
+CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 \
+/usr/local/bin/chatty-broker
 ```
 
-Run the broker and client in separate network namespaces or apply these settings to a dedicated test interface (never a production interface):
+The inference endpoint may be unavailable at startup; the broker remains available and retries generation paths later. `CHATTY_LLAMA_URL` initializes a new database but does not override persisted configuration in an existing database.
 
-Use the guarded helper on a dedicated test interface. It removes the qdisc on exit:
+System and per-user service templates are in `packaging/`. Review their paths, user, network exposure, and inference URL before installation.
 
-```sh
-sudo ./scripts/network-test.sh TEST_IF 'cargo test --workspace'
-```
+## Certificates
 
-The deterministic external-backend soak completes 100 streams, performs AI
-memory extraction, then cancels another 100 streams mid-flight:
+The broker accepts TLS 1.3 only. Clients trust the configured CA and verify the requested server name.
 
-```sh
-./scripts/stream-soak-test.sh
-```
+- Create production certificates outside the repository.
+- Include every broker IP address or DNS name used by clients in the certificate SANs.
+- Copy only the public CA certificate to clients.
+- Never distribute the CA private key or broker private key.
+- Rotate certificates before expiry and test a client with the replacement CA/certificate pair.
 
-The protocol tests intentionally fragment frames into two-byte writes with delay, reject oversized/corrupt headers before allocation, and verify zstd activation. For streaming stress, run concurrent clients through the shaped interface and watch resident memory and traffic:
+The repository certificate script is intended for development. Its generated server certificate is valid for the names and addresses in `scripts/dev-cert.ext` and will not automatically follow deployment address changes.
 
-```sh
-/usr/bin/time -v target/release/chatty-broker
-sar -n DEV 1
-```
+## Persistence and backup
 
-Cancellation is a `Cancel` frame whose request ID is the generation request ID. It is scoped by connection to prevent cross-client collisions. Dropping a client cancels all generation tasks owned by that connection. Test backend disconnects by stopping llama-server mid-generation and verify that the listener continues accepting clients. Client reconnect retries occur only while disconnected; there is no connected-state polling or heartbeat.
+The database uses SQLite migrations and WAL mode. Back up a consistent database snapshot; do not copy only the main `.db` file while the broker is actively writing and ignore its `-wal` file.
 
-## Release verification
+Preferred procedure:
 
-The handoff baseline uses offline dependency resolution:
+1. Stop the broker or use SQLite's online backup mechanism.
+2. Copy the database and verify the backup can be opened.
+3. Retain the executable version that created the backup.
+4. Restart the broker and confirm migration/startup logs are clean.
 
-```sh
-cargo fmt --all -- --check
-cargo test --workspace --offline
-cargo clippy --workspace --all-targets --offline -- -D warnings
-cargo build --release -p chatty-broker -p chatty-gui -p chatty-client --offline
-```
+Restore into a staging path first, start the same or newer broker against it, and test login plus conversation loading before replacing production data.
 
-See `docs/HANDOFF.md` for the current test count, UI inspection commands, known constraints and next-work list.
+## Sessions and accounts
+
+Sessions expire 30 days after creation. The first registered user in an empty database becomes an administrator. After bootstrap:
+
+- Confirm the administrator can open the admin portal.
+- Disable self-registration if the service is private.
+- Create managed users from the admin portal.
+- Maintain more than one administrator; the active admin cannot demote or delete itself.
+
+GUI session files contain an opaque bearer token and are created with user-only permissions on Unix. Treat them as credentials.
+
+## Monitoring
+
+The admin portal reports:
+
+- Process uptime and approximate CPU use
+- Resident memory and detected cgroup memory limit
+- Active connections
+- Inference-adapter status, model count, and latency
+- A bounded list of recent broker errors
+
+The provided systemd units set `MemoryMax=256M`. Investigate sustained pressure before changing the limit. Argon2 work is capped at ten concurrent computations, writer queues are bounded to 32 frames per connection, and idle connections close after 120 seconds unless traffic or generation work keeps them active.
+
+## Failure handling
+
+| Symptom | Check |
+|---|---|
+| Client cannot connect | Broker listener, firewall, certificate SAN, client CA path, port `7443` |
+| Login repeatedly fails | System clock, session expiry, username, registration policy, recent broker errors |
+| Generation fails | Adapter enabled state, persisted URL/model, `/v1/models`, model availability, adapter logs |
+| Ollama controls fail | Enable native Ollama mode and verify the configured URL belongs to an Ollama server |
+| Clients reconnect repeatedly | Broker logs for frame/protocol mismatch, delta lag, TLS errors, or idle-close behavior |
+| Data missing for one user | Confirm account identity and ownership; tenant isolation is intentional |
+
+Protocol mismatch is fatal by design. Deploy broker and GUI builds from the same source revision.
+
+## Upgrade
+
+1. Back up SQLite.
+2. Build and test broker and GUI from the same revision.
+3. Stop the broker cleanly.
+4. Replace the executable.
+5. Start it and allow embedded migrations to run.
+6. Verify logs, admin monitoring, login, conversation load, and a short generation.
+
+There is no supported database downgrade path. Restore the pre-upgrade backup when rollback is required.

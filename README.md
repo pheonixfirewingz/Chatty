@@ -1,143 +1,96 @@
 # Chatty
 
-Chatty is a Linux-focused native Rust application for persistent AI character roleplay. It consists of a TLS-only broker, an `egui` desktop client, a shared binary protocol, SQLite persistence, and an external inference service. The broker owns authentication, data, prompt assembly, streaming, and administration; model inference stays in Ollama or another OpenAI-compatible server.
+Chatty is a Linux-native client and broker for persistent AI character roleplay. The desktop client connects to a separately operated broker over TLS 1.3; the broker owns accounts, conversations, prompt assembly, persistence, synchronization, and model access. Inference stays in Ollama or another OpenAI-compatible service.
 
-## Current state
+Chatty is currently a working `0.1.0` pre-release. It is suitable for development and controlled deployments, but the release checks and Flatpak submission are not finished. See [Project status](docs/PROJECT-STATUS.md) for the current baseline.
 
-Chatty is a working pre-release application (`0.1.0`), not a packaged end-user release. The current workspace contains:
+## Workspace
 
-- `chatty-broker`: the multi-user TLS service and inference adapter
-- `chatty-gui`: the responsive native desktop client
-- `chatty-protocol`: shared framing, request/response, delta, and compression types
-- `chatty-mock-llama`: a test-only inference backend
+| Package | Purpose |
+|---|---|
+| `chatty-gui` | Native `egui`/`eframe` desktop client |
+| `chatty-broker` | Multi-user TLS broker, SQLite owner, and inference adapter |
+| `chatty-protocol` | Shared bincode messages, framing, compression, and error types |
 
-There is currently no terminal client in the workspace. Some older documents and network-test scripts still refer to the removed `chatty-client` binary and should be treated as historical until they are updated.
+The repository does not contain a terminal client. Scripts that invoke `chatty-client` or `chatty-net-proxy` are legacy and are not part of the supported verification path.
 
-The desktop client currently supports:
+## What works
 
-- explicit server-IP selection, connection testing, account registration/login, server-scoped saved sessions, logout, admin/user roles, and tenant-isolated data
-- character card creation/editing, SillyTavern JSON/PNG import, JSON export, tags, and public sharing
-- private one-character conversations with automatic titles
-- streamed and cancellable generation, response regeneration/deletion, and Markdown rendering
-- automatic chat naming, reconnect/resume, and live state deltas across a user's connected clients
-- a responsive desktop layout with compact navigation plus persistent dark/light and solid/glass appearance preferences
-- per-account prompt/completion token totals; admins can also see totals for each user
-- broker monitoring, persisted generation settings, registration/publishing policy, user management, sanitized metadata inspection, and Ollama model pull/load/unload/delete controls
+- Broker selection, connection testing, registration, login, saved sessions, and logout
+- User/admin roles with broker-side authorization and tenant isolation
+- Character creation and editing, public sharing, and SillyTavern JSON/PNG import
+- Private direct conversations, streamed generation, cancellation, regeneration, deletion, and automatic titles
+- Reconnect/resume and live deltas across a user's connected clients
+- Dark/light and solid/glass appearance settings
+- Per-user prompt and completion token accounting
+- Admin monitoring, user management, broker policy, inference settings, and Ollama model controls
+- Broker/protocol support for group modes, variants, lore, memories, conversation state, and summaries
 
-The latest in-tree work refreshes the GUI, adds usage accounting across generation, speaker selection, memory extraction, and automatic naming, hardens sign-out/session restoration, and treats a concurrently deleted conversation as an expected empty result.
-
-The broker and protocol also implement group modes, message variants/swipes, lore, scoped memories, world state, summaries, and system messages. The refreshed GUI does not currently expose those workflows and deliberately hides group conversations. They require a future GUI pass (or another protocol client) before they are usable from the shipped desktop interface.
+The current GUI intentionally exposes direct conversations only. Group workflows, lore, memory, world state, summaries, and variant selection still need a GUI pass.
 
 ## Quick start
 
-Prerequisites:
+Requirements:
 
-- a current Rust toolchain
-- OpenSSL, used by the development certificate script
-- an Ollama server or another OpenAI-compatible chat-completions server
-- Linux desktop libraries required by `eframe`/`egui`
+- A current Rust toolchain
+- OpenSSL for development certificates
+- Linux desktop libraries required by `eframe`/Wayland
+- Ollama or another OpenAI-compatible chat-completions server for generation
 
-To create development certificates, build release binaries, start the broker, and launch the GUI:
-
-```sh
-./start-chatty.sh
-```
-
-The launcher defaults to `http://192.168.0.97:11434/v1` for inference. Override that for a local Ollama installation, for example:
+Run the broker and GUI together:
 
 ```sh
 CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 ./start-chatty.sh
 ```
 
-Closing the GUI stops the broker started by the launcher. The first account registered against a new database becomes an administrator. Passwords must contain at least ten characters.
+The launcher creates development certificates when absent, builds release binaries when needed, starts the broker on `127.0.0.1:7443`, and opens the GUI. Closing the GUI stops the broker started by the launcher.
 
-To run the components separately:
+The first account created in a new database becomes an administrator. Passwords must be 10–1024 bytes; usernames must be 3–64 bytes.
+
+To run each component yourself:
 
 ```sh
 ./scripts/create-dev-cert.sh
 cargo build --release --workspace
 CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 cargo run --release -p chatty-broker
-cargo run --release -p chatty-gui
+CHATTY_BROKER=127.0.0.1 CHATTY_CA=certs/ca.pem cargo run --release -p chatty-gui
 ```
 
-The GUI first asks for the broker's IP address or domain and tests the TLS connection on port `7443`. It then resumes a saved session for that specific broker when possible, otherwise it shows login. `CHATTY_BROKER` can prefill the address field but does not bypass this connection step. The development certificate covers `localhost`, `rasp-server`, `127.0.0.1`, and the deployed device address `192.168.0.98`; reissue it with the deployed address in its subject alternative names when that address changes. Distribute only public CA certificates to clients through a trusted channel and keep `ca.key` offline. Clients pin the configured CA and have no insecure TLS mode.
+`CHATTY_LLAMA_URL` seeds only a new database. After initialization, change the persisted adapter configuration from the GUI's admin portal.
 
-### Flatpak client release
+## Data locations
 
-Build a client-only Flatpak bundle with the Freedesktop 25.08 SDK and its
-official Rust extension:
+Defaults follow the XDG Base Directory Specification:
+
+| Data | Default location |
+|---|---|
+| Broker database | `$XDG_DATA_HOME/chatty/chatty.db` or `~/.local/share/chatty/chatty.db` |
+| GUI session and preferences | `$XDG_STATE_HOME/chatty/` or `~/.local/state/chatty/` |
+| Launcher broker log | `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log` |
+| Per-server GUI CA | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.pem` or `~/.config/chatty/server-cas/<host>.ca.pem` |
+
+Only distribute `ca.pem` to clients. Keep `ca.key` private and offline from client systems.
+
+## Verify
 
 ```sh
-flatpak install flathub \
-  org.freedesktop.Platform//25.08 \
-  org.freedesktop.Sdk//25.08 \
-  org.freedesktop.Sdk.Extension.rust-stable//25.08
-./scripts/build-flatpak.sh
+cargo fmt --all -- --check
+cargo test --workspace --offline
+cargo clippy --workspace --all-targets --offline -- -D warnings
+cargo build --release --workspace --offline
 ```
 
-The release build vendors the locked Rust dependencies, compiles only
-`chatty-gui` inside the Flatpak SDK, and writes
-`dist/chatty-<version>-<arch>.flatpak`. It does not package or start the broker.
-Install the result with `flatpak install --user ./dist/chatty-*.flatpak`.
+At the 2026-09-08 baseline, all 88 tests pass; formatting and strict Clippy still fail. The exact issues are recorded in [Project status](docs/PROJECT-STATUS.md).
 
-The sandbox has network access for connecting to a separately operated broker,
-but no general host-file access. Put each broker's public CA certificate in the
-app's private configuration directory, named after its IP address or domain:
+## Documentation
 
-```sh
-mkdir -p ~/.var/app/io.github.pheonixfirewingz.Chatty/config/chatty/server-cas
-cp /trusted/path/ca.pem \
-  ~/.var/app/io.github.pheonixfirewingz.Chatty/config/chatty/server-cas/192.168.0.98.ca.pem
-```
+- [Project status](docs/PROJECT-STATUS.md)
+- [Development](docs/DEVELOPMENT.md)
+- [Operations](docs/OPERATIONS.md)
+- [Release](docs/RELEASE.md)
+- [Architecture](docs/architecture/ARCHITECTURE.md)
+- [Original plan and historical audit](docs/ORIGINAL-PLAN-AUDIT.md)
 
-For a domain, use a name such as `broker.example.test.ca.pem`. The `--ca` option
-or `CHATTY_CA` environment variable can still select an explicit certificate.
+## License
 
-The declared runtime permissions are limited to network access, Wayland, and
-DRI rendering. Host files selected through the desktop portal
-are granted individually; no broad host filesystem or D-Bus access is declared.
-
-Set `CHATTY_FLATPAK_BRANCH` to use another installed matching Freedesktop
-Platform/SDK branch.
-
-## Configuration and local data
-
-Broker settings can be supplied as flags or environment variables:
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `CHATTY_LISTEN` | Broker listen address | launcher: `127.0.0.1:7443`; broker alone: `0.0.0.0:7443` |
-| `CHATTY_DATABASE` | SQLite connection URL | XDG data directory |
-| `CHATTY_CERT` | Server certificate | `certs/server.pem` |
-| `CHATTY_KEY` | Server private key | `certs/server.key` |
-| `CHATTY_LLAMA_URL` | Initial inference endpoint for a new database | `http://192.168.0.97:11434/v1` |
-
-GUI variables are `CHATTY_BROKER` (optional IP-field prefill), `CHATTY_CA`, and `CHATTY_SESSION_FILE`. The launcher additionally accepts `CHATTY_LOG_FILE`.
-
-The inference URL only seeds a new database. After first launch, an administrator can change the persisted adapter URL, provider mode, model, generation defaults, and access policies from the Admin dialog.
-
-Default per-user files follow the XDG Base Directory Specification:
-
-- database: `$XDG_DATA_HOME/chatty/chatty.db` or `~/.local/share/chatty/chatty.db`
-- server-scoped saved session and appearance preferences: `$XDG_STATE_HOME/chatty/` or `~/.local/state/chatty/`
-- launcher log: `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log`
-
-On first use, the launcher copies a legacy `.chatty/chatty.db` and its SQLite sidecar files into the XDG data directory while leaving the originals in place as a backup.
-
-## Protocol and security
-
-Chatty uses TLS 1.3 and a persistent connection. The initial handshake is JSON; runtime payloads use bincode 2. Stream and delta frames are always zstd-compressed, as are other payloads of at least 256 bytes. Frames are bounded to 8 MiB, writer queues are bounded for backpressure, and streamed model output is batched before transmission. The current wire contract is protocol version 9.
-
-Passwords are hashed with Argon2. Authorization and ownership checks are enforced by the broker, and state deltas are scoped to other authenticated connections belonging to the same account. Admin metadata views intentionally exclude password hashes, session tokens, messages, and conversation content.
-
-## Development
-
-Run the current automated suite with:
-
-```sh
-cargo test --workspace
-```
-
-The suite covers protocol framing/compression, bounded decoding and streaming, broker authorization and tenant isolation, token accounting, reconnect/session behavior, delta application, and responsive GUI rendering. Visual GUI tests write inspection images under `/tmp`.
-
-Useful design and operational background lives in [the architecture](docs/architecture/ARCHITECTURE.md), [operations notes](docs/OPERATIONS.md), [the implementation handoff](docs/HANDOFF.md), and [the original-plan audit](docs/ORIGINAL-PLAN-AUDIT.md). Those documents predate the removal of the terminal client in places; this README and the current source tree describe the runnable workspace.
+MIT. See [LICENSE](LICENSE).

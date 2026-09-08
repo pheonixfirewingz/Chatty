@@ -1,0 +1,41 @@
+id: io.github.pheonixfirewingz.Chatty
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: chatty-gui
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --device=dri
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/pkgconfig
+modules:
+  - name: chatty-gui
+    buildsystem: simple
+    build-commands:
+      - |
+        export PATH=/usr/lib/sdk/rust-stable/bin:$PATH
+        export CARGO_HOME=$PWD/cargo-home
+        export CARGO_TARGET_DIR=$PWD/target
+        cargo build --release --locked --offline -p chatty-gui
+      - install -Dm755 target/release/chatty-gui /app/bin/chatty-gui
+      - install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.desktop -t /app/share/applications/
+      - install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.metainfo.xml -t /app/share/metainfo/
+      - install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.svg /app/share/icons/hicolor/scalable/apps/io.github.pheonixfirewingz.Chatty.svg
+      - install -Dm644 LICENSE /app/share/licenses/io.github.pheonixfirewingz.Chatty/LICENSE
+    sources:
+      - type: git
+        url: https://github.com/pheonixfirewingz/Chatty.git
+        tag: v0.1.0
+        x-checker-data:
+          type: anitya
+          project-id: todo
+          tag-template: v$version
+      # Generate before building with:
+      #   python3 flatpak-cargo-generator.py Cargo.lock -o chatty-cargo-sources.json
+      # (script from https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo)
+      - chatty-cargo-sources.json

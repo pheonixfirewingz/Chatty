@@ -53,7 +53,7 @@ for path in "$source_dir" "$app_dir" "$repo_dir"; do
     fi
 done
 
-cp -p -- "$project_dir/Cargo.toml" "$project_dir/Cargo.lock" "$source_dir/"
+cp -p -- "$project_dir/Cargo.toml" "$project_dir/Cargo.lock" "$project_dir/LICENSE" "$source_dir/"
 cp -a -- "$project_dir/crates" "$source_dir/"
 mkdir -p "$source_dir/packaging/flatpak" "$source_dir/.cargo"
 cp -p -- "$project_dir/packaging/flatpak/$app_id.desktop" \
@@ -87,6 +87,7 @@ flatpak build \
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.desktop /app/share/applications/io.github.pheonixfirewingz.Chatty.desktop
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.metainfo.xml /app/share/metainfo/io.github.pheonixfirewingz.Chatty.metainfo.xml
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.svg /app/share/icons/hicolor/scalable/apps/io.github.pheonixfirewingz.Chatty.svg
+        install -Dm644 LICENSE /app/share/licenses/io.github.pheonixfirewingz.Chatty/LICENSE
     '
 
 flatpak build-finish \
