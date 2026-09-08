@@ -4,23 +4,48 @@
   <name>Chatty</name>
   <summary>Chat with persistent AI characters</summary>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>MIT OR Apache-2.0</project_license>
+  <project_license>MIT</project_license>
   <developer id="io.github.pheonixfirewingz">
-    <name>Chatty contributors</name>
+    <name>pheonixfirewingz</name>
   </developer>
+  <update_contact>pheonixfirewingz@users.noreply.github.com</update_contact>
   <url type="homepage">https://github.com/pheonixfirewingz/Chatty</url>
+  <url type="bugtracker">https://github.com/pheonixfirewingz/Chatty/issues</url>
+  <url type="vcs-browser">https://github.com/pheonixfirewingz/Chatty</url>
   <description>
     <p>
       Chatty is a native desktop client for persistent AI character roleplay.
-      It connects securely to a separately operated Chatty broker.
+      It connects securely to a separately operated Chatty broker, keeping your
+      conversations and character state in sync across sessions.
+    </p>
+    <p>
+      The client is built with Rust and egui, runs entirely on your machine,
+      and communicates with the broker over an encrypted TLS connection.
     </p>
   </description>
   <launchable type="desktop-id">io.github.pheonixfirewingz.Chatty.desktop</launchable>
+  <categories>
+    <category>Network</category>
+    <category>Utility</category>
+  </categories>
   <provides>
     <binary>chatty-gui</binary>
   </provides>
+  <!-- Flathub review requires at least one real screenshot.
+       Add a PNG (not SVG) hosted in the repo or on flathub, e.g.:
+       https://raw.githubusercontent.com/pheonixfirewingz/Chatty/master/screenshots/main.png
+  <screenshots>
+    <screenshot type="default">
+      <image>REPLACE-WITH-SCREENSHOT-URL.png</image>
+    </screenshot>
+  </screenshots>
+  -->
   <releases>
-    <release version="0.1.0" date="2026-08-24"/>
+    <release version="0.1.0" date="2026-08-24">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
   </releases>
   <content_rating type="oars-1.1"/>
 </component>

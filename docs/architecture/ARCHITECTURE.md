@@ -1,38 +1,144 @@
 # Architecture
 
-## Context and boundaries
+## Context
 
-The native client owns presentation and a revision cursor. The broker is authoritative for identity, authorization, RP data, prompt compilation, orchestration, and stream optimization. llama.cpp owns model inference and is reached only by the broker over its OpenAI-compatible HTTP interface.
+Chatty is a client/server desktop application for persistent AI character roleplay. Its boundary contains the native GUI, broker, shared wire contract, and SQLite database. Model execution is deliberately external.
 
-```mermaid
-flowchart LR
-  C[Native Rust GUI and terminal clients] -->|persistent TLS 1.3 / binary frames| B[Rust broker]
-  B -->|indexed queries / transactions| S[(SQLite WAL)]
-  B -->|OpenAI HTTP stream| L[External llama-server]
-```
+The primary journey is: connect securely, authenticate, choose a character/conversation, send a message, and receive a streamed response that is persisted and synchronized to the user's other clients.
+
+The design prioritizes low idle activity, bounded memory, low packet counts, tenant isolation, and operation on small Linux servers.
+
+See [diagram.mmd](diagram.mmd) for the container and trust-boundary view.
+
+## Containers
+
+### Native GUI (`chatty-gui`)
+
+Responsibilities:
+
+- Server selection and pinned-CA TLS connection
+- Registration, login, bearer-session storage, and resume
+- Local presentation state and appearance preferences
+- Direct-conversation and character workflows
+- Applying snapshots, deltas, and streamed chunks
+- Admin controls for authorized accounts
+
+The GUI does not read SQLite or contact the inference service. A current-thread Tokio runtime runs on a dedicated network thread; network events request an egui repaint instead of polling.
+
+### Broker (`chatty-broker`)
+
+Responsibilities:
+
+- TLS termination and protocol validation
+- Authentication, authorization, and tenant boundaries
+- SQLite migrations and all durable state mutations
+- Prompt/context assembly and speaker orchestration
+- External model discovery, requests, streaming, and usage accounting
+- Stream batching, cancellation, delta persistence, and live fan-out
+- Admin monitoring, policy, user management, and Ollama lifecycle calls
+
+The broker is stateless only with respect to process memory: SQLite remains authoritative across restart. In-memory connection, cancellation, health, and broadcast state is reconstructible.
+
+### Shared protocol (`chatty-protocol`)
+
+Responsibilities:
+
+- Request, response, error, delta, stream, and domain transfer types
+- The fixed frame header and message-type registry
+- Bincode serialization
+- Bounded zstd compression/decompression
+- Small utilities shared by broker and GUI
+
+Because bincode encodes Rust data layouts, broker and client must use compatible protocol definitions. The handshake version is the compatibility gate.
+
+### SQLite
+
+SQLite owns users, sessions, characters, conversations, participants, messages, variants, lore, memories, broker settings, token totals, and the revisioned delta log. Foreign keys encode lifecycle relationships; owner predicates provide the main tenant boundary.
+
+### Inference service
+
+The broker supports an OpenAI-compatible model surface and an optional native Ollama mode. It discovers models, selects a configured or first available model, streams generated content, and records reported token usage. Ollama mode additionally supports runtime settings and model pull/load/unload/delete operations.
 
 ## Interfaces
 
-Every client frame has `[payload_len:u32 BE][flags:u8][message_type:u8][request_id:u64 BE][payload]`. Payloads use bincode 2. Flag bit zero means zstd. Unknown flags/types and payloads over 8 MiB are rejected before allocation. Runtime traffic never uses JSON. The bounded 32-frame writer queue propagates slow-client backpressure to generation. Chunks flush at 32 whitespace-separated units or 60 ms, so llama token events never become client packets.
+### Client to broker
 
-TLS permits only TLS 1.3. A deployment CA is the client's explicit pinned trust anchor without an insecure verifier. Protocol version 7 uses a one-time typed `Snapshot` after authentication; connections then persist until shutdown or network failure, and `Resume`/`Sync` replay only ordered deltas after reconnection. Committed mutations are also pushed to other live connections authenticated as the same owner. A lagging subscriber is disconnected instead of silently skipping revisions, causing normal reconnect/resume recovery from the durable delta log. Before authentication, the only exposed policy capability is whether public self-registration is enabled.
+Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 
-The backend adapter probes `/models` at startup and before generation and validates the configured model ID. Generic providers stream OpenAI-compatible `/chat/completions`; Ollama mode streams native `/api/chat` so runtime options are honored. Admin-only native API calls manage model inventory and allocation without exposing Ollama to clients. Enabled state, URL, provider mode, model selection, and generation defaults are persisted in the singleton broker settings row. Context consists of character rules, group names, triggered priority lore, scoped memory, and at most 80 recent messages. Automatic speaker selection uses a bounded non-streaming model call, validates against participants, and deterministically falls back to round-robin.
+The broker first sends a JSON handshake:
 
-## Data ownership
+```json
+{"protocol":9,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+```
 
-Five SQLite migrations define users, expiring sessions, characters, conversations, ordered participants, messages, variants, lore, memories, an indexed delta log, public-character state and broker settings. Owner predicates enforce tenant boundaries. Message/context and delta-sync indexes avoid full table reads. The first account receives admin role; authorization remains broker-side. Admin account deletion is an ordered transaction that clears dependent sessions and RP records before the user row. Admin database inspection is an allowlisted projection and never returns credential/session/chat content.
+All later messages use a 14-byte header:
 
-The GUI persists only the session token and role in a mode-`0600` file; it never stores credentials. The broker persists Argon2 password hashes and expiring opaque tokens. Public registration, admin-created accounts, role changes, public-character policy and user deletion are separate server-authorized operations.
+```text
+payload_length:u32-be | flags:u8 | message_type:u8 | request_id:u64-be
+```
 
-## Failure behavior
+Payloads are bincode 2. Stream chunks and deltas are always zstd-compressed; other payloads are compressed at 256 bytes. Encoded and decoded payloads are bounded to 8 MiB.
 
-TLS and corrupt frames close only the affected connection. Backend probe, HTTP, missing-model, and stream failures return request errors without taking down the listener. Generation cancellation is keyed by request ID and interrupts the upstream body stream. Bounded queues cap client memory. SQLite WAL and transactions protect multi-row conversation creation.
+Client message types are requests and cancellation. Broker message types include responses, errors, deltas, stream chunks, and stream completion. Request IDs correlate direct responses and generation cancellation.
 
-## Constraints and risks
+### Synchronization
 
-- The GUI's protected session file is not an OS credential store/keyring.
-- The delta log needs an operator-configured retention policy once clients track durable cursors.
-- ARM64 is built natively on an `aarch64-unknown-linux-gnu` host; deploy the same `packaging/chatty-broker.service` and `packaging/chatty.desktop` as on x86-64. The broker has no GUI dependencies.
-- llama-server transport is assumed to be on a trusted LAN. Put it behind TLS or a private interface when it crosses a trust boundary.
-- Protocol enums use bincode and are ordering-sensitive; rebuild broker and every client together after contract changes and bump the JSON handshake version.
+Every durable owner-scoped mutation receives a monotonically increasing revision and a delta-log row. Initial login uses a bounded snapshot. Resume requests replay deltas newer than the client's revision.
+
+Live deltas are published only to other authenticated connections for the same owner. A lagged subscriber is disconnected so it can resume from the durable log instead of silently skipping revisions.
+
+Some deltas describe a narrow change, such as context or selected variant; others contain the full updated entity. Field-minimal updates are therefore an optimization opportunity, not a current invariant.
+
+### Generation
+
+```text
+user message -> persist + delta -> compile context -> select speaker
+             -> stream model response -> batch -> compressed chunks
+             -> persist message/variant + token usage -> final delta
+```
+
+The compiler combines system rules, the active character, bounded group participant cards, lore, scoped memories, conversation state, summary, and selected recent message history.
+
+Stream output flushes after 32 whitespace-delimited units, 60 ms, or completion. Each connection has a 32-frame writer queue, which propagates backpressure. Cancellation keys include both connection ID and request ID to prevent cross-client cancellation.
+
+## Data ownership and authorization
+
+- The broker trusts no client-supplied role or ownership claim.
+- Session tokens identify users and expire after 30 days.
+- Characters, conversations, lore, memories, deltas, and usage are owner-scoped.
+- Public characters are readable across accounts only when broker policy permits; only their owner can edit them.
+- Admin-only requests re-read role state from the database.
+- Admin data inspection excludes password hashes, tokens, and conversation bodies.
+- The first account in an empty database becomes admin; subsequent accounts become users.
+
+Passwords are hashed with Argon2. Concurrent Argon2 operations are capped at ten to bound memory during authentication bursts.
+
+## Reliability and resource bounds
+
+- SQLite uses WAL and a pool capped at five connections.
+- Connection writer queues are bounded.
+- Protocol allocation and decompression are bounded.
+- Active generation prevents idle close while the upstream model is silent.
+- Otherwise a connection quiet in both directions closes after 120 seconds; the GUI reconnects on demand and resumes from its revision.
+- Disconnect cancels generation work owned by that connection.
+- Startup inference probing is best-effort and does not prevent the broker from accepting clients.
+- Systemd templates cap broker memory at 256 MiB.
+
+## Scaling assumptions
+
+The current design targets a single broker process and one SQLite database on a small Linux host. It is appropriate for a modest number of users and bounded concurrent generations, where inference is the dominant workload.
+
+Horizontal broker scaling is not supported: live broadcasts, cancellation ownership, revision coordination, and SQLite writes are process-local. Supporting multiple broker replicas would require a shared transactional database plus distributed event/cancellation coordination.
+
+## Known architectural gaps
+
+- The GUI exposes only a subset of the broker's RP domain.
+- Bincode request layouts couple client and broker releases tightly.
+- Some update deltas send more data than a minimal changed-field representation.
+- The main broker dispatch and GUI application files are large and carry many responsibilities.
+- Monitoring is process-local and visible only through the admin request path; there is no metrics export.
+- The delta log has no documented retention/compaction policy.
+
+## Decisions
+
+- [ADR 0001: Broker-owned state over a binary TLS protocol](adr/0001-broker-owned-state-and-binary-tls.md)
