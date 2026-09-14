@@ -170,6 +170,12 @@ pub enum Request {
         source_name: String,
         lorebook_json: String,
     },
+    /// Ask the AI to infer character fields from a freeform text description.
+    ImportCharacterFromText {
+        session_token: String,
+        source_name: String,
+        text: String,
+    },
     SaveWorld {
         session_token: String,
         world: crate::world::World,

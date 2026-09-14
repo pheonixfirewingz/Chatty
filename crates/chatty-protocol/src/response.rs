@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::account::{Permission, Role, TokenUsage, UserAccount};
-use crate::character::Character;
+use crate::character::{Character, CharacterInput};
 use crate::conversation::{Conversation, ConversationView};
 use crate::memory::MemoryEntry;
 
@@ -54,4 +54,6 @@ pub enum Response {
     Worlds(Vec<crate::world::World>),
     /// AI-converted world returned for review; the broker has not persisted it.
     WorldImportPreview(crate::world::World),
+    /// AI-inferred character fields returned for review; the broker has not persisted it.
+    CharacterImportPreview(CharacterInput),
 }
