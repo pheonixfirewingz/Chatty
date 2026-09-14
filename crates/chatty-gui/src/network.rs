@@ -253,7 +253,7 @@ async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<Tcp
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
-        || value["protocol"] != 10
+        || value["protocol"] != 11
         || value["encoding"] != "bincode2"
     {
         bail!("unsupported broker handshake");

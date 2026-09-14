@@ -453,6 +453,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         Request::UpsertCharacter {
             session_token: first_token.clone(),
+            world_ids: vec![],
             character: character.clone(),
         },
     )
@@ -478,6 +479,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         Request::UpsertCharacter {
             session_token: first_token.clone(),
+            world_ids: vec![],
             character: updated,
         },
     )
@@ -721,6 +723,71 @@ async fn cross_tenant_character_update_is_forbidden() {
     assert!(
         matches!(decode::<Response>(&listed).unwrap(), Response::Worlds(w) if w.len() == 1 && w[0].entries[0].content == "Two moons")
     );
+    let mut character_update = character.clone();
+    character_update.id = Some(character_id.clone());
+    character_update.is_public = true;
+    call(
+        &app,
+        Request::UpsertCharacter {
+            session_token: first_token.clone(),
+            character: character_update.clone(),
+            world_ids: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let unlinked: Vec<u8> = sqlx::query_scalar("SELECT data FROM worlds WHERE id=?")
+        .bind(&world.id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert!(
+        !decode::<World>(&unlinked)
+            .unwrap()
+            .character_ids
+            .contains(&character_id)
+    );
+    call(
+        &app,
+        Request::UpsertCharacter {
+            session_token: first_token.clone(),
+            character: character_update.clone(),
+            world_ids: vec![world.id.clone()],
+        },
+    )
+    .await
+    .unwrap();
+    let linked: Vec<u8> = sqlx::query_scalar("SELECT data FROM worlds WHERE id=?")
+        .bind(&world.id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert!(
+        decode::<World>(&linked)
+            .unwrap()
+            .character_ids
+            .contains(&character_id)
+    );
+    let mut invalid_character_update = character_update;
+    invalid_character_update.name = "This must roll back".into();
+    assert!(
+        call(
+            &app,
+            Request::UpsertCharacter {
+                session_token: first_token.clone(),
+                character: invalid_character_update,
+                world_ids: vec!["missing-world".into()],
+            },
+        )
+        .await
+        .is_err()
+    );
+    let unchanged_name: String = sqlx::query_scalar("SELECT name FROM characters WHERE id=?")
+        .bind(&character_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(unchanged_name, "Owner's character");
     let (_, listed) = call(
         &app,
         Request::ListWorlds {
@@ -902,6 +969,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         Request::UpsertCharacter {
             session_token: second_token.clone(),
+            world_ids: vec![],
             character: blocked_public,
         },
     )
@@ -944,6 +1012,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         Request::UpsertCharacter {
             session_token: second_token,
+            world_ids: vec![],
             character: stolen,
         },
     )

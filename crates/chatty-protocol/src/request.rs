@@ -95,6 +95,8 @@ pub enum Request {
     UpsertCharacter {
         session_token: String,
         character: CharacterInput,
+        /// Owner-scoped worlds that should link to this character after save.
+        world_ids: Vec<String>,
     },
     CreateConversation {
         session_token: String,

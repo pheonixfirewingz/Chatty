@@ -1,7 +1,7 @@
 //! Throwaway end-to-end smoke client: drives the real broker over TLS.
 //! Not committed; lives only for this manual verification run.
 
-use chatty_protocol::util::{bail, format_err, Context, Result};
+use chatty_protocol::util::{Context, Result, bail, format_err};
 use chatty_protocol::*;
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
@@ -41,7 +41,10 @@ impl Link {
                 .with_root_certificates(roots)
                 .with_no_client_auth(),
         );
-        let tcp = tokio::net::TcpStream::connect(std::env::var("CHATTY_E2E_ADDR").unwrap_or_else(|_| "127.0.0.1:19443".into())).await?;
+        let tcp = tokio::net::TcpStream::connect(
+            std::env::var("CHATTY_E2E_ADDR").unwrap_or_else(|_| "127.0.0.1:19443".into()),
+        )
+        .await?;
         tcp.set_nodelay(true)?;
         let name = ServerName::try_from("127.0.0.1".to_string())?;
         let stream = TlsConnector::from(config).connect(name, tcp).await?;
@@ -53,7 +56,7 @@ impl Link {
         // Handshake is the one JSON frame, sent unsolicited.
         let hello = read_frame(&mut link.stream).await?;
         let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
-        if hello.message_type != MessageType::Handshake || value["protocol"] != 10 {
+        if hello.message_type != MessageType::Handshake || value["protocol"] != 11 {
             bail!("bad handshake");
         }
         Ok(link)
@@ -69,8 +72,7 @@ impl Link {
             let frame = self.codec.read_frame(&mut self.stream).await?;
             match frame.message_type {
                 MessageType::Response if frame.request_id == id => {
-                    return decode::<Response>(&frame.payload)
-                        .context("decode response");
+                    return decode::<Response>(&frame.payload).context("decode response");
                 }
                 MessageType::Error => {
                     let error: WireError = decode(&frame.payload)?;
@@ -130,6 +132,7 @@ async fn main() -> Result<()> {
     let (character_id, _) = expect_accepted(
         link.rpc(Request::UpsertCharacter {
             session_token: token.clone(),
+            world_ids: vec![],
             character: CharacterInput {
                 id: None,
                 name: "E2E Bard".into(),
@@ -299,9 +302,7 @@ async fn main() -> Result<()> {
     let start = std::time::Instant::now();
     loop {
         match read_frame(&mut quiet.stream).await {
-            Err(ProtocolError::Io(io))
-                if io.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
+            Err(ProtocolError::Io(io)) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
                 println!(
                     "[ok] idle-closed by broker after {:.1}s",
                     start.elapsed().as_secs_f64()
@@ -316,4 +317,3 @@ async fn main() -> Result<()> {
     println!("E2E PASS");
     Ok(())
 }
-

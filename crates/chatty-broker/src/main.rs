@@ -956,9 +956,16 @@ async fn dispatch(
         Request::UpsertCharacter {
             session_token,
             character,
+            world_ids,
         } => {
             let uid = auth(&app.db, &session_token).await?;
             validate_character(&character)?;
+            if world_ids.len() > 128 {
+                bail!("too many linked worlds")
+            }
+            let mut requested_world_ids = world_ids;
+            requested_world_ids.sort();
+            requested_world_ids.dedup();
             if character.is_public {
                 let config = load_broker_config(&app.db).await?;
                 let role: String = sqlx::query_scalar("SELECT role FROM users WHERE id=?")
@@ -996,7 +1003,7 @@ async fn dispatch(
             let eid = character.id.unwrap_or_else(|| new_uuid());
             let fields = encode(&character.tags)?;
             let mut transaction = app.db.begin().await?;
-            let rev = delta_tx(
+            let character_revision = delta_tx(
                 &mut transaction,
                 &uid,
                 "character",
@@ -1005,14 +1012,76 @@ async fn dispatch(
                 &changed,
             )
             .await?;
-            sqlx::query("INSERT INTO characters(id,owner_id,name,description,personality,scenario,system_prompt,example_dialogue,appearance,age,gender,race,misc,tags,avatar,revision,is_public) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,personality=excluded.personality,scenario=excluded.scenario,system_prompt=excluded.system_prompt,example_dialogue=excluded.example_dialogue,appearance=excluded.appearance,age=excluded.age,gender=excluded.gender,race=excluded.race,misc=excluded.misc,tags=excluded.tags,avatar=excluded.avatar,revision=excluded.revision,is_public=excluded.is_public WHERE owner_id=excluded.owner_id").bind(&eid).bind(&uid).bind(character.name).bind(character.description).bind(character.personality).bind(character.scenario).bind(character.system_prompt).bind(character.example_dialogue).bind(character.appearance).bind(character.age).bind(character.gender).bind(character.race).bind(character.misc).bind(fields).bind(character.avatar).bind(rev).bind(character.is_public).execute(&mut *transaction).await?;
+            sqlx::query("INSERT INTO characters(id,owner_id,name,description,personality,scenario,system_prompt,example_dialogue,appearance,age,gender,race,misc,tags,avatar,revision,is_public) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,personality=excluded.personality,scenario=excluded.scenario,system_prompt=excluded.system_prompt,example_dialogue=excluded.example_dialogue,appearance=excluded.appearance,age=excluded.age,gender=excluded.gender,race=excluded.race,misc=excluded.misc,tags=excluded.tags,avatar=excluded.avatar,revision=excluded.revision,is_public=excluded.is_public WHERE owner_id=excluded.owner_id").bind(&eid).bind(&uid).bind(character.name).bind(character.description).bind(character.personality).bind(character.scenario).bind(character.system_prompt).bind(character.example_dialogue).bind(character.appearance).bind(character.age).bind(character.gender).bind(character.race).bind(character.misc).bind(fields).bind(character.avatar).bind(character_revision).bind(character.is_public).execute(&mut *transaction).await?;
+
+            let world_rows = sqlx::query("SELECT id,data FROM worlds WHERE owner_id=? ORDER BY id")
+                .bind(&uid)
+                .fetch_all(&mut *transaction)
+                .await?;
+            if requested_world_ids.iter().any(|requested| {
+                !world_rows
+                    .iter()
+                    .any(|row| row.get::<String, _>("id") == *requested)
+            }) {
+                bail!("linked world unavailable")
+            }
+            let mut world_deltas = Vec::new();
+            let mut revision = character_revision;
+            for row in world_rows {
+                let mut world: World = decode(row.get::<&[u8], _>("data"))?;
+                let should_link = requested_world_ids.binary_search(&world.id).is_ok();
+                let is_linked = world.character_ids.iter().any(|id| id == &eid);
+                if should_link == is_linked {
+                    continue;
+                }
+                world.character_ids.retain(|id| id != &eid);
+                if should_link {
+                    world.character_ids.push(eid.clone());
+                }
+                world.validate().map_err(Error::msg)?;
+                let world_changed = encode(&DeltaPayload::World(world.clone()))?;
+                revision = delta_tx(
+                    &mut transaction,
+                    &uid,
+                    "world",
+                    &world.id,
+                    DeltaOperation::Update,
+                    &world_changed,
+                )
+                .await?;
+                sqlx::query("UPDATE worlds SET data=?,revision=? WHERE id=? AND owner_id=?")
+                    .bind(encode(&world)?)
+                    .bind(revision)
+                    .bind(&world.id)
+                    .bind(&uid)
+                    .execute(&mut *transaction)
+                    .await?;
+                world_deltas.push((world.id, revision, world_changed));
+            }
             transaction.commit().await?;
-            send_delta!(&uid, rev, "character", eid, operation, changed);
+            send_delta!(
+                &uid,
+                character_revision,
+                "character",
+                eid,
+                operation,
+                changed
+            );
+            for (world_id, world_revision, world_changed) in world_deltas {
+                send_delta!(
+                    &uid,
+                    world_revision,
+                    "world",
+                    world_id,
+                    DeltaOperation::Update,
+                    world_changed
+                );
+            }
             send!(
                 MessageType::Response,
                 Response::Accepted {
                     entity_id: Some(eid),
-                    revision: rev
+                    revision
                 }
             );
         }

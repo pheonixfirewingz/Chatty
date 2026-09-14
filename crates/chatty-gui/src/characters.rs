@@ -90,6 +90,7 @@ impl ChattyApp {
                     owned_by_user: true,
                     ..Default::default()
                 };
+                self.draft_world_ids.clear();
             }
             if ui.button("Import").clicked() {
                 self.import_character();
@@ -105,6 +106,12 @@ impl ChattyApp {
                 .clicked()
             {
                 self.draft = DraftCharacter::from(&c);
+                self.draft_world_ids = self
+                    .worlds
+                    .iter()
+                    .filter(|world| world.character_ids.contains(&c.id))
+                    .map(|world| world.id.clone())
+                    .collect();
             }
         }
     }
@@ -119,24 +126,6 @@ impl ChattyApp {
             ui.label("Public character · Only the owner can edit it.");
         }
         self.character_actions(ui);
-        if let Some(id) = &self.draft.id {
-            let names = self
-                .worlds
-                .iter()
-                .filter(|world| world.character_ids.contains(id))
-                .map(|world| world.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            ui.label(if names.is_empty() {
-                "World: none linked".into()
-            } else {
-                format!("Worlds: {names}")
-            });
-            if ui.button("Manage world links").clicked() {
-                self.worlds_open = true;
-                self.draft_character_open = false;
-            }
-        }
         ui.separator();
         ui.add_enabled_ui(can_edit, |ui| {
             ui.label("Name");
@@ -172,6 +161,25 @@ impl ChattyApp {
             );
             ui.label("Tags");
             ui.add(egui::TextEdit::singleline(&mut self.draft.tags).desired_width(f32::INFINITY));
+            ui.separator();
+            ui.label(egui::RichText::new("World lore").strong());
+            ui.label("Link this character to any worlds whose lore should be available during roleplay.");
+            if self.worlds.is_empty() {
+                ui.label("No worlds yet. Create one from the Worlds editor, then return here to link it.");
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for world in &self.worlds {
+                        let mut linked = self.draft_world_ids.contains(&world.id);
+                        if ui.checkbox(&mut linked, &world.name).changed() {
+                            if linked {
+                                self.draft_world_ids.insert(world.id.clone());
+                            } else {
+                                self.draft_world_ids.remove(&world.id);
+                            }
+                        }
+                    }
+                });
+            }
         });
     }
     fn character_identity_fields(&mut self, ui: &mut egui::Ui) {
@@ -261,6 +269,7 @@ impl ChattyApp {
                             owned_by_user: true,
                             ..Default::default()
                         };
+                        self.draft_world_ids.clear();
                     }
                 }
             }
@@ -273,6 +282,7 @@ impl ChattyApp {
         }
         self.send(Request::UpsertCharacter {
             session_token: self.token.clone(),
+            world_ids: self.draft_world_ids.iter().cloned().collect(),
             character: CharacterInput {
                 id: self.draft.id.clone(),
                 name: self.draft.name.trim().into(),
@@ -322,7 +332,10 @@ impl ChattyApp {
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(draft_from_card)
         {
-            Some(d) => self.draft = d,
+            Some(d) => {
+                self.draft = d;
+                self.draft_world_ids.clear();
+            }
             None => self.set_error("Could not read that SillyTavern card."),
         }
     }

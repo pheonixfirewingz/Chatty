@@ -97,9 +97,10 @@ MIT. See [LICENSE](LICENSE).
 
 ### World lore
 
-Open **Worlds** in the sidebar or **Manage world links** in a saved character's editor.
-Create a world, select its characters, add facts, and save. Worlds are private to your
-account, including links to public characters; other users do not inherit your lore.
+Open **Worlds** in the sidebar to create and edit world lore. When creating or editing
+a character, use the **World lore** checkboxes in the character form to link or unlink
+that character. Character details and link changes are saved together. Worlds are
+private to your account; other users do not inherit your lore.
 
 - **Common knowledge** is eligible on every reply by a linked character.
 - Other enabled facts activate through case-insensitive keyword/phrase matching in

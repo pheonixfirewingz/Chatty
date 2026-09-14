@@ -477,6 +477,7 @@ struct ChattyApp {
     sidebar_visible: bool,
     error: Option<UiNotice>,
     draft: DraftCharacter,
+    draft_world_ids: HashSet<String>,
     draft_character_open: bool,
     new_chat_open: bool,
     new_conversation_title: String,
@@ -539,6 +540,7 @@ impl ChattyApp {
                 owned_by_user: true,
                 ..Default::default()
             },
+            draft_world_ids: HashSet::new(),
             draft_character_open: false,
             new_chat_open: false,
             new_conversation_title: String::new(),
@@ -666,7 +668,11 @@ impl ChattyApp {
                         Response::ServerCapabilities {
                             registration_enabled,
                         } => self.registration_enabled = registration_enabled,
-                        Response::Worlds(v) => self.worlds = v,
+                        Response::Worlds(v) => {
+                            self.draft_world_ids
+                                .retain(|id| v.iter().any(|world| &world.id == id));
+                            self.worlds = v;
+                        }
                         Response::Characters(v) => self.characters = v,
                         Response::Conversations(v) => {
                             self.conversations = v
@@ -1763,6 +1769,42 @@ mod visual_tests {
             .expect("render compact character popup")
             .save("/tmp/chatty-restored-compact-characters.png")
             .expect("save compact character popup");
+    }
+
+    #[test]
+    fn visual_character_world_links_desktop_and_compact() {
+        for (name, size) in [
+            ("desktop", egui::vec2(1440.0, 900.0)),
+            ("compact", egui::vec2(430.0, 760.0)),
+        ] {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(size)
+                .build_eframe(|creation| {
+                    configure_style_with_surface(&creation.egui_ctx, false, false, 20);
+                    let (commands, _) = mpsc::unbounded_channel();
+                    let (_, events) = std::sync::mpsc::channel();
+                    let mut app = ChattyApp::new(commands, events);
+                    app.load_inspection_demo();
+                    app.worlds = vec![World {
+                        id: "moon-realm".into(),
+                        name: "Moon realm".into(),
+                        character_ids: vec![app.characters[0].id.clone()],
+                        entries: vec![],
+                    }];
+                    app.draft = DraftCharacter::from(&app.characters[0]);
+                    app.draft_world_ids.insert("moon-realm".into());
+                    app.draft_character_open = true;
+                    app
+                });
+            harness.run_ok();
+            harness.get_by_label("Moon realm").scroll_to_me();
+            harness.run_ok();
+            harness
+                .render()
+                .expect("render character world links")
+                .save(format!("/tmp/chatty-character-world-links-{name}.png"))
+                .expect("save character world links");
+        }
     }
 
     #[test]
