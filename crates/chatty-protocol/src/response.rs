@@ -52,4 +52,6 @@ pub enum Response {
     },
     AccountUsage(TokenUsage),
     Worlds(Vec<crate::world::World>),
+    /// AI-converted world returned for review; the broker has not persisted it.
+    WorldImportPreview(crate::world::World),
 }

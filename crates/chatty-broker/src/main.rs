@@ -824,6 +824,15 @@ async fn dispatch(
                 Response::Worlds(load_worlds(&app.db, &uid).await?)
             );
         }
+        Request::ImportSillyTavernWorld {
+            session_token,
+            source_name,
+            lorebook_json,
+        } => {
+            let uid = auth(&app.db, &session_token).await?;
+            let world = import_silly_tavern_world(&app, &uid, &source_name, &lorebook_json).await?;
+            send!(MessageType::Response, Response::WorldImportPreview(world));
+        }
         Request::SaveWorld {
             session_token,
             mut world,

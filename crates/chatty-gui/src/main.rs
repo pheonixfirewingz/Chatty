@@ -456,6 +456,8 @@ struct ChattyApp {
     characters: Vec<Character>,
     worlds: Vec<World>,
     world_draft: World,
+    world_import_pending: bool,
+    world_import_notice: Option<String>,
     worlds_open: bool,
     conversations: Vec<Conversation>,
     messages: Vec<ChatMessage>,
@@ -516,6 +518,8 @@ impl ChattyApp {
             characters: vec![],
             worlds: vec![],
             world_draft: World::default(),
+            world_import_pending: false,
+            world_import_notice: None,
             worlds_open: false,
             conversations: vec![],
             messages: vec![],
@@ -666,6 +670,15 @@ impl ChattyApp {
                                 .retain(|id| v.iter().any(|world| &world.id == id));
                             self.worlds = v;
                         }
+                        Response::WorldImportPreview(world) => {
+                            self.world_draft = world;
+                            self.world_import_pending = false;
+                            self.world_import_notice = Some(
+                                "AI import preview — review the entries, link characters, then save."
+                                    .into(),
+                            );
+                            self.worlds_open = true;
+                        }
                         Response::Characters(v) => self.characters = v,
                         Response::Conversations(v) => {
                             self.conversations = v
@@ -770,6 +783,7 @@ impl ChattyApp {
                 }
             }
             MessageType::Error => {
+                self.world_import_pending = false;
                 if let Ok(e) = decode::<WireError>(&frame.payload) {
                     let message = match e.code {
                         ErrorCode::BackendUnavailable | ErrorCode::ModelMissing => {

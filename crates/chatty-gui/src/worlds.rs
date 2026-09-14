@@ -22,6 +22,12 @@ impl ChattyApp {
                             }
                         });
                     if ui.button("New world").clicked() { self.world_draft = World::default(); }
+                    if ui.add_enabled(
+                        !self.world_import_pending,
+                        egui::Button::new(if self.world_import_pending { "Importing…" } else { "Import SillyTavern" }),
+                    ).on_hover_text("Use the configured AI model to convert a SillyTavern lorebook into an editable preview").clicked() {
+                        self.import_silly_tavern_world();
+                    }
                     if ui.button("Save world").clicked() {
                         match self.world_draft.validate() {
                             Err(error) => self.set_error(error),
@@ -39,6 +45,9 @@ impl ChattyApp {
                 ui.label(if self.worlds.iter().any(|world| world == &self.world_draft) {
                     "Saved"
                 } else { "Unsaved changes — save to apply" });
+                if let Some(notice) = &self.world_import_notice {
+                    ui.label(egui::RichText::new(notice).color(egui::Color32::from_rgb(100, 180, 255)));
+                }
                 ui.separator();
                 egui::ScrollArea::vertical().id_salt("world-editor").auto_shrink([false, false]).show(ui, |ui| {
                     let label = ui.label("World name");
@@ -97,5 +106,41 @@ impl ChattyApp {
                 });
             });
         self.worlds_open = open;
+    }
+
+    fn import_silly_tavern_world(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("SillyTavern lorebook", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = std::fs::read(&path).map_err(|error| format!("Could not read lorebook: {error}"))
+            .and_then(|bytes| {
+                if bytes.len() > 2 * 1024 * 1024 {
+                    Err("SillyTavern lorebook exceeds 2 MiB".into())
+                } else {
+                    String::from_utf8(bytes).map_err(|_| "Lorebook is not valid UTF-8 JSON".into())
+                }
+            })
+            .and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .map_err(|error| format!("Lorebook is not valid JSON: {error}"))?;
+                Ok(text)
+            });
+        match result {
+            Ok(lorebook_json) => {
+                let source_name = path.file_stem().and_then(|name| name.to_str())
+                    .unwrap_or("Imported world").replace(['_', '-'], " ");
+                self.world_import_pending = true;
+                self.world_import_notice = Some("AI is converting the lorebook…".into());
+                self.send(Request::ImportSillyTavernWorld {
+                    session_token: self.token.clone(),
+                    source_name,
+                    lorebook_json,
+                });
+            }
+            Err(error) => self.set_error(error),
+        }
     }
 }

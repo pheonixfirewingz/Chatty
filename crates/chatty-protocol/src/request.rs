@@ -164,6 +164,12 @@ pub enum Request {
     ListWorlds {
         session_token: String,
     },
+    /// Convert an exported SillyTavern lorebook into an unsaved Chatty world draft.
+    ImportSillyTavernWorld {
+        session_token: String,
+        source_name: String,
+        lorebook_json: String,
+    },
     SaveWorld {
         session_token: String,
         world: crate::world::World,
