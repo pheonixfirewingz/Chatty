@@ -2474,7 +2474,7 @@ impl ChattyApp {
                     self.screen = Screen::Characters;
                     self.draft_character_open = true;
                 }
-                if ui.button("Worlds").clicked() {
+                if Self::footer_icon_button(ui, FooterIcon::World, "Manage world lore").clicked() {
                     self.worlds_open = true;
                 }
                 if self.role == Some(Role::Admin)

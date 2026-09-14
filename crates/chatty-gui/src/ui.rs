@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) enum FooterIcon {
     Characters,
+    World,
     Admin,
     Settings,
     SignOut,
@@ -65,6 +66,36 @@ impl ChattyApp {
                         ],
                         stroke,
                     );
+                }
+                FooterIcon::World => {
+                    painter.circle_stroke(center, 10.0, stroke);
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-10.0, 0.0),
+                            center + egui::vec2(10.0, 0.0),
+                        ],
+                        stroke,
+                    );
+                    painter.add(egui::Shape::line(
+                        vec![
+                            center + egui::vec2(0.0, -10.0),
+                            center + egui::vec2(-3.5, -5.0),
+                            center + egui::vec2(-4.5, 0.0),
+                            center + egui::vec2(-3.5, 5.0),
+                            center + egui::vec2(0.0, 10.0),
+                        ],
+                        stroke,
+                    ));
+                    painter.add(egui::Shape::line(
+                        vec![
+                            center + egui::vec2(0.0, -10.0),
+                            center + egui::vec2(3.5, -5.0),
+                            center + egui::vec2(4.5, 0.0),
+                            center + egui::vec2(3.5, 5.0),
+                            center + egui::vec2(0.0, 10.0),
+                        ],
+                        stroke,
+                    ));
                 }
                 FooterIcon::Admin => {
                     let points = [
