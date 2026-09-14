@@ -39,6 +39,17 @@ Responsibilities:
 
 The broker is stateless only with respect to process memory: SQLite remains authoritative across restart. In-memory connection, cancellation, health, and broadcast state is reconstructible.
 
+Broker source is split along runtime boundaries:
+
+- `main.rs` owns startup and request dispatch.
+- `transport.rs` owns TLS connections, framing, idle close, and delta fan-out.
+- `auth.rs` owns sessions and authorization lookups.
+- `systems/admin.rs` owns monitoring, broker configuration, and Ollama administration.
+- `systems/conversations.rs` owns conversation persistence, snapshots, world loading, and automatic titles.
+- `systems/inference.rs` owns prompt assembly, model requests, streaming, persistence of generated output, and speaker selection.
+- `utils.rs` contains validation, error classification, bounded text helpers, usage accounting, and stream parsers.
+- `tests.rs` contains broker unit and integration-style tests.
+
 ### Shared protocol (`chatty-protocol`)
 
 Responsibilities:
@@ -53,7 +64,7 @@ Because bincode encodes Rust data layouts, broker and client must use compatible
 
 ### SQLite
 
-SQLite owns users, sessions, characters, conversations, participants, messages, variants, lore, memories, broker settings, token totals, and the revisioned delta log. Foreign keys encode lifecycle relationships; owner predicates provide the main tenant boundary.
+SQLite owns users, sessions, characters, conversations, participants, messages, variants, worlds, memories, broker settings, token totals, and the revisioned delta log. Foreign keys encode lifecycle relationships; owner predicates provide the main tenant boundary.
 
 ### Inference service
 
@@ -68,7 +79,7 @@ Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 The broker first sends a JSON handshake:
 
 ```json
-{"protocol":9,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+{"protocol":10,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
 ```
 
 All later messages use a 14-byte header:
@@ -97,7 +108,7 @@ user message -> persist + delta -> compile context -> select speaker
              -> persist message/variant + token usage -> final delta
 ```
 
-The compiler combines system rules, the active character, bounded group participant cards, lore, scoped memories, conversation state, summary, and selected recent message history.
+The compiler combines system rules, the active character, bounded group participant cards, world lore, scoped memories, conversation state, summary, and selected recent message history. Owner-scoped worlds contain character links and facts. Common knowledge is selected first; other enabled facts match keywords in the latest six messages. Selection is recalculated for each reply and bounded to 8 KiB, without persisting retrieved facts as messages or memories.
 
 Stream output flushes after 32 whitespace-delimited units, 60 ms, or completion. Each connection has a 32-frame writer queue, which propagates backpressure. Cancellation keys include both connection ID and request ID to prevent cross-client cancellation.
 
@@ -105,7 +116,7 @@ Stream output flushes after 32 whitespace-delimited units, 60 ms, or completion.
 
 - The broker trusts no client-supplied role or ownership claim.
 - Session tokens identify users and expire after 30 days.
-- Characters, conversations, lore, memories, deltas, and usage are owner-scoped.
+- Characters, conversations, worlds, memories, deltas, and usage are owner-scoped.
 - Public characters are readable across accounts only when broker policy permits; only their owner can edit them.
 - Admin-only requests re-read role state from the database.
 - Admin data inspection excludes password hashes, tokens, and conversation bodies.

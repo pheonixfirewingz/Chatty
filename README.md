@@ -26,7 +26,7 @@ The repository does not contain a terminal client. Scripts that invoke `chatty-c
 - Admin monitoring, user management, broker policy, inference settings, and Ollama model controls
 - Broker/protocol support for group modes, variants, lore, memories, conversation state, and summaries
 
-The current GUI intentionally exposes direct conversations only. Group workflows, lore, memory, world state, summaries, and variant selection still need a GUI pass.
+The current GUI intentionally exposes direct conversations only. World lore has a native editor with character links, common knowledge, and scene-triggered facts. Group workflows, memory, conversation state, summaries, and variant selection still need a GUI pass.
 
 ## Quick start
 
@@ -94,3 +94,23 @@ At the 2026-09-08 baseline, all 88 tests pass; formatting and strict Clippy stil
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### World lore
+
+Open **Worlds** in the sidebar or **Manage world links** in a saved character's editor.
+Create a world, select its characters, add facts, and save. Worlds are private to your
+account, including links to public characters; other users do not inherit your lore.
+
+- **Common knowledge** is eligible on every reply by a linked character.
+- Other enabled facts activate through case-insensitive keyword/phrase matching in
+  the latest six messages, using selected variants. They leave context when those
+  triggers leave the window; lore is not written into chat history or memory.
+- Common knowledge takes precedence, then descending priority. Whole entries fit
+  within an 8 KiB per-reply lore budget; entries that do not fit are skipped.
+- A character can use multiple worlds. Unlinked worlds and disabled facts are excluded.
+- Save applies edits; removing an entry or deleting a world removes it from future replies.
+
+Upgrade the GUI and broker together. Migration `0010_remove_legacy_lore.sql` removes
+old global/conversation lore and its sync deltas; that data is not converted to worlds.
+Existing characters, conversations, and memories remain. Historical migrations are
+retained so existing databases can upgrade normally.

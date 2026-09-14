@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::account::Role;
 use crate::character::CharacterInput;
 use crate::conversation::{ConversationKind, EntityKind};
-use crate::lore::LoreInput;
 use crate::memory::MemoryInput;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -88,10 +87,6 @@ pub enum Request {
         session_token: String,
         conversation_id: String,
     },
-    ListLore {
-        session_token: String,
-        conversation_id: Option<String>,
-    },
     ListMemories {
         session_token: String,
         conversation_id: Option<String>,
@@ -140,10 +135,6 @@ pub enum Request {
         message_id: String,
         variant_id: String,
     },
-    UpsertLore {
-        session_token: String,
-        lore: LoreInput,
-    },
     UpsertMemory {
         session_token: String,
         memory: MemoryInput,
@@ -167,5 +158,16 @@ pub enum Request {
     },
     GetAccountUsage {
         session_token: String,
+    },
+    ListWorlds {
+        session_token: String,
+    },
+    SaveWorld {
+        session_token: String,
+        world: crate::world::World,
+    },
+    DeleteWorld {
+        session_token: String,
+        world_id: String,
     },
 }

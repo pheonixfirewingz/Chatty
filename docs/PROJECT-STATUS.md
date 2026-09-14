@@ -2,7 +2,7 @@
 
 Status date: 2026-09-08  
 Version: `0.1.0`  
-Wire protocol: `9`  
+Wire protocol: `10`
 Release state: pre-release
 
 This status is derived from the current workspace, not from historical handoff claims.
@@ -38,7 +38,7 @@ Additional compiler warnings exist in the e2e smoke binary and the GUI inspectio
 | Area | Status | Notes |
 |---|---|---|
 | TLS broker/client transport | Working | TLS 1.3-only configuration with a pinned client CA |
-| Binary protocol | Working | JSON handshake, then bincode 2 frames; protocol version 9 |
+| Binary protocol | Working | JSON handshake, then bincode 2 frames; protocol version 10 |
 | Compression/backpressure | Working | zstd for streams/deltas and payloads at least 256 bytes; bounded writer queue |
 | Accounts and authorization | Working | Argon2 passwords, 30-day sessions, first-user admin, tenant-scoped data |
 | Direct character chat | Working in GUI | Streaming, cancellation, regenerate/delete, Markdown, automatic naming |
@@ -47,7 +47,8 @@ Additional compiler warnings exist in the e2e smoke binary and the GUI inspectio
 | Reconnect and state sync | Working | Snapshot plus revision-based resume and same-owner live deltas |
 | Token accounting | Working | Prompt/completion totals include generation and auxiliary model calls |
 | Group conversations | Broker/protocol only | GUI hides group conversations |
-| Lore, memories, state, summaries | Broker/protocol only | No complete GUI workflow |
+| World lore | Native editor + broker | Character links, common knowledge, keyword activation, bounded immediate context |
+| Memories, state, summaries | Broker/protocol only | No complete GUI workflow |
 | Variants/swipes | Broker/protocol only | GUI offers regeneration but not a full variant selector |
 | Field-minimal deltas | Partial | Some update payloads still carry a complete entity |
 | Flatpak bundle | In progress | Local bundle script exists; Flathub manifest is incomplete |

@@ -8,7 +8,6 @@ pub mod conversation;
 pub mod delta;
 pub mod error;
 pub mod frame;
-pub mod lore;
 pub mod memory;
 pub mod request;
 pub mod response;
@@ -29,7 +28,6 @@ pub use frame::{
     COMPRESSION_THRESHOLD, FLAG_ZSTD, Frame, HEADER_LEN, MAX_PAYLOAD, MessageType, ProtocolCodec,
     decode, encode, read_frame, write_message, write_payload,
 };
-pub use lore::{LoreEntry, LoreInput};
 pub use memory::{MemoryEntry, MemoryInput};
 pub use request::Request;
 pub use response::Response;
@@ -37,3 +35,6 @@ pub use util::current_utc_timestamp;
 
 #[cfg(test)]
 mod tests;
+
+pub mod world;
+pub use world::{World, WorldFact};

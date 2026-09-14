@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
 use chatty_protocol::util::args::ParsedArgs;
-use chatty_protocol::util::{bail, format_err, Context, Error, Result};
+use chatty_protocol::util::{Context, Error, Result, bail, format_err};
 use chatty_protocol::*;
 use eframe::egui;
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
@@ -23,6 +23,7 @@ mod characters;
 mod conversation;
 mod network;
 mod ui;
+mod worlds;
 use network::{Command, ConnectionTarget, Event, EventSender};
 use ui::FooterIcon;
 
@@ -460,6 +461,9 @@ struct ChattyApp {
     registration_enabled: bool,
     state: HashMap<(String, String), DeltaPayload>,
     characters: Vec<Character>,
+    worlds: Vec<World>,
+    world_draft: World,
+    worlds_open: bool,
     conversations: Vec<Conversation>,
     messages: Vec<ChatMessage>,
     selected_conversation: Option<String>,
@@ -516,6 +520,9 @@ impl ChattyApp {
             registration_enabled: true,
             state: HashMap::new(),
             characters: vec![],
+            worlds: vec![],
+            world_draft: World::default(),
+            worlds_open: false,
             conversations: vec![],
             messages: vec![],
             selected_conversation: None,
@@ -584,6 +591,9 @@ impl ChattyApp {
         self.send(Request::ListConversations {
             session_token: self.token.clone(),
         });
+        self.send(Request::ListWorlds {
+            session_token: self.token.clone(),
+        });
     }
     fn authenticated(&mut self, token: String, user_id: String, role: Role, revision: i64) {
         self.connected = true;
@@ -621,12 +631,18 @@ impl ChattyApp {
                     self.connected = false;
                     self.connecting = false;
                     self.restoring_session = false;
+                    self.worlds.clear();
+                    self.world_draft = World::default();
+                    self.worlds_open = false;
                     self.token.clear();
                     self.role = None;
                     self.status = "Enter the server IP to begin.".into();
                 }
                 Event::SessionExpired => {
                     self.restoring_session = false;
+                    self.worlds.clear();
+                    self.world_draft = World::default();
+                    self.worlds_open = false;
                     self.token.clear();
                     self.role = None;
                     self.set_error("Saved session expired. Sign in again.");
@@ -650,6 +666,7 @@ impl ChattyApp {
                         Response::ServerCapabilities {
                             registration_enabled,
                         } => self.registration_enabled = registration_enabled,
+                        Response::Worlds(v) => self.worlds = v,
                         Response::Characters(v) => self.characters = v,
                         Response::Conversations(v) => {
                             self.conversations = v
@@ -770,6 +787,14 @@ impl ChattyApp {
         }
     }
     fn apply_delta(&mut self, d: StateDelta) {
+        if d.entity_type == "world" {
+            self.worlds.retain(|world| world.id != d.entity_id);
+            if !matches!(d.operation, DeltaOperation::Delete) {
+                if let Ok(DeltaPayload::World(world)) = decode(&d.changed_fields) {
+                    self.worlds.push(world);
+                }
+            }
+        }
         self.revision = self.revision.max(d.revision);
         let key = (d.entity_type, d.entity_id);
         if matches!(d.operation, DeltaOperation::Delete) {
@@ -1642,6 +1667,64 @@ mod visual_tests {
     }
 
     #[test]
+    fn visual_world_editor() {
+        for (name, width, height) in [("desktop", 1440.0, 900.0), ("compact", 430.0, 760.0)] {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .build_eframe(|creation| {
+                    configure_style_with_surface(&creation.egui_ctx, false, false, 20);
+                    let (commands, _) = mpsc::unbounded_channel();
+                    let (_, events) = std::sync::mpsc::channel();
+                    let mut app = ChattyApp::new(commands, events);
+                    app.load_inspection_demo();
+                    app.worlds_open = true;
+                    app.world_draft = World {
+                        id: "realm".into(),
+                        name: "The moonlit realm".into(),
+                        character_ids: vec![app.characters[0].id.clone()],
+                        entries: vec![
+                            WorldFact {
+                                title: "The two moons".into(),
+                                content:
+                                    "Everyone knows the silver moon marks the changing seasons."
+                                        .into(),
+                                common_knowledge: true,
+                                enabled: true,
+                                ..Default::default()
+                            },
+                            WorldFact {
+                                title: "Old gate".into(),
+                                content: "The northern gate closes at dusk.".into(),
+                                keywords: vec!["gate".into(), "north".into()],
+                                enabled: true,
+                                ..Default::default()
+                            },
+                        ],
+                    };
+                    app
+                });
+            harness.run_ok();
+            harness
+                .render()
+                .expect("render world editor")
+                .save(format!("/tmp/chatty-world-{name}.png"))
+                .expect("save world editor");
+            harness
+                .get_by_role_and_label(
+                    egui::accesskit::Role::TextInput,
+                    "Keywords (comma separated, case insensitive)",
+                )
+                .scroll_to_me();
+            harness.run_ok();
+            harness
+                .render()
+                .expect("render scrolled world editor")
+                .save(format!("/tmp/chatty-world-{name}-scrolled.png"))
+                .expect("save scrolled editor");
+        }
+    }
+
+    #[test]
     fn visual_compact_character_popup() {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(430.0, 760.0))
@@ -2083,12 +2166,16 @@ impl eframe::App for ChattyApp {
                     self.render_shell(ui)
                 }
             });
-        let modal_open = self.draft_character_open
+        let modal_open = self.worlds_open
+            || self.draft_character_open
             || self.new_chat_open
             || matches!(self.screen, Screen::Admin | Screen::Settings)
             || self.error.is_some();
         if self.glass_mode && modal_open {
             paint_glass_modal_scrim(ui, self.light_mode);
+        }
+        if self.worlds_open {
+            self.render_world_dialog(&ctx);
         }
         if self.draft_character_open {
             self.render_character_dialog(&ctx)
@@ -2323,6 +2410,9 @@ impl ChattyApp {
                     self.screen = Screen::Characters;
                     self.draft_character_open = true;
                 }
+                if ui.button("Worlds").clicked() {
+                    self.worlds_open = true;
+                }
                 if self.role == Some(Role::Admin)
                     && Self::footer_icon_button(ui, FooterIcon::Admin, "Open admin portal")
                         .clicked()
@@ -2342,6 +2432,9 @@ impl ChattyApp {
                         session_token: self.token.clone(),
                     });
                     let _ = self.commands.send(Command::ClearSession);
+                    self.worlds.clear();
+                    self.world_draft = World::default();
+                    self.worlds_open = false;
                     self.token.clear();
                     self.role = None;
                 }
