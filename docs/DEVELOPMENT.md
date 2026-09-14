@@ -83,7 +83,7 @@ SQLite is authoritative. Mutations must:
 
 ## Protocol changes
 
-The broker sends a JSON handshake declaring protocol version `9`; all runtime requests, responses, errors, deltas, and stream chunks use bincode 2.
+The broker sends a JSON handshake declaring protocol version `10`; all runtime requests, responses, errors, deltas, and stream chunks use bincode 2.
 
 Any incompatible request/response/type-layout change must increment the handshake version and update broker and GUI together. Keep frames bounded to 8 MiB and preserve decompression bounds.
 

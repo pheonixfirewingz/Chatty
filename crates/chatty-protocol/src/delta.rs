@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::character::CharacterInput;
 use crate::conversation::ConversationKind;
-use crate::lore::LoreInput;
 use crate::memory::MemoryInput;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -45,7 +44,7 @@ pub enum DeltaPayload {
         parent_id: Option<String>,
         selected_variant_id: Option<String>,
     },
-    Lore(LoreInput),
+    World(crate::world::World),
     Memory(MemoryInput),
     Variant {
         message_id: String,

@@ -119,6 +119,24 @@ impl ChattyApp {
             ui.label("Public character · Only the owner can edit it.");
         }
         self.character_actions(ui);
+        if let Some(id) = &self.draft.id {
+            let names = self
+                .worlds
+                .iter()
+                .filter(|world| world.character_ids.contains(id))
+                .map(|world| world.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ui.label(if names.is_empty() {
+                "World: none linked".into()
+            } else {
+                format!("Worlds: {names}")
+            });
+            if ui.button("Manage world links").clicked() {
+                self.worlds_open = true;
+                self.draft_character_open = false;
+            }
+        }
         ui.separator();
         ui.add_enabled_ui(can_edit, |ui| {
             ui.label("Name");

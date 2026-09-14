@@ -17,7 +17,6 @@ pub enum EntityKind {
     Character,
     Conversation,
     Message,
-    Lore,
     Memory,
 }
 

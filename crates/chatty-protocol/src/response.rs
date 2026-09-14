@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::account::{Permission, Role, TokenUsage, UserAccount};
 use crate::character::Character;
 use crate::conversation::{Conversation, ConversationView};
-use crate::lore::LoreEntry;
 use crate::memory::MemoryEntry;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,7 +31,6 @@ pub enum Response {
     Permissions(Vec<Permission>),
     Conversations(Vec<Conversation>),
     ConversationView(ConversationView),
-    Lore(Vec<LoreEntry>),
     Memories(Vec<MemoryEntry>),
     SyncComplete {
         revision: i64,
@@ -53,4 +51,5 @@ pub enum Response {
         conversation_id: String,
     },
     AccountUsage(TokenUsage),
+    Worlds(Vec<crate::world::World>),
 }
