@@ -93,7 +93,6 @@ struct Args {
     broker: String,
     ca: Option<PathBuf>,
     inspect: bool,
-    inspect_control: PathBuf,
     width: f32,
     height: f32,
     session_file: Option<PathBuf>,
@@ -104,7 +103,6 @@ Options:\n\
   --broker <addr>         Broker address [env: CHATTY_BROKER]\n\
   --ca <path>             Pinned CA certificate PEM [env: CHATTY_CA]\n\
   --inspect               Open the inspection harness instead of the app\n\
-  --inspect-control <path> Control socket path [default: /tmp/chatty-gui-control]\n\
   --width <px>            Initial window width [default: 1100]\n\
   --height <px>           Initial window height [default: 720]\n\
   --session-file <path>   Session storage path [env: CHATTY_SESSION_FILE]\n";
@@ -118,11 +116,6 @@ fn main() -> Result<()> {
         broker: parsed.string("broker", "CHATTY_BROKER", ""),
         ca: parsed.optional("ca", "CHATTY_CA").map(PathBuf::from),
         inspect: parsed.flag("inspect"),
-        inspect_control: PathBuf::from(parsed.string(
-            "inspect-control",
-            "",
-            "/tmp/chatty-gui-control",
-        )),
         width: parsed.number("width", 1100.0),
         height: parsed.number("height", 720.0),
         session_file: parsed

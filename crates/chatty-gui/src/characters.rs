@@ -283,7 +283,7 @@ impl ChattyApp {
         self.send(Request::UpsertCharacter {
             session_token: self.token.clone(),
             world_ids: self.draft_world_ids.iter().cloned().collect(),
-            character: CharacterInput {
+            character: Box::new(CharacterInput {
                 id: self.draft.id.clone(),
                 name: self.draft.name.trim().into(),
                 description: self.draft.description.clone(),
@@ -307,7 +307,7 @@ impl ChattyApp {
                 avatar: self.draft.avatar.clone(),
                 is_public: self.draft.is_public,
                 owned_by_user: self.draft.owned_by_user,
-            },
+            }),
         });
     }
     fn import_character(&mut self) {

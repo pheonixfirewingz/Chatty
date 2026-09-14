@@ -25,10 +25,10 @@ pub fn new_uuid() -> String {
 }
 
 fn fill_random(buffer: &mut [u8]) {
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-        if file.read_exact(buffer).is_ok() {
-            return;
-        }
+    if let Ok(mut file) = std::fs::File::open("/dev/urandom")
+        && file.read_exact(buffer).is_ok()
+    {
+        return;
     }
     // Fallback: fold the current time through SipHash with a fresh random
     // key. Collision-safe enough for connection IDs in an emergency.

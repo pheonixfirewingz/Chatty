@@ -958,6 +958,7 @@ async fn dispatch(
             character,
             world_ids,
         } => {
+            let character = *character;
             let uid = auth(&app.db, &session_token).await?;
             validate_character(&character)?;
             if world_ids.len() > 128 {
@@ -1000,7 +1001,7 @@ async fn dispatch(
             let mut visible_character = character.clone();
             visible_character.owned_by_user = true;
             let changed = encode(&DeltaPayload::Character(visible_character))?;
-            let eid = character.id.unwrap_or_else(|| new_uuid());
+            let eid = character.id.unwrap_or_else(new_uuid);
             let fields = encode(&character.tags)?;
             let mut transaction = app.db.begin().await?;
             let character_revision = delta_tx(
@@ -1550,7 +1551,7 @@ async fn dispatch(
                 }
             }
             let changed = encode(&DeltaPayload::Memory(memory.clone()))?;
-            let eid = memory.id.unwrap_or_else(|| new_uuid());
+            let eid = memory.id.unwrap_or_else(new_uuid);
             let mut transaction = app.db.begin().await?;
             let rev = delta_tx(&mut transaction, &uid, "memory", &eid, operation, &changed).await?;
             sqlx::query("INSERT INTO memories VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content,revision=excluded.revision WHERE owner_id=excluded.owner_id").bind(&eid).bind(&uid).bind(memory.conversation_id).bind(memory.character_id).bind(memory.content).bind(rev).execute(&mut *transaction).await?;

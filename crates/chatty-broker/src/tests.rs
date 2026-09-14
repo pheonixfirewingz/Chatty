@@ -454,7 +454,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         Request::UpsertCharacter {
             session_token: first_token.clone(),
             world_ids: vec![],
-            character: character.clone(),
+            character: Box::new(character.clone()),
         },
     )
     .await
@@ -480,7 +480,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         Request::UpsertCharacter {
             session_token: first_token.clone(),
             world_ids: vec![],
-            character: updated,
+            character: Box::new(updated),
         },
     )
     .await
@@ -730,7 +730,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         Request::UpsertCharacter {
             session_token: first_token.clone(),
-            character: character_update.clone(),
+            character: Box::new(character_update.clone()),
             world_ids: vec![],
         },
     )
@@ -751,7 +751,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         Request::UpsertCharacter {
             session_token: first_token.clone(),
-            character: character_update.clone(),
+            character: Box::new(character_update.clone()),
             world_ids: vec![world.id.clone()],
         },
     )
@@ -775,7 +775,7 @@ async fn cross_tenant_character_update_is_forbidden() {
             &app,
             Request::UpsertCharacter {
                 session_token: first_token.clone(),
-                character: invalid_character_update,
+                character: Box::new(invalid_character_update),
                 world_ids: vec!["missing-world".into()],
             },
         )
@@ -970,7 +970,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         Request::UpsertCharacter {
             session_token: second_token.clone(),
             world_ids: vec![],
-            character: blocked_public,
+            character: Box::new(blocked_public),
         },
     )
     .await
@@ -1013,7 +1013,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         Request::UpsertCharacter {
             session_token: second_token,
             world_ids: vec![],
-            character: stolen,
+            character: Box::new(stolen),
         },
     )
     .await

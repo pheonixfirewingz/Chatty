@@ -5,7 +5,6 @@ use chatty_protocol::util::{Context, Result, bail, format_err};
 use chatty_protocol::*;
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
 fn t() -> f64 {
@@ -133,7 +132,7 @@ async fn main() -> Result<()> {
         link.rpc(Request::UpsertCharacter {
             session_token: token.clone(),
             world_ids: vec![],
-            character: CharacterInput {
+            character: Box::new(CharacterInput {
                 id: None,
                 name: "E2E Bard".into(),
                 description: String::new(),
@@ -150,7 +149,7 @@ async fn main() -> Result<()> {
                 avatar: None,
                 is_public: false,
                 owned_by_user: false,
-            },
+            }),
         })
         .await?,
     )?;
@@ -197,7 +196,6 @@ async fn main() -> Result<()> {
         )
         .await?;
     let mut chunks = 0u32;
-    let mut finished = false;
     let mut last_revision = revision;
     loop {
         let frame = link.codec.read_frame(&mut link.stream).await?;
@@ -209,7 +207,6 @@ async fn main() -> Result<()> {
                     Response::GenerationFinished { revision, .. } => {
                         ok!("generation finished at r{revision} after {chunks} chunks");
                         last_revision = last_revision.max(revision);
-                        finished = true;
                         break;
                     }
                     other => bail!("stream end -> {other:?}"),
@@ -221,7 +218,6 @@ async fn main() -> Result<()> {
                     Response::GenerationFinished { revision, .. } => {
                         ok!("generation finished at r{revision} after {chunks} chunks");
                         last_revision = last_revision.max(revision);
-                        finished = true;
                         break;
                     }
                     other => bail!("generate -> {other:?}"),
@@ -234,7 +230,7 @@ async fn main() -> Result<()> {
             _ => {}
         }
     }
-    assert!(finished && chunks > 0);
+    assert!(chunks > 0);
 
     let before_sync = std::time::Instant::now();
     match link

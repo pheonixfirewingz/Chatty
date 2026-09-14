@@ -24,9 +24,7 @@ pub fn certs(reader: &mut dyn BufRead) -> std::vec::IntoIter<io::Result<Certific
 }
 
 /// The first private-key section (PKCS#8, PKCS#1, or SEC1), decoded to DER.
-pub fn private_key(
-    reader: &mut dyn BufRead,
-) -> io::Result<Option<PrivateKeyDer<'static>>> {
+pub fn private_key(reader: &mut dyn BufRead) -> io::Result<Option<PrivateKeyDer<'static>>> {
     for (label, der) in sections(reader) {
         let key = match label.as_str() {
             "PRIVATE KEY" => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der)),
@@ -59,7 +57,7 @@ fn sections(reader: &mut dyn BufRead) -> Vec<(String, Vec<u8>)> {
         let mut body = String::new();
         let mut closed = false;
         for inner in lines.by_ref() {
-            if inner == &format!("-----END {label}-----") {
+            if inner == format!("-----END {label}-----") {
                 closed = true;
                 break;
             }

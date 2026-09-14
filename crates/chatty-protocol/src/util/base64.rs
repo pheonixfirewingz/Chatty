@@ -47,7 +47,7 @@ pub fn decode(input: &str) -> Option<Vec<u8>> {
         .filter(|byte| !byte.is_ascii_whitespace())
         .collect();
     let padding = cleaned.iter().rev().take_while(|&&b| b == b'=').count();
-    if padding > 2 || cleaned.len() % 4 != 0 {
+    if padding > 2 || !cleaned.len().is_multiple_of(4) {
         return None;
     }
     let body = &cleaned[..cleaned.len() - padding];
