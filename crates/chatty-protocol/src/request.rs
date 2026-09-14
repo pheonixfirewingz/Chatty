@@ -184,4 +184,9 @@ pub enum Request {
         session_token: String,
         world_id: String,
     },
+    UpdateMessage {
+        session_token: String,
+        message_id: String,
+        content: String,
+    },
 }

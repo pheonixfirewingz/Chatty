@@ -468,6 +468,8 @@ struct ChattyApp {
     auto_select_conversation: bool,
     selected_characters: HashSet<String>,
     input: String,
+    editing_message_id: Option<String>,
+    editing_message_content: String,
     stream_text: String,
     typing_character: Option<String>,
     active_request: Option<u64>,
@@ -535,6 +537,8 @@ impl ChattyApp {
             auto_select_conversation: true,
             selected_characters: HashSet::new(),
             input: String::new(),
+            editing_message_id: None,
+            editing_message_content: String::new(),
             stream_text: String::new(),
             typing_character: None,
             active_request: None,
@@ -1487,11 +1491,39 @@ mod visual_tests {
         let mut harness = harness(egui::vec2(1440.0, 900.0));
         harness.get_by_label("Tell me about this place.").hover();
         harness.run_ok();
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Edit");
         harness
             .render()
             .expect("render hovered message delete control")
             .save("/tmp/chatty-restored-hover-message-delete.png")
             .expect("save hovered message delete control");
+    }
+
+    #[test]
+    fn visual_message_editor_and_user_markdown() {
+        let mut harness = harness(egui::vec2(1440.0, 900.0));
+        harness.state_mut().messages[0].content =
+            "# Trip notes\n\n- Bring the **brass** compass\n- Check the `telescope`".into();
+        let markdown = harness.state().messages[0].content.clone();
+        harness.state_mut().editing_message_id = Some("m1".into());
+        harness.state_mut().editing_message_content = markdown;
+        harness.run_ok();
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Save");
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel");
+        harness
+            .render()
+            .expect("render message editor")
+            .save("/tmp/chatty-message-editor.png")
+            .expect("save message editor");
+
+        harness.state_mut().editing_message_id = None;
+        harness.run_ok();
+        harness.get_by_label("Trip notes");
+        harness
+            .render()
+            .expect("render user Markdown")
+            .save("/tmp/chatty-user-markdown.png")
+            .expect("save user Markdown");
     }
 
     #[test]

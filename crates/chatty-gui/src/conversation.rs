@@ -30,7 +30,7 @@ impl ChattyApp {
             0.0
         };
         let composer_height = if compact { 94.0 } else { 104.0 };
-        let content_width = (available.width() - if compact { 0.0 } else { 28.0 }).min(880.0);
+        let content_width = available.width() - if compact { 0.0 } else { 28.0 };
         let content_left = available.center().x - content_width / 2.0;
         let messages_rect = egui::Rect::from_min_max(
             egui::pos2(content_left, available.min.y),
@@ -164,6 +164,10 @@ impl ChattyApp {
     }
     fn render_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage) {
         let user = message.author_type == "user";
+        if self.editing_message_id.as_deref() == Some(message.id.as_str()) {
+            self.render_message_editor(ui, message, user);
+            return;
+        }
         let rendered = ui.scope(|ui| {
             if user {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -173,12 +177,10 @@ impl ChattyApp {
                         .inner_margin(egui::Margin::symmetric(15, 7))
                         .show(ui, |ui| {
                             ui.set_max_width((ui.available_width() * 0.72).clamp(150.0, 620.0));
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&message.content).color(COLOR_ON_PRIMARY),
-                                )
-                                .wrap(),
-                            );
+                            ui.visuals_mut().override_text_color = Some(COLOR_ON_PRIMARY);
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                self.render_markdown(ui, &message.content)
+                            });
                         });
                 });
             } else {
@@ -207,8 +209,23 @@ impl ChattyApp {
             egui::vec2(18.0, 24.0),
         );
         if hovered {
+            let edit_rect = egui::Rect::from_min_size(
+                egui::pos2(message_rect.right() - 55.0, message_rect.top()),
+                egui::vec2(34.0, 24.0),
+            );
+            if ui
+                .put(
+                    edit_rect,
+                    egui::Button::new(egui::RichText::new("Edit").size(10.0)).frame(false),
+                )
+                .on_hover_text("Edit message")
+                .clicked()
+            {
+                self.editing_message_id = Some(message.id.clone());
+                self.editing_message_content = message.content.clone();
+            }
             if !user {
-                let regenerate_rect = delete_rect.translate(egui::vec2(-18.0, 1.0));
+                let regenerate_rect = delete_rect.translate(egui::vec2(-54.0, 1.0));
                 if ui
                     .put(
                         regenerate_rect,
@@ -228,6 +245,62 @@ impl ChattyApp {
                 self.delete_message(&message.id);
             }
         }
+    }
+    fn render_message_editor(&mut self, ui: &mut egui::Ui, message: &ChatMessage, user: bool) {
+        let frame = egui::Frame::new()
+            .fill(if user {
+                COLOR_PRIMARY_STRONG
+            } else {
+                color_surface_raised(ui)
+            })
+            .stroke(egui::Stroke::new(1.0, color_border(ui)))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::symmetric(12, 9));
+        if user {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                frame.show(ui, |ui| {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        self.render_message_editor_contents(ui, message)
+                    });
+                });
+            });
+        } else {
+            frame.show(ui, |ui| self.render_message_editor_contents(ui, message));
+        }
+    }
+    fn render_message_editor_contents(&mut self, ui: &mut egui::Ui, message: &ChatMessage) {
+        ui.set_width((ui.available_width() * 0.72).clamp(240.0, 620.0));
+        let response = ui.add_sized(
+            [ui.available_width(), 96.0],
+            egui::TextEdit::multiline(&mut self.editing_message_content)
+                .desired_rows(4)
+                .hint_text("Message text (Markdown supported)"),
+        );
+        if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.cancel_message_edit();
+            return;
+        }
+        ui.horizontal(|ui| {
+            let valid = !self.editing_message_content.trim().is_empty()
+                && self.editing_message_content != message.content;
+            if ui.add_enabled(valid, egui::Button::new("Save")).clicked() {
+                let content = self.editing_message_content.clone();
+                self.send(Request::UpdateMessage {
+                    session_token: self.token.clone(),
+                    message_id: message.id.clone(),
+                    content,
+                });
+                self.cancel_message_edit();
+            }
+            if ui.button("Cancel").clicked() {
+                self.cancel_message_edit();
+            }
+            ui.label(egui::RichText::new("Esc to cancel").size(11.0).weak());
+        });
+    }
+    fn cancel_message_edit(&mut self) {
+        self.editing_message_id = None;
+        self.editing_message_content.clear();
     }
     fn delete_message(&self, id: &str) {
         self.send(Request::DeleteEntity {

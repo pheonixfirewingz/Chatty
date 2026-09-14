@@ -414,7 +414,7 @@ async fn cross_tenant_character_update_is_forbidden() {
             .await
             .unwrap();
     assert!(selected.is_none());
-    call(
+    let (_, sent_message) = call(
         &app,
         Request::SendMessage {
             session_token: first_token.clone(),
@@ -425,12 +425,43 @@ async fn cross_tenant_character_update_is_forbidden() {
     )
     .await
     .unwrap();
+    let sent_message_id = match decode::<Response>(&sent_message).unwrap() {
+        Response::Accepted {
+            entity_id: Some(id),
+            ..
+        } => id,
+        other => panic!("unexpected response: {other:?}"),
+    };
     let default_title: String = sqlx::query_scalar("SELECT title FROM conversations WHERE id=?")
         .bind(&default_chat_id)
         .fetch_one(&app.db)
         .await
         .unwrap();
     assert_eq!(default_title, "Plan a journey over the northern road");
+    call(
+        &app,
+        Request::UpdateMessage {
+            session_token: first_token.clone(),
+            message_id: sent_message_id.clone(),
+            content: "**Updated** journey plan".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let updated_content: String = sqlx::query_scalar("SELECT content FROM messages WHERE id=?")
+        .bind(&sent_message_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(updated_content, "**Updated** journey plan");
+    let update_delta_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM deltas WHERE entity_type='message' AND entity_id=? AND operation=1",
+    )
+    .bind(&sent_message_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(update_delta_count, 1);
     let character = CharacterInput {
         id: None,
         name: "Owner's character".into(),
@@ -691,6 +722,17 @@ async fn cross_tenant_character_update_is_forbidden() {
         Response::Authenticated { session_token, .. } => session_token,
         other => panic!("unexpected response: {other:?}"),
     };
+    let forbidden_message_edit = call(
+        &app,
+        Request::UpdateMessage {
+            session_token: second_token.clone(),
+            message_id: sent_message_id.clone(),
+            content: "cross-tenant edit".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(forbidden_message_edit.to_string().contains("forbidden"));
     let world = World {
         id: "test-world".into(),
         name: "Moon realm".into(),

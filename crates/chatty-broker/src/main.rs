@@ -1386,6 +1386,68 @@ async fn dispatch(
                 });
             }
         }
+        Request::UpdateMessage {
+            session_token,
+            message_id,
+            content,
+        } => {
+            let uid = auth(&app.db, &session_token).await?;
+            if content.is_empty() || content.len() > 65_536 {
+                bail!("message length invalid")
+            }
+            let mut transaction = app.db.begin().await?;
+            let row = sqlx::query(
+                "SELECT m.conversation_id,m.author_type,m.author_id,m.parent_id,m.selected_variant_id \
+                 FROM messages m JOIN conversations c ON c.id=m.conversation_id \
+                 WHERE m.id=? AND c.owner_id=?",
+            )
+            .bind(&message_id)
+            .bind(&uid)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(row) = row else {
+                bail!("message not found or forbidden")
+            };
+            let changed = encode(&DeltaPayload::Message {
+                conversation_id: row.get("conversation_id"),
+                author_type: row.get("author_type"),
+                author_id: row.get("author_id"),
+                content: content.clone(),
+                parent_id: row.get("parent_id"),
+                selected_variant_id: row.get("selected_variant_id"),
+            })?;
+            let rev = delta_tx(
+                &mut transaction,
+                &uid,
+                "message",
+                &message_id,
+                DeltaOperation::Update,
+                &changed,
+            )
+            .await?;
+            sqlx::query("UPDATE messages SET content=?,revision=? WHERE id=?")
+                .bind(content)
+                .bind(rev)
+                .bind(&message_id)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            send_delta!(
+                &uid,
+                rev,
+                "message",
+                message_id,
+                DeltaOperation::Update,
+                changed
+            );
+            send!(
+                MessageType::Response,
+                Response::Accepted {
+                    entity_id: Some(message_id),
+                    revision: rev
+                }
+            );
+        }
         Request::SendSystemMessage {
             session_token,
             conversation_id,

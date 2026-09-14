@@ -92,6 +92,7 @@ pub(super) fn is_mutating(request: &Request) -> bool {
             | Request::UpdateConversationState { .. }
             | Request::DeleteEntity { .. }
             | Request::SendMessage { .. }
+            | Request::UpdateMessage { .. }
             | Request::SendSystemMessage { .. }
             | Request::Generate { .. }
             | Request::SelectVariant { .. }
