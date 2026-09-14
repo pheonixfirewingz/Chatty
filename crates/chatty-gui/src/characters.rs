@@ -23,6 +23,29 @@ impl From<&Character> for DraftCharacter {
     }
 }
 
+impl From<&CharacterInput> for DraftCharacter {
+    fn from(c: &CharacterInput) -> Self {
+        Self {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            description: c.description.clone(),
+            personality: c.personality.clone(),
+            scenario: c.scenario.clone(),
+            system_prompt: c.system_prompt.clone(),
+            example_dialogue: c.example_dialogue.clone(),
+            appearance: c.appearance.clone(),
+            age: c.age.clone(),
+            gender: c.gender.clone(),
+            race: c.race.clone(),
+            misc: c.misc.clone(),
+            tags: c.tags.join(", "),
+            avatar: c.avatar.clone(),
+            is_public: c.is_public,
+            owned_by_user: c.owned_by_user,
+        }
+    }
+}
+
 impl ChattyApp {
     pub(super) fn render_character_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.draft_character_open;
@@ -84,7 +107,7 @@ impl ChattyApp {
         self.draft_character_open = open;
     }
     fn character_list(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("New").clicked() {
                 self.draft = DraftCharacter {
                     owned_by_user: true,
@@ -92,9 +115,27 @@ impl ChattyApp {
                 };
                 self.draft_world_ids.clear();
             }
-            if ui.button("Import").clicked() {
-                self.import_character();
-            }
+            let import_label = if self.char_import_pending {
+                "Importing\u{2026}"
+            } else {
+                "Import"
+            };
+            ui.add_enabled_ui(!self.char_import_pending, |ui| {
+                ui.menu_button(import_label, |ui| {
+                    if ui.button("SillyTavern card").clicked() {
+                        self.import_character();
+                        ui.close();
+                    }
+                    if ui
+                        .button("AI from text file")
+                        .on_hover_text("Let the AI infer character fields from a text file")
+                        .clicked()
+                    {
+                        self.ai_import_character();
+                        ui.close();
+                    }
+                });
+            });
         });
         ui.add_space(6.0);
         for c in self.characters.clone() {
@@ -337,6 +378,36 @@ impl ChattyApp {
                 self.draft_world_ids.clear();
             }
             None => self.set_error("Could not read that SillyTavern card."),
+        }
+    }
+    fn ai_import_character(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Text file", &["txt", "md", "text"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = std::fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {e}"));
+        match result {
+            Ok(text) => {
+                if text.trim().is_empty() {
+                    self.set_error("Text file is empty.");
+                    return;
+                }
+                let source_name = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Imported character")
+                    .replace(['_', '-'], " ");
+                self.char_import_pending = true;
+                self.char_import_started = Some(Instant::now());
+                self.send(Request::ImportCharacterFromText {
+                    session_token: self.token.clone(),
+                    source_name,
+                    text,
+                });
+            }
+            Err(error) => self.set_error(error),
         }
     }
     fn export_character(&mut self) {

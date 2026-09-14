@@ -835,6 +835,21 @@ async fn dispatch(
             let world = import_silly_tavern_world(&app, &uid, &source_name, &lorebook_json).await?;
             send!(MessageType::Response, Response::WorldImportPreview(world));
         }
+        Request::ImportCharacterFromText {
+            session_token,
+            source_name,
+            text,
+        } => {
+            let uid = auth(&app.db, &session_token).await?;
+            busy.fetch_add(1, Ordering::Relaxed);
+            let _busy_guard = BusyGuard(busy.clone());
+            let character =
+                import_character_from_text(&app, &uid, &source_name, &text).await?;
+            send!(
+                MessageType::Response,
+                Response::CharacterImportPreview(character)
+            );
+        }
         Request::SaveWorld {
             session_token,
             mut world,

@@ -441,6 +441,7 @@ struct ChattyApp {
     commands: mpsc::UnboundedSender<Command>,
     events: std::sync::mpsc::Receiver<Event>,
     status: String,
+    status_tooltip: Option<String>,
     server_address: String,
     connected: bool,
     connecting: bool,
@@ -476,6 +477,8 @@ struct ChattyApp {
     draft: DraftCharacter,
     draft_world_ids: HashSet<String>,
     draft_character_open: bool,
+    char_import_pending: bool,
+    char_import_started: Option<Instant>,
     new_chat_open: bool,
     new_conversation_title: String,
     users: Vec<UserAccount>,
@@ -505,6 +508,7 @@ impl ChattyApp {
             commands,
             events,
             status: "Enter the server address to begin.".into(),
+            status_tooltip: None,
             server_address: String::new(),
             connected: false,
             connecting: false,
@@ -543,6 +547,8 @@ impl ChattyApp {
             },
             draft_world_ids: HashSet::new(),
             draft_character_open: false,
+            char_import_pending: false,
+            char_import_started: None,
             new_chat_open: false,
             new_conversation_title: String::new(),
             users: vec![],
@@ -587,6 +593,18 @@ impl ChattyApp {
             message: message.into(),
         });
     }
+    fn set_network_status(&mut self, status: String) {
+        if status.contains(" · Offline:") {
+            self.status = "Offline".into();
+            self.status_tooltip = Some(status);
+        } else if status.contains(" · Startup failed:") {
+            self.status = "Startup failed".into();
+            self.status_tooltip = Some(status);
+        } else {
+            self.status = status;
+            self.status_tooltip = None;
+        }
+    }
     fn refresh(&self) {
         self.send(Request::ListCharacters {
             session_token: self.token.clone(),
@@ -608,6 +626,7 @@ impl ChattyApp {
         self.revision = revision;
         self.auto_select_conversation = true;
         self.status = "Online · TLS 1.3".into();
+        self.status_tooltip = None;
         self.password.clear();
         self.refresh();
         self.send(Request::GetAccountUsage {
@@ -617,7 +636,7 @@ impl ChattyApp {
     fn drain(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.events.try_recv() {
             match event {
-                Event::Status(s) => self.status = s,
+                Event::Status(status) => self.set_network_status(status),
                 Event::Connected { resuming_session } => {
                     self.connected = true;
                     self.connecting = false;
@@ -628,6 +647,7 @@ impl ChattyApp {
                     self.connecting = false;
                     self.restoring_session = false;
                     self.status = "Not connected".into();
+                    self.status_tooltip = None;
                     self.set_error(message);
                 }
                 Event::Disconnected => {
@@ -640,9 +660,12 @@ impl ChattyApp {
                     self.world_import_started = None;
                     self.world_import_notice = None;
                     self.worlds_open = false;
+                    self.char_import_pending = false;
+                    self.char_import_started = None;
                     self.token.clear();
                     self.role = None;
                     self.status = "Enter the server IP to begin.".into();
+                    self.status_tooltip = None;
                 }
                 Event::SessionExpired => {
                     self.restoring_session = false;
@@ -652,6 +675,8 @@ impl ChattyApp {
                     self.world_import_started = None;
                     self.world_import_notice = None;
                     self.worlds_open = false;
+                    self.char_import_pending = false;
+                    self.char_import_started = None;
                     self.token.clear();
                     self.role = None;
                     self.set_error("Saved session expired. Sign in again.");
@@ -689,6 +714,13 @@ impl ChattyApp {
                                     .into(),
                             );
                             self.worlds_open = true;
+                        }
+                        Response::CharacterImportPreview(character) => {
+                            self.draft = DraftCharacter::from(&character);
+                            self.draft.owned_by_user = true;
+                            self.char_import_pending = false;
+                            self.char_import_started = None;
+                            self.draft_character_open = true;
                         }
                         Response::Characters(v) => self.characters = v,
                         Response::Conversations(v) => {
@@ -796,6 +828,8 @@ impl ChattyApp {
             MessageType::Error => {
                 self.world_import_pending = false;
                 self.world_import_started = None;
+                self.char_import_pending = false;
+                self.char_import_started = None;
                 if let Ok(e) = decode::<WireError>(&frame.payload) {
                     let message = match e.code {
                         ErrorCode::BackendUnavailable | ErrorCode::ModelMissing => {
@@ -1001,6 +1035,20 @@ mod visual_tests {
                 server_name: "chatty.example".into(),
             })
         );
+    }
+
+    #[test]
+    fn long_network_errors_move_to_the_status_tooltip() {
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+        let detail = "2026-09-14 15:43:39 UTC · Offline: connection timed out";
+        app.set_network_status(detail.into());
+        assert_eq!(app.status, "Offline");
+        assert_eq!(app.status_tooltip.as_deref(), Some(detail));
+        app.set_network_status("Online · TLS 1.3".into());
+        assert_eq!(app.status, "Online · TLS 1.3");
+        assert!(app.status_tooltip.is_none());
     }
 
     fn harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
@@ -2465,7 +2513,10 @@ impl ChattyApp {
             ui.add_space(4.0);
             ui.separator();
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&self.status).size(12.0).weak());
+                let status = ui.label(egui::RichText::new(&self.status).size(12.0).weak());
+                if let Some(detail) = &self.status_tooltip {
+                    status.on_hover_text(detail);
+                }
             });
             ui.horizontal(|ui| {
                 if Self::footer_icon_button(ui, FooterIcon::Characters, "Manage characters")
