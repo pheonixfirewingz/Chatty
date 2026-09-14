@@ -89,11 +89,44 @@ impl ChattyApp {
                     }
                     ui.separator();
                     ui.label("Common knowledge is selected first. Other facts activate from keywords in the last six messages. Priority decides what fits within the context budget.");
-                    if ui.button("Add lore entry").clicked() {
-                        self.world_draft.entries.push(WorldFact { enabled: true, ..Default::default() });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Add lore entry").clicked() {
+                            self.world_draft.entries.push(WorldFact { enabled: true, ..Default::default() });
+                        }
+                        let label = ui.label("Search entries");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.world_entry_search)
+                                .hint_text("Title, content, or keyword")
+                                .desired_width(260.0),
+                        )
+                        .labelled_by(label.id);
+                        if ui.add_enabled(
+                            !self.world_entry_search.is_empty(),
+                            egui::Button::new("Clear"),
+                        ).clicked() {
+                            self.world_entry_search.clear();
+                        }
+                    });
+                    let query = self.world_entry_search.trim().to_lowercase();
+                    let matching_indices = self.world_draft.entries.iter().enumerate()
+                        .filter_map(|(index, fact)| {
+                            let matches = query.is_empty()
+                                || fact.title.to_lowercase().contains(&query)
+                                || fact.content.to_lowercase().contains(&query)
+                                || fact.keywords.iter().any(|keyword| keyword.to_lowercase().contains(&query));
+                            matches.then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    if !query.is_empty() {
+                        ui.label(format!(
+                            "{} of {} entries shown",
+                            matching_indices.len(),
+                            self.world_draft.entries.len()
+                        ));
                     }
                     let mut remove = None;
-                    for (index, fact) in self.world_draft.entries.iter_mut().enumerate() {
+                    for index in matching_indices {
+                        let fact = &mut self.world_draft.entries[index];
                         ui.push_id(index, |ui| {
                             ui.group(|ui| {
                                 ui.set_min_width((ui.available_width() - 8.0).max(0.0));

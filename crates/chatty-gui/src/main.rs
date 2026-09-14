@@ -459,6 +459,7 @@ struct ChattyApp {
     world_import_pending: bool,
     world_import_started: Option<Instant>,
     world_import_notice: Option<String>,
+    world_entry_search: String,
     worlds_open: bool,
     conversations: Vec<Conversation>,
     messages: Vec<ChatMessage>,
@@ -522,6 +523,7 @@ impl ChattyApp {
             world_import_pending: false,
             world_import_started: None,
             world_import_notice: None,
+            world_entry_search: String::new(),
             worlds_open: false,
             conversations: vec![],
             messages: vec![],
@@ -1703,6 +1705,7 @@ mod visual_tests {
                     app.worlds_open = true;
                     app.world_import_pending = true;
                     app.world_import_started = Some(Instant::now());
+                    app.world_entry_search = "gate".into();
                     app.world_draft = World {
                         id: "realm".into(),
                         name: "The moonlit realm".into(),
