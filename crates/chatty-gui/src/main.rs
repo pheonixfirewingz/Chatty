@@ -457,6 +457,7 @@ struct ChattyApp {
     worlds: Vec<World>,
     world_draft: World,
     world_import_pending: bool,
+    world_import_started: Option<Instant>,
     world_import_notice: Option<String>,
     worlds_open: bool,
     conversations: Vec<Conversation>,
@@ -519,6 +520,7 @@ impl ChattyApp {
             worlds: vec![],
             world_draft: World::default(),
             world_import_pending: false,
+            world_import_started: None,
             world_import_notice: None,
             worlds_open: false,
             conversations: vec![],
@@ -633,6 +635,7 @@ impl ChattyApp {
                     self.worlds.clear();
                     self.world_draft = World::default();
                     self.world_import_pending = false;
+                    self.world_import_started = None;
                     self.world_import_notice = None;
                     self.worlds_open = false;
                     self.token.clear();
@@ -644,6 +647,7 @@ impl ChattyApp {
                     self.worlds.clear();
                     self.world_draft = World::default();
                     self.world_import_pending = false;
+                    self.world_import_started = None;
                     self.world_import_notice = None;
                     self.worlds_open = false;
                     self.token.clear();
@@ -677,6 +681,7 @@ impl ChattyApp {
                         Response::WorldImportPreview(world) => {
                             self.world_draft = world;
                             self.world_import_pending = false;
+                            self.world_import_started = None;
                             self.world_import_notice = Some(
                                 "AI import preview — review the entries, link characters, then save."
                                     .into(),
@@ -788,6 +793,7 @@ impl ChattyApp {
             }
             MessageType::Error => {
                 self.world_import_pending = false;
+                self.world_import_started = None;
                 if let Ok(e) = decode::<WireError>(&frame.payload) {
                     let message = match e.code {
                         ErrorCode::BackendUnavailable | ErrorCode::ModelMissing => {
@@ -1695,6 +1701,8 @@ mod visual_tests {
                     let mut app = ChattyApp::new(commands, events);
                     app.load_inspection_demo();
                     app.worlds_open = true;
+                    app.world_import_pending = true;
+                    app.world_import_started = Some(Instant::now());
                     app.world_draft = World {
                         id: "realm".into(),
                         name: "The moonlit realm".into(),

@@ -45,7 +45,23 @@ impl ChattyApp {
                 ui.label(if self.worlds.iter().any(|world| world == &self.world_draft) {
                     "Saved"
                 } else { "Unsaved changes — save to apply" });
-                if let Some(notice) = &self.world_import_notice {
+                if self.world_import_pending {
+                    ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                    let elapsed = self
+                        .world_import_started
+                        .map_or(0, |started| started.elapsed().as_secs());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Converting lore with AI… {elapsed}s elapsed"
+                            ))
+                            .strong()
+                            .color(egui::Color32::from_rgb(100, 180, 255)),
+                        );
+                    });
+                    ui.label("The model is reading, classifying, and formatting every entry. Large lorebooks or a cold model can take several minutes.");
+                } else if let Some(notice) = &self.world_import_notice {
                     ui.label(egui::RichText::new(notice).color(egui::Color32::from_rgb(100, 180, 255)));
                 }
                 ui.separator();
@@ -133,7 +149,8 @@ impl ChattyApp {
                 let source_name = path.file_stem().and_then(|name| name.to_str())
                     .unwrap_or("Imported world").replace(['_', '-'], " ");
                 self.world_import_pending = true;
-                self.world_import_notice = Some("AI is converting the lorebook…".into());
+                self.world_import_started = Some(Instant::now());
+                self.world_import_notice = None;
                 self.send(Request::ImportSillyTavernWorld {
                     session_token: self.token.clone(),
                     source_name,
