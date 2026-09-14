@@ -830,6 +830,8 @@ async fn dispatch(
             lorebook_json,
         } => {
             let uid = auth(&app.db, &session_token).await?;
+            busy.fetch_add(1, Ordering::Relaxed);
+            let _busy_guard = BusyGuard(busy.clone());
             let world = import_silly_tavern_world(&app, &uid, &source_name, &lorebook_json).await?;
             send!(MessageType::Response, Response::WorldImportPreview(world));
         }

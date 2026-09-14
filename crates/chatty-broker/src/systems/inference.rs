@@ -16,7 +16,9 @@ pub(super) async fn import_silly_tavern_world(
     let model = selected_model(app).await?;
     let response = app.http
         .post(format!("{}/chat/completions", adapter_url(app).await?))
-        .timeout(Duration::from_secs(60))
+        // Large lorebooks and cold 30B+ models routinely need several minutes.
+        // The dispatch busy guard keeps the client connection alive meanwhile.
+        .timeout(Duration::from_secs(10 * 60))
         .json(&json!({
             "model": model,
             "messages": [

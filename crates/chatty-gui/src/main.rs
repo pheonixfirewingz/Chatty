@@ -632,6 +632,8 @@ impl ChattyApp {
                     self.restoring_session = false;
                     self.worlds.clear();
                     self.world_draft = World::default();
+                    self.world_import_pending = false;
+                    self.world_import_notice = None;
                     self.worlds_open = false;
                     self.token.clear();
                     self.role = None;
@@ -641,6 +643,8 @@ impl ChattyApp {
                     self.restoring_session = false;
                     self.worlds.clear();
                     self.world_draft = World::default();
+                    self.world_import_pending = false;
+                    self.world_import_notice = None;
                     self.worlds_open = false;
                     self.token.clear();
                     self.role = None;
