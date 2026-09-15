@@ -1,5 +1,19 @@
 use super::*;
 
+fn test_portrait_png() -> Vec<u8> {
+    let pixels = vec![80u8; 128 * 128 * 4];
+    let mut png = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut png),
+        &pixels,
+        128,
+        128,
+        image::ExtendedColorType::Rgba8,
+    )
+    .unwrap();
+    png
+}
+
 #[test]
 fn database_uses_absolute_xdg_data_home() {
     assert_eq!(
@@ -165,6 +179,7 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
         deltas,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
     };
     let (_, registered) = call(
         &app,
@@ -303,6 +318,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         deltas,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
     };
     let (_, first) = call(
         &app,
@@ -358,10 +374,13 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         &owner_id,
         &default_chat_id,
-        &assistant_id,
-        "original-response",
-        "The original response",
-        None,
+        PersistedGeneration {
+            speaker_id: &assistant_id,
+            generation_id: "original-response",
+            content: "The original response",
+            parent_id: None,
+            character_image_id: Some("default-portrait"),
+        },
     )
     .await
     .unwrap();
@@ -373,10 +392,13 @@ async fn cross_tenant_character_update_is_forbidden() {
             &app,
             &owner_id,
             &default_chat_id,
-            &assistant_id,
-            id,
-            content,
-            Some("original-response"),
+            PersistedGeneration {
+                speaker_id: &assistant_id,
+                generation_id: id,
+                content,
+                parent_id: Some("original-response"),
+                character_image_id: Some(id),
+            },
         )
         .await
         .unwrap();
@@ -390,6 +412,7 @@ async fn cross_tenant_character_update_is_forbidden() {
     assert_eq!(response.content, "The original response");
     assert_eq!(response.variants.len(), 2);
     assert_eq!(response.selected_variant_id.as_deref(), Some("variant-two"));
+    assert_eq!(response.character_image_id.as_deref(), Some("variant-two"));
     assert_eq!(
         view.messages
             .iter()
@@ -477,6 +500,12 @@ async fn cross_tenant_character_update_is_forbidden() {
         misc: String::new(),
         tags: vec![],
         avatar: None,
+        images: vec![CharacterImage {
+            id: "joy".into(),
+            label: "joy".into(),
+            data: test_portrait_png(),
+        }],
+        default_image_id: Some("joy".into()),
         is_public: false,
         owned_by_user: true,
     };
@@ -501,8 +530,17 @@ async fn cross_tenant_character_update_is_forbidden() {
     assert_eq!(first_delta.get::<i32, _>("operation"), 0);
     assert!(matches!(
         decode::<DeltaPayload>(first_delta.get::<&[u8], _>("changed_fields")).unwrap(),
-        DeltaPayload::Character(_)
+        DeltaPayload::Character(character) if character.images.is_empty()
     ));
+    let stored_images: Vec<u8> = sqlx::query_scalar("SELECT images FROM characters WHERE id=?")
+        .bind(&character_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert!(stored_images.starts_with(b"CHIMG1"));
+    assert!(!stored_images
+        .windows(character.images[0].data.len())
+        .any(|window| window == character.images[0].data));
     let mut updated = character.clone();
     updated.id = Some(character_id.clone());
     updated.is_public = true;
@@ -905,6 +943,26 @@ async fn cross_tenant_character_update_is_forbidden() {
     };
     assert!(shared.is_public);
     assert!(!shared.owned_by_user);
+    assert_eq!(shared.images.len(), character.images.len());
+    assert_eq!(shared.images[0].id, character.images[0].id);
+    assert_eq!(shared.images[0].label, character.images[0].label);
+    assert!(shared.images[0].data.is_empty());
+    assert_eq!(shared.default_image_id.as_deref(), Some("joy"));
+    let (_, portrait) = call(
+        &app,
+        Request::GetCharacterImage {
+            session_token: second_token.clone(),
+            character_id: character_id.clone(),
+            image_id: "joy".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        decode::<Response>(&portrait).unwrap(),
+        Response::CharacterImage { character_id: id, image_id, data }
+            if id == character_id && image_id == "joy" && data == character.images[0].data
+    ));
     call(
         &app,
         Request::CreateConversation {
@@ -1083,4 +1141,25 @@ async fn cancellation_registry_stress_is_connection_scoped() {
     assert_eq!(registry.lock().await.len(), 1);
     assert!(registry.lock().await.contains_key(&(survivor, 1)));
     assert!(receivers.iter().all(|receiver| *receiver.borrow()));
+}
+
+#[test]
+fn character_images_are_authenticated_and_encrypted_at_rest() {
+    let key = [9u8; 32];
+    let images = vec![CharacterImage {
+        id: "joy".into(),
+        label: "joy".into(),
+        data: b"licensed portrait bytes".to_vec(),
+    }];
+
+    let encrypted = encrypt_character_images(&key, "owner", "character", &images).unwrap();
+    assert!(encrypted.starts_with(b"CHIMG1"));
+    assert!(!encrypted
+        .windows(images[0].data.len())
+        .any(|window| window == images[0].data));
+    assert_eq!(
+        decrypt_character_images(&key, "owner", "character", &encrypted).unwrap(),
+        images
+    );
+    assert!(decrypt_character_images(&key, "other-owner", "character", &encrypted).is_err());
 }

@@ -4,6 +4,7 @@ use chatty_protocol::util::args::ParsedArgs;
 use chatty_protocol::util::{Context, Error, Result, bail, format_err};
 use chatty_protocol::*;
 use eframe::egui;
+use image::ImageEncoder;
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use std::{
     collections::{HashMap, HashSet},
@@ -24,7 +25,7 @@ mod conversation;
 mod network;
 mod ui;
 mod worlds;
-use network::{Command, ConnectionTarget, Event, EventSender};
+use network::{Command, ConnectionTarget, Event, EventSender, PendingCertificate};
 use ui::FooterIcon;
 
 const COLOR_PRIMARY: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);
@@ -187,6 +188,7 @@ fn main() -> Result<()> {
         "Chatty",
         options,
         Box::new(move |cc| {
+            enable_screen_capture_protection(&cc.egui_ctx);
             configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode, transparency);
             if let Ok(mut context) = repaint_context.lock() {
                 *context = Some(cc.egui_ctx.clone());
@@ -204,6 +206,15 @@ fn main() -> Result<()> {
         }),
     )
     .map_err(|e| Error::msg(e.to_string()))
+}
+
+fn enable_screen_capture_protection(ctx: &egui::Context) {
+    // Ask the native windowing backend to keep Chatty out of OS-managed
+    // screenshots and screen capture. This maps to WDA_EXCLUDEFROMCAPTURE on
+    // supported Windows versions and to the best-effort NSWindow sharing
+    // restriction on macOS. Winit currently treats the request as a no-op on
+    // Linux/X11 and Linux/Wayland.
+    ctx.send_viewport_cmd(egui::ViewportCommand::ContentProtected(true));
 }
 
 fn broker_host(value: &str) -> Option<String> {
@@ -419,6 +430,8 @@ struct DraftCharacter {
     misc: String,
     tags: String,
     avatar: Option<Vec<u8>>,
+    images: Vec<CharacterImage>,
+    default_image_id: Option<String>,
     is_public: bool,
     owned_by_user: bool,
 }
@@ -443,6 +456,7 @@ struct ChattyApp {
     status: String,
     status_tooltip: Option<String>,
     server_address: String,
+    pending_certificate: Option<PendingCertificate>,
     connected: bool,
     connecting: bool,
     restoring_session: bool,
@@ -455,6 +469,8 @@ struct ChattyApp {
     registration_enabled: bool,
     state: HashMap<(String, String), DeltaPayload>,
     characters: Vec<Character>,
+    character_image_requests: HashSet<(String, String)>,
+    received_character_images: Vec<(String, Vec<u8>)>,
     worlds: Vec<World>,
     world_draft: World,
     world_import_pending: bool,
@@ -472,6 +488,7 @@ struct ChattyApp {
     editing_message_content: String,
     stream_text: String,
     typing_character: Option<String>,
+    generation_status: Option<GenerationStatus>,
     active_request: Option<u64>,
     screen: Screen,
     sidebar_visible: bool,
@@ -512,6 +529,7 @@ impl ChattyApp {
             status: "Enter the server address to begin.".into(),
             status_tooltip: None,
             server_address: String::new(),
+            pending_certificate: None,
             connected: false,
             connecting: false,
             restoring_session: false,
@@ -524,6 +542,8 @@ impl ChattyApp {
             registration_enabled: true,
             state: HashMap::new(),
             characters: vec![],
+            character_image_requests: HashSet::new(),
+            received_character_images: vec![],
             worlds: vec![],
             world_draft: World::default(),
             world_import_pending: false,
@@ -541,6 +561,7 @@ impl ChattyApp {
             editing_message_content: String::new(),
             stream_text: String::new(),
             typing_character: None,
+            generation_status: None,
             active_request: None,
             screen: Screen::Chat,
             sidebar_visible: true,
@@ -638,7 +659,9 @@ impl ChattyApp {
         });
     }
     fn drain(&mut self, ctx: &egui::Context) {
+        let mut received_event = false;
         while let Ok(event) = self.events.try_recv() {
+            received_event = true;
             match event {
                 Event::Status(status) => self.set_network_status(status),
                 Event::Connected { resuming_session } => {
@@ -647,14 +670,24 @@ impl ChattyApp {
                     self.restoring_session = resuming_session;
                 }
                 Event::ConnectionFailed(message) => {
+                    self.pending_certificate = None;
                     self.connected = false;
                     self.connecting = false;
                     self.restoring_session = false;
+                    self.active_request = None;
+                    self.typing_character = None;
+                    self.generation_status = None;
                     self.status = "Not connected".into();
                     self.status_tooltip = None;
                     self.set_error(message);
                 }
+                Event::CertificateTrustRequired(certificate) => {
+                    self.connecting = false;
+                    self.status = "Waiting for certificate confirmation".into();
+                    self.pending_certificate = Some(certificate);
+                }
                 Event::Disconnected => {
+                    self.pending_certificate = None;
                     self.connected = false;
                     self.connecting = false;
                     self.restoring_session = false;
@@ -666,7 +699,12 @@ impl ChattyApp {
                     self.worlds_open = false;
                     self.char_import_pending = false;
                     self.char_import_started = None;
+                    self.active_request = None;
+                    self.typing_character = None;
                     self.token.clear();
+                    self.character_image_requests.clear();
+                    self.received_character_images.clear();
+                    self.generation_status = None;
                     self.role = None;
                     self.status = "Enter the server IP to begin.".into();
                     self.status_tooltip = None;
@@ -681,13 +719,21 @@ impl ChattyApp {
                     self.worlds_open = false;
                     self.char_import_pending = false;
                     self.char_import_started = None;
+                    self.active_request = None;
+                    self.typing_character = None;
                     self.token.clear();
+                    self.character_image_requests.clear();
+                    self.received_character_images.clear();
+                    self.generation_status = None;
                     self.role = None;
                     self.set_error("Saved session expired. Sign in again.");
                 }
                 Event::Frame(frame) => self.handle_frame(frame),
             }
             ctx.request_repaint();
+        }
+        if received_event {
+            self.cache_character_portraits(ctx);
         }
     }
     fn handle_frame(&mut self, frame: Frame) {
@@ -720,13 +766,25 @@ impl ChattyApp {
                             self.worlds_open = true;
                         }
                         Response::CharacterImportPreview(character) => {
-                            self.draft = DraftCharacter::from(&character);
+                            self.draft = DraftCharacter::from(character.as_ref());
                             self.draft.owned_by_user = true;
                             self.char_import_pending = false;
                             self.char_import_started = None;
                             self.draft_character_open = true;
                         }
-                        Response::Characters(v) => self.characters = v,
+                        Response::Characters(v) => {
+                            self.character_image_requests.clear();
+                            self.characters = v;
+                        }
+                        Response::CharacterImage {
+                            character_id,
+                            image_id,
+                            data,
+                        } => {
+                            self.character_image_requests
+                                .remove(&(character_id, image_id.clone()));
+                            self.received_character_images.push((image_id, data));
+                        }
                         Response::Conversations(v) => {
                             self.conversations = v
                                 .into_iter()
@@ -745,6 +803,7 @@ impl ChattyApp {
                                 self.stream_text.clear();
                                 self.active_request = None;
                                 self.typing_character = None;
+                                self.generation_status = None;
                             }
                             if self.selected_conversation.is_none() && self.auto_select_conversation
                             {
@@ -771,6 +830,7 @@ impl ChattyApp {
                                 self.stream_text.clear();
                                 self.active_request = None;
                                 self.typing_character = None;
+                                self.generation_status = None;
                                 self.auto_select_conversation = false;
                                 self.refresh();
                             }
@@ -784,7 +844,13 @@ impl ChattyApp {
                         Response::GenerationStarted { character_id, .. } => {
                             self.active_request = Some(frame.request_id);
                             self.typing_character = Some(character_id);
+                            self.generation_status = None;
                             self.stream_text.clear();
+                        }
+                        Response::GenerationStatus { status, .. }
+                            if self.active_request == Some(frame.request_id) =>
+                        {
+                            self.generation_status = Some(status);
                         }
                         Response::GenerationFinished { revision, .. } => {
                             self.finish_generation(revision);
@@ -822,6 +888,7 @@ impl ChattyApp {
                 } else {
                     self.active_request = None;
                     self.typing_character = None;
+                    self.generation_status = None;
                 }
             }
             MessageType::Delta => {
@@ -844,17 +911,96 @@ impl ChattyApp {
                     self.set_error(message);
                     self.active_request = None;
                     self.typing_character = None;
+                    self.generation_status = None;
                 }
             }
             _ => {}
         }
     }
     fn apply_delta(&mut self, d: StateDelta) {
+        let payload = if matches!(d.operation, DeltaOperation::Delete) {
+            None
+        } else {
+            decode::<DeltaPayload>(&d.changed_fields).ok()
+        };
         if d.entity_type == "world" {
             self.worlds.retain(|world| world.id != d.entity_id);
-            if !matches!(d.operation, DeltaOperation::Delete) {
-                if let Ok(DeltaPayload::World(world)) = decode(&d.changed_fields) {
-                    self.worlds.push(world);
+            if let Some(DeltaPayload::World(world)) = payload.as_ref() {
+                self.worlds.push(world.clone());
+            }
+        }
+        if d.entity_type == "message" {
+            if matches!(d.operation, DeltaOperation::Delete) {
+                self.messages.retain(|message| message.id != d.entity_id);
+            } else if let Some(DeltaPayload::Message {
+                conversation_id,
+                author_type,
+                author_id,
+                content,
+                parent_id,
+                selected_variant_id,
+                character_image_id,
+            }) = payload.as_ref()
+            {
+                if self.selected_conversation.as_deref() == Some(conversation_id.as_str()) {
+                    if let Some(message) = self
+                        .messages
+                        .iter_mut()
+                        .find(|message| message.id == d.entity_id)
+                    {
+                        message.author_type.clone_from(author_type);
+                        message.author_id.clone_from(author_id);
+                        message.content.clone_from(content);
+                        message.parent_id.clone_from(parent_id);
+                        message.selected_variant_id.clone_from(selected_variant_id);
+                        message.character_image_id.clone_from(character_image_id);
+                        message.revision = d.revision;
+                    } else if parent_id.is_none() {
+                        self.messages.push(ChatMessage {
+                            id: d.entity_id.clone(),
+                            author_type: author_type.clone(),
+                            author_id: author_id.clone(),
+                            content: content.clone(),
+                            parent_id: None,
+                            selected_variant_id: selected_variant_id.clone(),
+                            character_image_id: character_image_id.clone(),
+                            created_at: String::new(),
+                            revision: d.revision,
+                            variants: Vec::new(),
+                        });
+                    }
+                }
+            }
+        } else if d.entity_type == "variant" {
+            if let Some(DeltaPayload::Variant {
+                message_id,
+                content,
+                character_image_id,
+            }) = payload.as_ref()
+            {
+                if let Some(message) = self
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.id == *message_id)
+                {
+                    if let Some(variant) = message
+                        .variants
+                        .iter_mut()
+                        .find(|variant| variant.id == d.entity_id)
+                    {
+                        variant.content.clone_from(content);
+                        variant.revision = d.revision;
+                    } else {
+                        message.variants.push(Variant {
+                            id: d.entity_id.clone(),
+                            content: content.clone(),
+                            created_at: String::new(),
+                            revision: d.revision,
+                        });
+                    }
+                    message.selected_variant_id = Some(d.entity_id.clone());
+                    message.character_image_id.clone_from(character_image_id);
+                    message.revision = d.revision;
                 }
             }
         }
@@ -862,7 +1008,7 @@ impl ChattyApp {
         let key = (d.entity_type, d.entity_id);
         if matches!(d.operation, DeltaOperation::Delete) {
             self.state.remove(&key);
-        } else if let Ok(p) = decode::<DeltaPayload>(&d.changed_fields) {
+        } else if let Some(p) = payload {
             self.state.insert(key, p);
         }
     }
@@ -870,6 +1016,7 @@ impl ChattyApp {
         self.revision = self.revision.max(revision);
         self.active_request = None;
         self.typing_character = None;
+        self.generation_status = None;
         self.send(Request::GetAccountUsage {
             session_token: self.token.clone(),
         });
@@ -917,6 +1064,16 @@ impl ChattyApp {
                 },
             },
         ];
+        let mut demo_portrait = Vec::new();
+        let mut pixels = Vec::with_capacity(128 * 128 * 4);
+        for y in 0..128u8 {
+            for x in 0..128u8 {
+                pixels.extend_from_slice(&[38 + x / 2, 48 + y / 4, 110 + x / 4, 255]);
+            }
+        }
+        image::codecs::png::PngEncoder::new(&mut demo_portrait)
+            .write_image(&pixels, 128, 128, image::ExtendedColorType::Rgba8)
+            .expect("encode deterministic inspection portrait");
         self.characters.push(Character {
             id: "assistant".into(),
             name: "Mara".into(),
@@ -932,7 +1089,13 @@ impl ChattyApp {
             race: "human".into(),
             misc: String::new(),
             tags: vec!["demo".into()],
-            avatar: None,
+            avatar: Some(demo_portrait.clone()),
+            images: vec![CharacterImage {
+                id: "demo-neutral".into(),
+                label: "neutral".into(),
+                data: demo_portrait,
+            }],
+            default_image_id: Some("demo-neutral".into()),
             is_public: true,
             owned_by_user: true,
             revision: 1,
@@ -954,6 +1117,7 @@ impl ChattyApp {
             content: "Tell me about this place.".into(),
             parent_id: None,
             selected_variant_id: None,
+            character_image_id: None,
             created_at: String::new(),
             revision: 1,
             variants: vec![],
@@ -967,6 +1131,7 @@ impl ChattyApp {
                     .into(),
             parent_id: Some("m1".into()),
             selected_variant_id: None,
+            character_image_id: Some("demo-neutral".into()),
             created_at: String::new(),
             revision: 1,
             variants: vec![],
@@ -1016,6 +1181,21 @@ impl ChattyApp {
 #[allow(clippy::items_after_test_module)]
 mod visual_tests {
     use super::*;
+
+    #[test]
+    fn official_client_requests_screen_capture_protection() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        enable_screen_capture_protection(&ctx);
+        let output = ctx.end_pass();
+        let root = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output");
+        assert!(root.commands.iter().any(|command| {
+            matches!(command, egui::ViewportCommand::ContentProtected(true))
+        }));
+    }
     use egui_kittest::kittest::{NodeT, Queryable};
 
     #[test]
@@ -1039,6 +1219,230 @@ mod visual_tests {
                 server_name: "chatty.example".into(),
             })
         );
+    }
+
+    #[test]
+    fn portrait_crop_is_top_aligned_and_horizontally_centered() {
+        let tall = ChattyApp::top_center_square_uv(egui::vec2(256.0, 512.0));
+        assert_eq!(tall.min, egui::pos2(0.0, 0.0));
+        assert_eq!(tall.max, egui::pos2(1.0, 0.5));
+
+        let wide = ChattyApp::top_center_square_uv(egui::vec2(512.0, 256.0));
+        assert_eq!(wide.min, egui::pos2(0.25, 0.0));
+        assert_eq!(wide.max, egui::pos2(0.75, 1.0));
+    }
+
+    #[test]
+    fn emotion_is_exposed_as_a_visible_label() {
+        let mut chat = harness(egui::vec2(430.0, 760.0));
+        chat.state_mut().sidebar_visible = false;
+        chat.run_ok();
+        chat.get_by_label("Emotion: neutral");
+    }
+
+    #[test]
+    fn continue_creates_a_message_and_retry_creates_a_variant() {
+        let (commands, mut command_rx) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+
+        app.submit_message();
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            Command::Request(request)
+                if matches!(&*request, Request::Generate { parent_id: None, .. })
+        ));
+
+        let response = app.messages.last().unwrap().clone();
+        app.regenerate(&response);
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            Command::Request(request)
+                if matches!(&*request, Request::Generate { parent_id: Some(parent), .. }
+                    if parent == &response.id)
+        ));
+    }
+
+    #[test]
+    fn selected_variant_content_is_displayed_after_reload() {
+        let mut message = ChatMessage {
+            id: "message".into(),
+            author_type: "character".into(),
+            author_id: Some("assistant".into()),
+            content: "original".into(),
+            parent_id: None,
+            selected_variant_id: Some("retry".into()),
+            character_image_id: Some("happy".into()),
+            created_at: String::new(),
+            revision: 2,
+            variants: vec![Variant {
+                id: "retry".into(),
+                content: "replacement".into(),
+                created_at: String::new(),
+                revision: 2,
+            }],
+        };
+        assert_eq!(ChattyApp::displayed_message_content(&message), "replacement");
+
+        message.selected_variant_id = Some("missing".into());
+        assert_eq!(ChattyApp::displayed_message_content(&message), "original");
+    }
+
+    #[test]
+    fn latest_persisted_reply_changes_the_visible_emotion() {
+        let mut chat = harness(egui::vec2(430.0, 760.0));
+        chat.state_mut().sidebar_visible = false;
+
+        let pixels = image::RgbaImage::from_pixel(128, 128, image::Rgba([40, 180, 90, 255]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        chat.state_mut().characters[0].images.push(CharacterImage {
+            id: "demo-happy".into(),
+            label: "happy".into(),
+            data: encoded.into_inner(),
+        });
+        chat.state_mut().messages.push(ChatMessage {
+            id: "m3".into(),
+            author_type: "character".into(),
+            author_id: Some("assistant".into()),
+            content: "A newly persisted reply".into(),
+            parent_id: None,
+            selected_variant_id: None,
+            character_image_id: Some("demo-happy".into()),
+            created_at: String::new(),
+            revision: 3,
+            variants: vec![],
+        });
+
+        chat.run_ok();
+        chat.get_by_label("Emotion: happy");
+        chat.render()
+            .expect("render changed emotion portrait")
+            .save("/tmp/chatty-emotion-changed.png")
+            .expect("save changed emotion portrait");
+    }
+
+    #[test]
+    fn generation_delta_updates_the_emotion_panel_immediately() {
+        fn emotion_delta() -> Frame {
+            let changed_fields = encode(&DeltaPayload::Message {
+                conversation_id: "demo".into(),
+                author_type: "character".into(),
+                author_id: Some("assistant".into()),
+                content: "The generated reply remains visible".into(),
+                parent_id: None,
+                selected_variant_id: None,
+                character_image_id: Some("demo-happy".into()),
+            })
+            .unwrap();
+            Frame {
+                compressed: false,
+                message_type: MessageType::Delta,
+                request_id: 42,
+                payload: encode(&StateDelta {
+                    revision: 4,
+                    entity_type: "message".into(),
+                    entity_id: "generated-reply".into(),
+                    operation: DeltaOperation::Add,
+                    changed_fields,
+                })
+                .unwrap(),
+            }
+        }
+
+        for (size, output) in [
+            (
+                egui::vec2(430.0, 760.0),
+                "/tmp/chatty-emotion-live-compact.png",
+            ),
+            (
+                egui::vec2(1440.0, 900.0),
+                "/tmp/chatty-emotion-live-desktop.png",
+            ),
+        ] {
+            let mut chat = harness(size);
+            chat.state_mut().sidebar_visible = false;
+            let pixels =
+                image::RgbaImage::from_pixel(128, 128, image::Rgba([40, 180, 90, 255]));
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(pixels)
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            chat.state_mut().characters[0].images.push(CharacterImage {
+                id: "demo-happy".into(),
+                label: "happy".into(),
+                data: encoded.into_inner(),
+            });
+            chat.state_mut().handle_frame(emotion_delta());
+
+            assert_eq!(
+                chat.state()
+                    .messages
+                    .last()
+                    .map(|message| message.content.as_str()),
+                Some("The generated reply remains visible")
+            );
+            let portrait = chat.state().current_emotion_portrait().unwrap();
+            assert_eq!(portrait.1, "happy");
+            assert_eq!(portrait.2, "demo-happy");
+            chat.run_ok();
+            chat.get_by_label("Emotion: happy");
+            chat.render()
+                .expect("render live emotion delta")
+                .save(output)
+                .expect("save live emotion delta");
+        }
+    }
+
+    #[test]
+    fn imported_portraits_are_normalized_to_a_top_centered_square() {
+        let source = image::RgbaImage::from_fn(256, 512, |_x, y| {
+            if y < 256 {
+                image::Rgba([220, 20, 60, 255])
+            } else {
+                image::Rgba([30, 80, 220, 255])
+            }
+        });
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+
+        let normalized = ChattyApp::normalize_character_image_png(encoded.get_ref()).unwrap();
+        let pixels = image::load_from_memory_with_format(&normalized, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(pixels.dimensions(), (256, 256));
+        assert_eq!(pixels.get_pixel(128, 255).0, [220, 20, 60, 255]);
+    }
+
+    #[test]
+    fn portrait_bytes_are_requested_only_for_a_missing_gpu_texture() {
+        let (commands, mut command_rx) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+        app.token = "session".into();
+        let character_id = app.characters[0].id.clone();
+        let image_id = app.characters[0].images[0].id.clone();
+        app.characters[0].images[0].data.clear();
+
+        app.cache_character_portraits(&egui::Context::default());
+
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            Command::Request(request)
+                if matches!(&*request, Request::GetCharacterImage {
+                    session_token,
+                    character_id: requested_character,
+                    image_id: requested_image,
+                } if session_token == "session"
+                    && requested_character == &character_id
+                    && requested_image == &image_id)
+        ));
     }
 
     #[test]
@@ -1066,6 +1470,81 @@ mod visual_tests {
                 app.load_inspection_demo();
                 app
             })
+    }
+
+    fn certificate_trust_harness(
+        size: egui::Vec2,
+        light_mode: bool,
+    ) -> egui_kittest::Harness<'static, ChattyApp> {
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, light_mode, false, 20);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.light_mode = light_mode;
+                app.pending_certificate = Some(PendingCertificate::from_der(
+                    ConnectionTarget {
+                        broker: "192.168.0.98:7443".into(),
+                        server_name: "192.168.0.98".into(),
+                    },
+                    b"test certificate".to_vec(),
+                ));
+                app
+            })
+    }
+
+    #[test]
+    fn visual_compact_certificate_trust_dialog() {
+        let mut harness = certificate_trust_harness(egui::vec2(430.0, 760.0), false);
+        harness.run_ok();
+        let trust = harness.get_by_role_and_label(
+            egui::accesskit::Role::Button,
+            "Trust and connect",
+        );
+        let cancel = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel");
+        assert!(
+            trust.rect().right() <= 430.0,
+            "trust button rect: {:?}",
+            trust.rect()
+        );
+        assert!(
+            cancel.rect().left() >= 0.0,
+            "cancel button rect: {:?}",
+            cancel.rect()
+        );
+        harness
+            .render()
+            .expect("render compact certificate trust dialog")
+            .save("/tmp/chatty-certificate-trust-compact.png")
+            .expect("save compact certificate trust dialog");
+    }
+
+    #[test]
+    fn visual_desktop_certificate_trust_dialog() {
+        let mut harness = certificate_trust_harness(egui::vec2(1440.0, 900.0), false);
+        harness.run_ok();
+        harness.get_by_role_and_label(
+            egui::accesskit::Role::Button,
+            "Trust and connect",
+        );
+        harness
+            .render()
+            .expect("render desktop certificate trust dialog")
+            .save("/tmp/chatty-certificate-trust-desktop.png")
+            .expect("save desktop certificate trust dialog");
+    }
+
+    #[test]
+    fn visual_compact_light_certificate_trust_dialog() {
+        let mut harness = certificate_trust_harness(egui::vec2(430.0, 760.0), true);
+        harness.run_ok();
+        harness
+            .render()
+            .expect("render compact light certificate trust dialog")
+            .save("/tmp/chatty-certificate-trust-compact-light.png")
+            .expect("save compact light certificate trust dialog");
     }
 
     const LONG_USER_MESSAGE: &str = "Please write a detailed description of the observatory, including the weathered stone walls, the old brass telescope, the valley below, and every small detail that makes this place feel lived in and memorable.";
@@ -1340,6 +1819,7 @@ mod visual_tests {
             content: "a newly generated reply".into(),
             parent_id: None,
             selected_variant_id: None,
+            character_image_id: None,
             created_at: String::new(),
             revision: 9,
             variants: vec![],
@@ -1360,6 +1840,52 @@ mod visual_tests {
             app.messages.last().map(|message| message.content.as_str()),
             Some("a newly generated reply")
         );
+    }
+
+    #[test]
+    fn emotion_selection_status_is_visible_for_the_active_generation() {
+        let mut chat = harness(egui::vec2(430.0, 760.0));
+        chat.state_mut().sidebar_visible = false;
+        chat.state_mut().active_request = Some(42);
+        chat.state_mut().typing_character = Some("assistant".into());
+        chat.state_mut().stream_text = "the streamed reply".into();
+        chat.state_mut().handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 42,
+            payload: encode(&Response::GenerationStatus {
+                message_id: "reply".into(),
+                status: GenerationStatus::SelectingEmotion,
+            })
+            .unwrap(),
+        });
+
+        chat.run_ok();
+        assert_eq!(
+            chat.state().generation_status,
+            Some(GenerationStatus::SelectingEmotion)
+        );
+        assert_eq!(chat.state().stream_text, "the streamed reply");
+        chat.get_by_label("AI is selecting an emotion portrait…");
+        chat.render()
+            .expect("render compact emotion selection status")
+            .save("/tmp/chatty-emotion-selection-compact.png")
+            .expect("save compact emotion selection status");
+        drop(chat);
+
+        let mut desktop = harness(egui::vec2(1440.0, 900.0));
+        desktop.state_mut().sidebar_visible = false;
+        desktop.state_mut().active_request = Some(42);
+        desktop.state_mut().typing_character = Some("assistant".into());
+        desktop.state_mut().generation_status = Some(GenerationStatus::SelectingEmotion);
+        desktop.state_mut().stream_text = "the streamed reply".into();
+        desktop.run_ok();
+        desktop.get_by_label("AI is selecting an emotion portrait…");
+        desktop
+            .render()
+            .expect("render desktop emotion selection status")
+            .save("/tmp/chatty-emotion-selection-desktop.png")
+            .expect("save desktop emotion selection status");
     }
 
     #[test]
@@ -1391,6 +1917,75 @@ mod visual_tests {
             .expect("render desktop UI")
             .save("/tmp/chatty-restored-desktop.png")
             .expect("save desktop UI");
+    }
+
+    #[test]
+    fn sidebar_can_be_collapsed_and_reopened_on_desktop() {
+        let mut desktop = harness(egui::vec2(1440.0, 900.0));
+        desktop.run_ok();
+
+        desktop
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
+            .hover();
+        desktop.run_ok();
+        desktop
+            .render()
+            .expect("render hovered sidebar toggle")
+            .save("/tmp/chatty-sidebar-toggle-hover.png")
+            .expect("save hovered sidebar toggle");
+
+        desktop
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
+            .click();
+        desktop.run_ok();
+        assert!(!desktop.state().sidebar_visible);
+        desktop.get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar");
+
+        desktop
+            .render()
+            .expect("render collapsed desktop sidebar")
+            .save("/tmp/chatty-sidebar-collapsed-desktop.png")
+            .expect("save collapsed desktop sidebar");
+
+        desktop
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar")
+            .click();
+        desktop.run_ok();
+        assert!(desktop.state().sidebar_visible);
+        desktop.get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar");
+    }
+
+    #[test]
+    fn sidebar_can_be_closed_and_reopened_on_compact_layout() {
+        let mut compact = harness(egui::vec2(320.0, 480.0));
+        compact.run_ok();
+
+        let close_button = compact
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
+            .rect();
+        assert!(close_button.right() <= 320.0 && close_button.top() >= 0.0);
+        compact
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
+            .click();
+        compact.run_ok();
+        assert!(!compact.state().sidebar_visible);
+        let show_button = compact
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar")
+            .rect();
+        assert!(show_button.right() <= 320.0 && show_button.top() >= 0.0);
+
+        compact
+            .render()
+            .expect("render collapsed compact sidebar")
+            .save("/tmp/chatty-sidebar-collapsed-compact.png")
+            .expect("save collapsed compact sidebar");
+
+        compact
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar")
+            .click();
+        compact.run_ok();
+        assert!(compact.state().sidebar_visible);
+        compact.get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar");
     }
 
     #[test]
@@ -1871,6 +2466,13 @@ mod visual_tests {
             .expect("render compact character popup")
             .save("/tmp/chatty-restored-compact-characters.png")
             .expect("save compact character popup");
+        harness.get_by_label("Default / icon").scroll_to_me();
+        harness.run_ok();
+        harness
+            .render()
+            .expect("render compact character images")
+            .save("/tmp/chatty-restored-compact-character-images.png")
+            .expect("save compact character images");
     }
 
     #[test]
@@ -1975,6 +2577,13 @@ mod visual_tests {
             .expect("render desktop character popup")
             .save("/tmp/chatty-restored-desktop-characters.png")
             .expect("save desktop character popup");
+        harness.get_by_label("Default / icon").scroll_to_me();
+        harness.run_ok();
+        harness
+            .render()
+            .expect("render desktop character images")
+            .save("/tmp/chatty-restored-desktop-character-images.png")
+            .expect("save desktop character images");
     }
 
     #[test]
@@ -2314,8 +2923,12 @@ impl eframe::App for ChattyApp {
             || self.draft_character_open
             || self.new_chat_open
             || matches!(self.screen, Screen::Admin | Screen::Settings)
+            || self.pending_certificate.is_some()
             || self.error.is_some();
         if self.glass_mode && modal_open {
+            paint_glass_modal_scrim(ui, self.light_mode);
+        }
+        if !self.glass_mode && self.pending_certificate.is_some() {
             paint_glass_modal_scrim(ui, self.light_mode);
         }
         if self.worlds_open {
@@ -2332,6 +2945,127 @@ impl eframe::App for ChattyApp {
         }
         if self.screen == Screen::Settings {
             self.render_settings_dialog(&ctx)
+        }
+        if let Some(certificate) = self.pending_certificate.clone() {
+            let dialog_width = (ctx.content_rect().width() - 32.0).clamp(280.0, 460.0);
+            let mut trust_decision = None;
+            egui::Window::new("Trust this Chatty server?")
+                .frame(modal_frame(&ctx, self.light_mode, self.glass_mode))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(dialog_width)
+                .max_width(dialog_width)
+                .constrain(true)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(&ctx, |ui| {
+                    ui.label(format!(
+                        "{} does not have a certificate trusted by the public internet.",
+                        certificate.target.server_name
+                    ));
+                    ui.add_space(8.0);
+                    let fingerprint_subject = if certificate.is_ca() {
+                        "private CA"
+                    } else {
+                        "server certificate"
+                    };
+                    ui.label(format!(
+                        "Confirm this {fingerprint_subject} SHA-256 fingerprint with the server administrator before continuing:"
+                    ));
+                    ui.add_space(6.0);
+                    let fingerprint = certificate
+                        .fingerprint
+                        .split(':')
+                        .collect::<Vec<_>>()
+                        .chunks(8)
+                        .map(|group| group.join(":"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(fingerprint).monospace().small(),
+                        )
+                        .selectable(true)
+                        .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    let remembered_material = if certificate.is_ca() {
+                        "this certificate authority and reject certificates it did not issue"
+                    } else {
+                        "this exact certificate and reject unexpected changes"
+                    };
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Chatty will remember {remembered_material}."
+                        ))
+                        .weak(),
+                    );
+                    ui.add_space(14.0);
+                    let compact = ui.available_width() < 360.0;
+                    let mut buttons = |ui: &mut egui::Ui| {
+                        let button_width = if compact {
+                            ui.available_width()
+                        } else {
+                            170.0
+                        };
+                        if ui
+                            .add_sized(
+                                [button_width, 42.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Trust and connect")
+                                        .color(COLOR_ON_PRIMARY)
+                                        .strong(),
+                                )
+                                .fill(COLOR_PRIMARY_STRONG),
+                            )
+                            .clicked()
+                        {
+                            trust_decision = Some(true);
+                        }
+                        if ui
+                            .add_sized([button_width, 42.0], egui::Button::new("Cancel"))
+                            .clicked()
+                        {
+                            trust_decision = Some(false);
+                        }
+                    };
+                    if compact {
+                        ui.vertical(&mut buttons);
+                    } else {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized([150.0, 42.0], egui::Button::new("Cancel"))
+                                .clicked()
+                            {
+                                trust_decision = Some(false);
+                            }
+                            if ui
+                                .add_sized(
+                                    [190.0, 42.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Trust and connect")
+                                            .color(COLOR_ON_PRIMARY)
+                                            .strong(),
+                                    )
+                                    .fill(COLOR_PRIMARY_STRONG),
+                                )
+                                .clicked()
+                            {
+                                trust_decision = Some(true);
+                            }
+                        });
+                    }
+                });
+            if let Some(trust) = trust_decision {
+                self.pending_certificate = None;
+                self.connecting = trust;
+                if trust {
+                    self.status = "Saving trusted certificate…".into();
+                    let _ = self.commands.send(Command::TrustCertificate(certificate));
+                } else {
+                    self.status = "Not connected".into();
+                    let _ = self.commands.send(Command::RejectCertificate);
+                }
+            }
         }
         if let Some(error) = self.error.clone() {
             egui::Window::new("Notice")
@@ -2484,6 +3218,10 @@ impl ChattyApp {
             }
             return;
         }
+        if !self.sidebar_visible {
+            self.render_chat(ui);
+            return;
+        }
         let sidebar = (ui.available_width() * 0.24).clamp(248.0, 320.0);
         let height = ui.available_height();
         ui.horizontal(|ui| {
@@ -2509,7 +3247,9 @@ impl ChattyApp {
         ui.horizontal(|ui| {
             ui.heading(egui::RichText::new("Chatty").size(22.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new("AI CHARACTERS").size(10.0).weak());
+                if Self::sidebar_toggle_button(ui, true).clicked() {
+                    self.sidebar_visible = false;
+                }
             });
         });
         ui.add_space(12.0);

@@ -47,6 +47,7 @@ supervise_broker() {
     trap 'if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; fi; exit 0' TERM INT
     while true; do
         env \
+            CHATTY_DEBUG=1 \
             CHATTY_LISTEN="$listen_address" \
             CHATTY_DATABASE="$database" \
             CHATTY_CERT="$certificate" \

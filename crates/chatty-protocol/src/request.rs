@@ -80,6 +80,13 @@ pub enum Request {
     ListCharacters {
         session_token: String,
     },
+    /// Fetch one authorized portrait for immediate display. Character listings
+    /// contain metadata only, so image bytes are decrypted only when requested.
+    GetCharacterImage {
+        session_token: String,
+        character_id: String,
+        image_id: String,
+    },
     ListConversations {
         session_token: String,
     },

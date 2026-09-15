@@ -31,7 +31,25 @@ System and per-user service templates are in `packaging/`. Review their paths, u
 
 ## Certificates
 
-The broker accepts TLS 1.3 only. Clients trust the configured CA and verify the requested server name.
+The broker accepts TLS 1.3 only. CA-based and public-PKI connections verify the requested server
+name. First-use private certificate pins bind the exact confirmed certificate to the entered server.
+
+The GUI uses this trust order:
+
+1. An explicit `CHATTY_CA`/`--ca` file.
+2. A per-server `<host>.ca.pem` file.
+3. A previously confirmed `<host>.ca.der` trust anchor or legacy `<host>.cert.der` leaf pin.
+4. Standard public web PKI roots.
+5. For an unknown private certificate, a one-time fingerprint confirmation before the exact
+   certificate is saved and a verified connection is retried.
+
+The discovery handshake never sends account credentials. Do not tell users to accept an
+unconfirmed fingerprint; compare it with `openssl x509 -in ca.pem -noout -fingerprint -sha256`
+on the broker or through another trusted channel.
+
+For private deployments, configure `server.pem` as a chain containing the server leaf followed by
+the public private-CA certificate. This lets clients enroll the CA and permits future leaf renewal
+without re-enrollment. A leaf-only chain remains supported but is pinned exactly.
 
 - Create production certificates outside the repository.
 - Include every broker IP address or DNS name used by clients in the certificate SANs.
@@ -91,6 +109,40 @@ The provided systemd units set `MemoryMax=256M`. Investigate sustained pressure 
 Protocol mismatch is fatal by design. Deploy broker and GUI builds from the same source revision.
 
 ## Upgrade
+
+### Deploy the system service
+
+Run this on the **broker host**, from a clean Chatty Git checkout with an upstream
+branch. Use the checkout owner's account with Rust installed and sudo access:
+
+```sh
+./scripts/deploy-broker.sh
+```
+
+The defaults match `packaging/chatty-broker.service`: system service
+`chatty-broker.service` and executable `/usr/local/bin/chatty-broker`. For a custom
+installation:
+
+```sh
+./scripts/deploy-broker.sh --repo /path/to/Chatty \
+  --service chatty-broker.service --binary /usr/local/bin/chatty-broker
+```
+
+Back up SQLite first. The script fast-forwards the checkout with `git pull
+--ff-only`, builds only the broker in a fresh temporary target directory using
+`Cargo.lock`, and then stops the service and atomically replaces the binary. The
+old executable is retained alongside it as `chatty-broker.backup.<timestamp>.<pid>`.
+Temporary build files are removed on exit. The service configuration, certificates,
+and database paths are not replaced.
+
+After starting the broker, the script checks that the service and its main process
+remain running for ten seconds. This is a process check; also verify a client can
+connect and generate a reply. If startup fails, the service is stopped and the
+backup binary is retained for recovery. There is no automatic binary rollback
+after startup because embedded migrations may already have changed SQLite.
+Deploy a GUI built from the same Git revision when the protocol changes.
+
+### Manual upgrade
 
 1. Back up SQLite.
 2. Build and test broker and GUI from the same revision.

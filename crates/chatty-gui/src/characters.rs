@@ -17,6 +17,8 @@ impl From<&Character> for DraftCharacter {
             misc: c.misc.clone(),
             tags: c.tags.join(", "),
             avatar: c.avatar.clone(),
+            images: c.images.clone(),
+            default_image_id: c.default_image_id.clone(),
             is_public: c.is_public,
             owned_by_user: c.owned_by_user,
         }
@@ -40,6 +42,8 @@ impl From<&CharacterInput> for DraftCharacter {
             misc: c.misc.clone(),
             tags: c.tags.join(", "),
             avatar: c.avatar.clone(),
+            images: c.images.clone(),
+            default_image_id: c.default_image_id.clone(),
             is_public: c.is_public,
             owned_by_user: c.owned_by_user,
         }
@@ -203,6 +207,8 @@ impl ChattyApp {
             ui.label("Tags");
             ui.add(egui::TextEdit::singleline(&mut self.draft.tags).desired_width(f32::INFINITY));
             ui.separator();
+            self.character_images_editor(ui);
+            ui.separator();
             ui.label(egui::RichText::new("World lore").strong());
             ui.label("Link this character to any worlds whose lore should be available during roleplay.");
             if self.worlds.is_empty() {
@@ -255,6 +261,196 @@ impl ChattyApp {
                 |ui| Self::text_field(ui, "Race", &mut self.draft.race),
             );
         });
+    }
+    fn character_images_editor(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Character images").strong());
+        ui.label(
+            egui::RichText::new(
+                "Add PNG portraits and describe the expression or scene. Images are top-centered, cropped square, and shown as circles. The AI uses these labels to choose a portrait from the latest six messages.",
+            )
+            .weak(),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add images…").clicked() {
+                self.add_character_images();
+            }
+            if ui
+                .button("Add folder…")
+                .on_hover_text("Import every PNG in one character portrait folder")
+                .clicked()
+            {
+                self.add_character_image_folder();
+            }
+        });
+
+        let mut remove_id = None;
+        let mut make_default = None;
+        for image in &mut self.draft.images {
+            let image_id = image.id.clone();
+            ui.push_id(&image_id, |ui| {
+                egui::Frame::new()
+                    .fill(color_surface_raised(ui))
+                    .stroke(egui::Stroke::new(1.0, color_border(ui)))
+                    .corner_radius(10.0)
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            Self::character_portrait(
+                                ui,
+                                &image_id,
+                                Some(&image.data),
+                                "Character portrait",
+                                56.0,
+                            );
+                            ui.vertical(|ui| {
+                                ui.label("AI label");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut image.label)
+                                        .desired_width((ui.available_width() - 170.0).max(120.0)),
+                                );
+                                let is_default = self.draft.default_image_id.as_deref()
+                                    == Some(image_id.as_str());
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui
+                                        .selectable_label(is_default, "Default / icon")
+                                        .clicked()
+                                    {
+                                        make_default = Some(image_id.clone());
+                                    }
+                                    if ui.button("Remove").clicked() {
+                                        remove_id = Some(image_id.clone());
+                                    }
+                                });
+                            });
+                        });
+                    });
+            });
+            ui.add_space(6.0);
+        }
+        if let Some(id) = make_default {
+            self.draft.default_image_id = Some(id);
+        }
+        if let Some(id) = remove_id {
+            self.draft.images.retain(|image| image.id != id);
+            if self.draft.default_image_id.as_deref() == Some(id.as_str()) {
+                self.draft.default_image_id = self.draft.images.first().map(|image| image.id.clone());
+            }
+        }
+    }
+    fn add_character_images(&mut self) {
+        let Some(paths) = rfd::FileDialog::new()
+            .add_filter("PNG image", &["png"])
+            .pick_files()
+        else {
+            return;
+        };
+        self.import_character_image_paths(paths, None);
+    }
+    fn add_character_image_folder(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let mut paths = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                self.set_error(format!("Could not read {}: {error}", folder.display()));
+                return;
+            }
+        };
+        paths.sort();
+        let folder_name = folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        self.import_character_image_paths(paths, folder_name.as_deref());
+    }
+    fn import_character_image_paths(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        default_stem: Option<&str>,
+    ) {
+        let remaining = 32usize.saturating_sub(self.draft.images.len());
+        let truncated = paths.len() > remaining;
+        let mut imported_default = None;
+        for path in paths.into_iter().take(remaining) {
+            let Ok(source) = std::fs::read(&path) else {
+                self.set_error(format!("Could not read {}.", path.display()));
+                continue;
+            };
+            if source.len() > 2 * 1024 * 1024 {
+                self.set_error(format!(
+                    "{} must be a PNG no larger than 2 MB.",
+                    path.display()
+                ));
+                continue;
+            }
+            let data = match Self::normalize_character_image_png(&source) {
+                Ok(data) => data,
+                Err(error) => {
+                    self.set_error(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
+            let mut label = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("portrait")
+                .replace(['_', '-'], " ");
+            let id = chatty_protocol::util::new_uuid();
+            if default_stem.is_some_and(|stem| label.eq_ignore_ascii_case(stem))
+                || (!self.draft.name.trim().is_empty()
+                    && label.eq_ignore_ascii_case(self.draft.name.trim()))
+            {
+                imported_default = Some(id.clone());
+                label = "default".into();
+            }
+            self.draft.images.push(CharacterImage {
+                id: id.clone(),
+                label,
+                data,
+            });
+            if self.draft.default_image_id.is_none() {
+                self.draft.default_image_id = Some(id);
+            }
+        }
+        if let Some(id) = imported_default {
+            self.draft.default_image_id = Some(id);
+        }
+        if truncated {
+            self.set_error("Only the first 32 character images were added.");
+        }
+    }
+
+    pub(super) fn normalize_character_image_png(
+        source: &[u8],
+    ) -> std::result::Result<Vec<u8>, String> {
+        let decoded = image::load_from_memory_with_format(source, image::ImageFormat::Png)
+            .map_err(|_| "must be a valid PNG".to_owned())?;
+        let (width, height) = (decoded.width(), decoded.height());
+        let side = width.min(height);
+        if !(128..=512).contains(&side) || width > 4096 || height > 4096 {
+            return Err(
+                "the cropped portrait must be 128×128 to 512×512 (source sides may be up to 4096 px)"
+                    .into(),
+            );
+        }
+        if width == height {
+            return Ok(source.to_vec());
+        }
+        let left = (width - side) / 2;
+        let cropped = decoded.crop_imm(left, 0, side, side);
+        let mut output = std::io::Cursor::new(Vec::new());
+        cropped
+            .write_to(&mut output, image::ImageFormat::Png)
+            .map_err(|_| "could not normalize PNG portrait".to_owned())?;
+        Ok(output.into_inner())
     }
     pub(super) fn age_field(ui: &mut egui::Ui, age: &mut String) {
         let label = ui.label("Age");
@@ -345,7 +541,13 @@ impl ChattyApp {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
                     .collect(),
-                avatar: self.draft.avatar.clone(),
+                avatar: if self.draft.images.is_empty() {
+                    self.draft.avatar.clone()
+                } else {
+                    None
+                },
+                images: self.draft.images.clone(),
+                default_image_id: self.draft.default_image_id.clone(),
                 is_public: self.draft.is_public,
                 owned_by_user: self.draft.owned_by_user,
             }),
@@ -453,6 +655,8 @@ fn draft_from_card(root: serde_json::Value) -> Option<DraftCharacter> {
             })
             .unwrap_or_default(),
         avatar: None,
+        images: vec![],
+        default_image_id: None,
         is_public: false,
         owned_by_user: true,
     })

@@ -190,7 +190,7 @@ pub(super) async fn load_conversation_from_row(
 ) -> Result<ConversationView> {
     let id: String = row.get("id");
     let conversation = conversation_from_row(db, row).await?;
-    let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY revision,id LIMIT 2000")
+    let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,character_image_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY revision,id LIMIT 2000")
         .bind(&id).fetch_all(db).await?;
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
@@ -217,6 +217,7 @@ pub(super) async fn load_conversation_from_row(
             content: row.get("content"),
             parent_id: row.get("parent_id"),
             selected_variant_id: row.get("selected_variant_id"),
+            character_image_id: row.get("character_image_id"),
             created_at: row.get("created_at"),
             revision: row.get("revision"),
             variants,
@@ -247,7 +248,18 @@ pub(super) async fn send_snapshot(
     .fetch(&app.db);
     while let Some(row) = characters.try_next().await? {
         let entity_id: String = row.get("id");
-        let payload = DeltaPayload::Character(CharacterInput {
+        let owner_id: String = row.get("owner_id");
+        let owned_by_user = owner_id == user_id;
+        let mut images = decrypt_character_images(
+            &app.image_key,
+            &owner_id,
+            &entity_id,
+            row.get::<&[u8], _>("images"),
+        )?;
+        for image in &mut images {
+            image.data.clear();
+        }
+        let payload = DeltaPayload::Character(Box::new(CharacterInput {
             id: Some(entity_id.clone()),
             name: row.get("name"),
             description: row.get("description"),
@@ -262,9 +274,11 @@ pub(super) async fn send_snapshot(
             misc: row.get("misc"),
             tags: decode(row.get::<&[u8], _>("tags")).unwrap_or_default(),
             avatar: row.get("avatar"),
+            images,
+            default_image_id: row.get("default_image_id"),
             is_public: row.get("is_public"),
-            owned_by_user: row.get::<String, _>("owner_id") == user_id,
-        });
+            owned_by_user,
+        }));
         let delta = StateDelta {
             revision: row.get("revision"),
             entity_type: "character".into(),
@@ -299,7 +313,7 @@ pub(super) async fn send_snapshot(
             .await?;
     }
     drop(conversations);
-    let mut messages=sqlx::query("SELECT m.id,m.conversation_id,m.author_type,m.author_id,m.content,m.parent_id,m.selected_variant_id,m.revision FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.owner_id=? AND m.revision<=? ORDER BY m.id").bind(user_id).bind(snapshot_revision).fetch(&app.db);
+    let mut messages=sqlx::query("SELECT m.id,m.conversation_id,m.author_type,m.author_id,m.content,m.parent_id,m.selected_variant_id,m.character_image_id,m.revision FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.owner_id=? AND m.revision<=? ORDER BY m.id").bind(user_id).bind(snapshot_revision).fetch(&app.db);
     while let Some(row) = messages.try_next().await? {
         let entity_id: String = row.get("id");
         let payload = DeltaPayload::Message {
@@ -309,6 +323,7 @@ pub(super) async fn send_snapshot(
             content: row.get("content"),
             parent_id: row.get("parent_id"),
             selected_variant_id: row.get("selected_variant_id"),
+            character_image_id: row.get("character_image_id"),
         };
         let delta = StateDelta {
             revision: row.get("revision"),

@@ -12,6 +12,74 @@ pub(super) enum FooterIcon {
 }
 
 impl ChattyApp {
+    pub(super) fn sidebar_toggle_button(
+        ui: &mut egui::Ui,
+        sidebar_visible: bool,
+    ) -> egui::Response {
+        let label = if sidebar_visible {
+            "Hide sidebar"
+        } else {
+            "Show sidebar"
+        };
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.style().interact(&response);
+            if !sidebar_visible
+                && (response.hovered()
+                    || response.has_focus()
+                    || response.is_pointer_button_down_on())
+            {
+                let hover_rect = egui::Rect::from_min_size(rect.min, egui::vec2(28.0, 28.0));
+                ui.painter().rect(
+                    hover_rect,
+                    6.0,
+                    visuals.weak_bg_fill,
+                    visuals.bg_stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let center = if sidebar_visible {
+                rect.right_top() + egui::vec2(-8.0, 8.0)
+            } else {
+                rect.left_top() + egui::vec2(14.0, 14.0)
+            };
+            let stroke = egui::Stroke::new(1.8, visuals.fg_stroke.color);
+            if sidebar_visible {
+                ui.painter().line_segment(
+                    [
+                        center + egui::vec2(-6.0, -6.0),
+                        center + egui::vec2(6.0, 6.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().line_segment(
+                    [
+                        center + egui::vec2(6.0, -6.0),
+                        center + egui::vec2(-6.0, 6.0),
+                    ],
+                    stroke,
+                );
+            } else {
+                let panel = egui::Rect::from_center_size(center, egui::vec2(22.0, 18.0));
+                ui.painter()
+                    .rect_stroke(panel, 3.0, stroke, egui::StrokeKind::Inside);
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(panel.left() + 7.0, panel.top()),
+                        egui::pos2(panel.left() + 7.0, panel.bottom()),
+                    ],
+                    stroke,
+                );
+            }
+        }
+
+        response.on_hover_text(label)
+    }
+
     pub(super) fn footer_icon_button(
         ui: &mut egui::Ui,
         icon: FooterIcon,

@@ -1,10 +1,18 @@
 use super::*;
+use rustls::{
+    DigitallySignedStruct, Error as TlsError, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::{CertificateDer, UnixTime},
+};
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 
 pub(super) enum Command {
     Connect(ConnectionTarget),
+    TrustCertificate(PendingCertificate),
+    RejectCertificate,
     Disconnect,
     Request(Box<Request>),
     SendThenGenerate {
@@ -21,6 +29,7 @@ pub(super) enum Event {
     Status(String),
     Connected { resuming_session: bool },
     ConnectionFailed(String),
+    CertificateTrustRequired(PendingCertificate),
     Disconnected,
     Frame(Frame),
     SessionExpired,
@@ -62,6 +71,47 @@ impl EventSender {
 pub(super) struct ConnectionTarget {
     pub broker: String,
     pub server_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingCertificate {
+    pub target: ConnectionTarget,
+    pub fingerprint: String,
+    certificate: Vec<u8>,
+    trust_anchor: bool,
+}
+
+impl PendingCertificate {
+    #[cfg(test)]
+    pub(super) fn from_der(target: ConnectionTarget, certificate: Vec<u8>) -> Self {
+        let fingerprint = certificate_fingerprint(&certificate);
+        Self {
+            target,
+            fingerprint,
+            certificate,
+            trust_anchor: false,
+        }
+    }
+
+    fn from_chain(target: ConnectionTarget, certificates: &[CertificateDer<'_>]) -> Result<Self> {
+        let trust_anchor = certificates.len() > 1;
+        let certificate = certificates
+            .last()
+            .context("broker did not present a certificate")?
+            .as_ref()
+            .to_vec();
+        let fingerprint = certificate_fingerprint(&certificate);
+        Ok(Self {
+            target,
+            fingerprint,
+            certificate,
+            trust_anchor,
+        })
+    }
+
+    pub(super) fn is_ca(&self) -> bool {
+        self.trust_anchor
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,19 +268,84 @@ pub(super) fn save_preferences(
     );
 }
 
-/// One config per CA so rustls session resumption survives reconnects; a
-/// fresh config per connection would pay a full TLS handshake every time.
-fn client_config(args: &Args, target: &ConnectionTarget) -> Result<Arc<ClientConfig>> {
+#[derive(Debug)]
+struct CertificateVerifier {
+    expected: Option<Vec<u8>>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl ServerCertVerifier for CertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, TlsError> {
+        if self
+            .expected
+            .as_ref()
+            .is_none_or(|expected| expected.as_slice() == end_entity.as_ref())
+        {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(TlsError::General(
+                "the broker certificate no longer matches the trusted certificate".into(),
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+enum ConnectAttempt {
+    Connected(Box<TlsStream<TcpStream>>),
+    TrustRequired(PendingCertificate),
+}
+
+fn ca_client_config(path: &std::path::Path) -> Result<Arc<ClientConfig>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<ClientConfig>>>> =
         std::sync::OnceLock::new();
-    let ca_path = ca_path(args, target)?;
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().unwrap().get(&ca_path) {
-        return Ok(hit.clone());
+    if let Some(config) = cache.lock().unwrap().get(path) {
+        return Ok(config.clone());
     }
     let mut roots = RootCertStore::empty();
-    let ca_file = File::open(&ca_path)
-        .with_context(|| format!("could not open CA certificate {}", ca_path.display()))?;
+    let ca_file = File::open(path)
+        .with_context(|| format!("could not open CA certificate {}", path.display()))?;
     for cert in chatty_protocol::util::pemfile::certs(&mut BufReader::new(ca_file)) {
         roots.add(cert?).context("invalid pinned CA")?;
     }
@@ -238,18 +353,92 @@ fn client_config(args: &Args, target: &ConnectionTarget) -> Result<Arc<ClientCon
         .with_root_certificates(roots)
         .with_no_client_auth();
     let config = Arc::new(config);
-    cache.lock().unwrap().insert(ca_path, config.clone());
+    cache
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), config.clone());
     Ok(config)
 }
 
-async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<TcpStream>> {
+fn der_ca_client_config(path: &std::path::Path) -> Result<Arc<ClientConfig>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<ClientConfig>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(config) = cache.lock().unwrap().get(path) {
+        return Ok(config.clone());
+    }
+    let certificate = fs::read(path)
+        .with_context(|| format!("could not read trusted CA certificate {}", path.display()))?;
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(certificate))
+        .context("invalid trusted CA certificate")?;
+    let config = Arc::new(
+        ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    cache
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), config.clone());
+    Ok(config)
+}
+
+fn public_client_config() -> Arc<ClientConfig> {
+    static CONFIG: std::sync::OnceLock<Arc<ClientConfig>> = std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            Arc::new(
+                ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            )
+        })
+        .clone()
+}
+
+fn custom_client_config(expected: Option<Vec<u8>>) -> Result<Arc<ClientConfig>> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .context("TLS crypto provider is not installed")?;
+    let verifier = Arc::new(CertificateVerifier { expected, provider });
+    Ok(Arc::new(
+        ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth(),
+    ))
+}
+
+fn pinned_client_config(certificate: Vec<u8>) -> Result<Arc<ClientConfig>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<u8>, Arc<ClientConfig>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(config) = cache.lock().unwrap().get(&certificate) {
+        return Ok(config.clone());
+    }
+    let config = custom_client_config(Some(certificate.clone()))?;
+    cache.lock().unwrap().insert(certificate, config.clone());
+    Ok(config)
+}
+
+async fn tls_connect(
+    config: Arc<ClientConfig>,
+    target: &ConnectionTarget,
+) -> Result<TlsStream<TcpStream>> {
     let tcp = TcpStream::connect(&target.broker).await?;
     tcp.set_nodelay(true)?;
     let name = ServerName::try_from(target.server_name.clone()).context("invalid server name")?;
-    let mut stream = TlsConnector::from(client_config(args, target)?)
+    TlsConnector::from(config)
         .connect(name, tcp)
         .await
-        .context("TLS certificate verification failed")?;
+        .context("TLS certificate verification failed")
+}
+
+async fn verify_chatty_handshake(mut stream: TlsStream<TcpStream>) -> Result<TlsStream<TcpStream>> {
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
@@ -261,40 +450,112 @@ async fn connect(args: &Args, target: &ConnectionTarget) -> Result<TlsStream<Tcp
     Ok(stream)
 }
 
-fn ca_path(args: &Args, target: &ConnectionTarget) -> Result<PathBuf> {
+async fn connect(args: &Args, target: &ConnectionTarget) -> Result<ConnectAttempt> {
     if let Some(path) = args.ca.clone() {
-        return Ok(path);
+        return verify_chatty_handshake(tls_connect(ca_client_config(&path)?, target).await?)
+            .await
+            .map(|stream| ConnectAttempt::Connected(Box::new(stream)));
     }
 
+    let ca_path = server_trust_path(target, "ca.pem")?;
+    if ca_path.is_file() {
+        return verify_chatty_handshake(tls_connect(ca_client_config(&ca_path)?, target).await?)
+            .await
+            .map(|stream| ConnectAttempt::Connected(Box::new(stream)));
+    }
+
+    let der_ca_path = server_trust_path(target, "ca.der")?;
+    if der_ca_path.is_file() {
+        return verify_chatty_handshake(
+            tls_connect(der_ca_client_config(&der_ca_path)?, target).await?,
+        )
+        .await
+        .map(|stream| ConnectAttempt::Connected(Box::new(stream)));
+    }
+
+    let certificate_path = server_trust_path(target, "cert.der")?;
+    if certificate_path.is_file() {
+        let certificate = fs::read(&certificate_path).with_context(|| {
+            format!(
+                "could not read trusted certificate {}",
+                certificate_path.display()
+            )
+        })?;
+        return verify_chatty_handshake(
+            tls_connect(pinned_client_config(certificate)?, target).await?,
+        )
+        .await
+        .map(|stream| ConnectAttempt::Connected(Box::new(stream)));
+    }
+
+    match tls_connect(public_client_config(), target).await {
+        Ok(stream) => verify_chatty_handshake(stream)
+            .await
+            .map(|stream| ConnectAttempt::Connected(Box::new(stream))),
+        Err(public_error) => {
+            let stream = tls_connect(custom_client_config(None)?, target)
+                .await
+                .with_context(|| {
+                    format!("public certificate validation failed: {public_error:#}")
+                })?;
+            let certificates = stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .context("broker did not present a certificate")?;
+            Ok(ConnectAttempt::TrustRequired(
+                PendingCertificate::from_chain(target.clone(), certificates)?,
+            ))
+        }
+    }
+}
+
+fn certificate_fingerprint(certificate: &[u8]) -> String {
+    Sha256::digest(certificate)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn server_trust_path(target: &ConnectionTarget, extension: &str) -> Result<PathBuf> {
     let server_name = target.server_name.trim();
     if server_name.is_empty()
         || server_name == "."
         || server_name == ".."
         || server_name.contains(['/', '\\'])
     {
-        bail!("invalid server name for CA certificate lookup");
+        bail!("invalid server name for certificate lookup");
     }
-
-    let server_ca = default_server_ca_path(
-        server_name,
+    default_server_trust_dir(
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
     )
-    .context(
-        "could not determine the Linux user config directory; set XDG_CONFIG_HOME, HOME, or CHATTY_CA",
-    )?;
-
-    // Preserve the repository-relative development default outside Flatpak.
-    // A server-specific CA always wins when the user has installed one.
-    if server_ca.is_file() || std::env::var_os("FLATPAK_ID").is_some() {
-        Ok(server_ca)
-    } else {
-        Ok(PathBuf::from("certs/ca.pem"))
-    }
+    .map(|directory| directory.join(format!("{server_name}.{extension}")))
+    .context("could not determine the Linux user config directory; set XDG_CONFIG_HOME or HOME")
 }
 
-fn default_server_ca_path(
-    server_name: &str,
+fn save_trusted_certificate(pending: &PendingCertificate) -> Result<()> {
+    let extension = if pending.trust_anchor {
+        "ca.der"
+    } else {
+        "cert.der"
+    };
+    let path = server_trust_path(&pending.target, extension)?;
+    let parent = path
+        .parent()
+        .context("trusted certificate path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "could not create certificate directory {}",
+            parent.display()
+        )
+    })?;
+    fs::write(&path, &pending.certificate)
+        .with_context(|| format!("could not save trusted certificate {}", path.display()))
+}
+
+fn default_server_trust_dir(
     xdg_config_home: Option<PathBuf>,
     home: Option<PathBuf>,
 ) -> Option<PathBuf> {
@@ -304,10 +565,17 @@ fn default_server_ca_path(
             home.filter(|path| path.is_absolute())
                 .map(|path| path.join(".config"))
         })
-        .map(|path| {
-            path.join("chatty/server-cas")
-                .join(format!("{server_name}.ca.pem"))
-        })
+        .map(|path| path.join("chatty/server-cas"))
+}
+
+#[cfg(test)]
+fn default_server_ca_path(
+    server_name: &str,
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    default_server_trust_dir(xdg_config_home, home)
+        .map(|path| path.join(format!("{server_name}.ca.pem")))
 }
 
 /// Favors queued commands over the live channel so nothing typed while the
@@ -384,7 +652,37 @@ pub(super) async fn run(
         )
         .await
         {
-            Ok(Ok(stream)) => stream,
+            Ok(Ok(ConnectAttempt::Connected(stream))) => *stream,
+            Ok(Ok(ConnectAttempt::TrustRequired(pending_certificate))) => {
+                let _ = events.send(Event::CertificateTrustRequired(pending_certificate.clone()));
+                match commands.recv().await {
+                    Some(Command::TrustCertificate(accepted))
+                        if accepted == pending_certificate =>
+                    {
+                        if let Err(error) = save_trusted_certificate(&accepted) {
+                            target = None;
+                            let _ = events.send(Event::ConnectionFailed(format!(
+                                "Could not save trusted certificate: {error:#}"
+                            )));
+                        }
+                    }
+                    Some(Command::Connect(requested)) => {
+                        target = Some(requested);
+                    }
+                    Some(Command::Stop) | None => return,
+                    Some(Command::RejectCertificate) | Some(Command::Disconnect) => {
+                        target = None;
+                        let _ = events.send(Event::Disconnected);
+                    }
+                    _ => {
+                        target = None;
+                        let _ = events.send(Event::ConnectionFailed(
+                            "The broker certificate was not trusted.".into(),
+                        ));
+                    }
+                }
+                continue;
+            }
             Ok(Err(error)) => {
                 if established_for_target {
                     let _ = events.send(Event::Status(format!(
@@ -477,6 +775,7 @@ pub(super) async fn run(
             tokio::select! {
                 command = next_command(&mut pending, &mut commands) => match command {
                     Some(Command::Connect(_)) => {}
+                    Some(Command::TrustCertificate(_)) | Some(Command::RejectCertificate) => {}
                     Some(Command::Disconnect) => {
                         target = None;
                         established_for_target = false;
@@ -601,7 +900,8 @@ fn is_expected_post_logout_unauthorized(
 #[cfg(test)]
 mod tests {
     use super::{
-        Event, EventSender, SavedSession, default_server_ca_path, default_session_path,
+        CertificateVerifier, Event, EventSender, PendingCertificate, SavedSession,
+        certificate_fingerprint, default_server_ca_path, default_session_path,
         is_expected_post_logout_unauthorized, last_server_path, load_glass_mode, load_last_server,
         load_light_mode, load_session, load_transparency, save_last_server, save_preferences,
         save_session, take_accepted_generation,
@@ -615,6 +915,7 @@ mod tests {
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     #[test]
@@ -668,6 +969,69 @@ mod tests {
 
         assert!(matches!(received.recv().unwrap(), Event::Status(status) if status == "Online"));
         assert!(repaint_count.load(Ordering::SeqCst) > before);
+    }
+
+    #[test]
+    fn certificate_fingerprint_is_colon_separated_sha256() {
+        assert_eq!(
+            certificate_fingerprint(b""),
+            "E3:B0:C4:42:98:FC:1C:14:9A:FB:F4:C8:99:6F:B9:24:27:AE:41:E4:64:9B:93:4C:A4:95:99:1B:78:52:B8:55"
+        );
+    }
+
+    #[test]
+    fn pinned_verifier_rejects_a_changed_certificate() {
+        let verifier = CertificateVerifier {
+            expected: Some(vec![1, 2, 3]),
+            provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        };
+        let expected = rustls::pki_types::CertificateDer::from(vec![1, 2, 3]);
+        let changed = rustls::pki_types::CertificateDer::from(vec![1, 2, 4]);
+        let name = rustls::pki_types::ServerName::try_from("private.example".to_owned()).unwrap();
+        let now = rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_secs(0));
+
+        assert!(
+            rustls::client::danger::ServerCertVerifier::verify_server_cert(
+                &verifier,
+                &expected,
+                &[],
+                &name,
+                &[],
+                now,
+            )
+            .is_ok()
+        );
+        assert!(
+            rustls::client::danger::ServerCertVerifier::verify_server_cert(
+                &verifier,
+                &changed,
+                &[],
+                &name,
+                &[],
+                now,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn enrollment_uses_the_last_certificate_as_a_private_ca() {
+        let chain = [
+            rustls::pki_types::CertificateDer::from(vec![1, 2, 3]),
+            rustls::pki_types::CertificateDer::from(vec![4, 5, 6]),
+        ];
+        let pending = PendingCertificate::from_chain(
+            super::ConnectionTarget {
+                broker: "private.example:7443".into(),
+                server_name: "private.example".into(),
+            },
+            &chain,
+        )
+        .unwrap();
+
+        assert!(pending.is_ca());
+        assert_eq!(pending.certificate, vec![4, 5, 6]);
+        assert_eq!(pending.fingerprint, certificate_fingerprint(&[4, 5, 6]));
     }
 
     #[test]

@@ -10,5 +10,8 @@ openssl req -new -newkey rsa:3072 -nodes -keyout certs/server.key \
 openssl x509 -req -in certs/server.csr -CA certs/ca.pem -CAkey certs/ca.key \
   -CAcreateserial -out certs/server.pem -days 365 -sha256 \
   -extfile scripts/dev-cert.ext
+# Send the public private-CA certificate in the TLS chain so new clients can
+# confirm and install it without a separate file transfer.
+cat certs/ca.pem >> certs/server.pem
 chmod 600 certs/ca.key certs/server.key
 printf '%s\n' 'Created pinned certs/ca.pem plus certs/server.pem and certs/server.key'

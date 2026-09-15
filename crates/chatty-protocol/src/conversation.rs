@@ -52,6 +52,9 @@ pub struct ChatMessage {
     pub content: String,
     pub parent_id: Option<String>,
     pub selected_variant_id: Option<String>,
+    /// Contextual character portrait selected when this reply was generated.
+    #[serde(default)]
+    pub character_image_id: Option<String>,
     pub created_at: String,
     pub revision: i64,
     pub variants: Vec<Variant>,

@@ -147,6 +147,8 @@ async fn main() -> Result<()> {
                 misc: String::new(),
                 tags: vec!["e2e".into()],
                 avatar: None,
+                images: vec![],
+                default_image_id: None,
                 is_public: false,
                 owned_by_user: false,
             }),

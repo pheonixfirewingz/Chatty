@@ -24,7 +24,7 @@ pub struct StateDelta {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum DeltaPayload {
-    Character(CharacterInput),
+    Character(Box<CharacterInput>),
     Conversation {
         title: String,
         kind: ConversationKind,
@@ -43,12 +43,16 @@ pub enum DeltaPayload {
         content: String,
         parent_id: Option<String>,
         selected_variant_id: Option<String>,
+        character_image_id: Option<String>,
     },
     World(crate::world::World),
     Memory(MemoryInput),
     Variant {
         message_id: String,
         content: String,
+        /// Portrait selected for this regenerated reply.
+        #[serde(default)]
+        character_image_id: Option<String>,
     },
     VariantSelection {
         variant_id: Option<String>,

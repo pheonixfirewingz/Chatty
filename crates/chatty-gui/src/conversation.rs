@@ -1,6 +1,20 @@
 use super::*;
 
 impl ChattyApp {
+    pub(super) fn displayed_message_content(message: &ChatMessage) -> &str {
+        message
+            .selected_variant_id
+            .as_deref()
+            .and_then(|selected| {
+                message
+                    .variants
+                    .iter()
+                    .find(|variant| variant.id == selected)
+            })
+            .map(|variant| variant.content.as_str())
+            .unwrap_or(&message.content)
+    }
+
     fn character_name(&self, id: Option<&str>) -> String {
         id.and_then(|id| self.characters.iter().find(|c| c.id == id))
             .map(|c| c.name.clone())
@@ -8,6 +22,38 @@ impl ChattyApp {
     }
 
     fn avatar(ui: &mut egui::Ui, name: &str, size: f32) {
+        Self::character_portrait(ui, name, None, name, size);
+    }
+
+    pub(super) fn character_portrait(
+        ui: &mut egui::Ui,
+        image_id: &str,
+        data: Option<&[u8]>,
+        name: &str,
+        size: f32,
+    ) {
+        Self::character_image(ui, image_id, data, name, size, size / 2.0);
+    }
+
+    fn character_image(
+        ui: &mut egui::Ui,
+        image_id: &str,
+        data: Option<&[u8]>,
+        name: &str,
+        size: f32,
+        corner_radius: f32,
+    ) {
+        let texture = data.and_then(|data| Self::cache_character_portrait(ui.ctx(), image_id, data));
+        if let Some(texture) = texture {
+            let uv = Self::top_center_square_uv(texture.size_vec2());
+            ui.add(
+                egui::Image::new(&texture)
+                    .fit_to_exact_size(egui::vec2(size, size))
+                    .uv(uv)
+                    .corner_radius(corner_radius),
+            );
+            return;
+        }
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         ui.painter()
             .circle_filled(rect.center(), size / 2.0, COLOR_PRIMARY);
@@ -21,9 +67,168 @@ impl ChattyApp {
         );
     }
 
+    pub(super) fn top_center_square_uv(source: egui::Vec2) -> egui::Rect {
+        if source.x > source.y {
+            let margin = (1.0 - source.y / source.x) / 2.0;
+            egui::Rect::from_min_max(egui::pos2(margin, 0.0), egui::pos2(1.0 - margin, 1.0))
+        } else {
+            // Keep the top of portrait images and trim the lower edge. This preserves
+            // faces much more reliably than a vertically centered square crop.
+            egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, source.x / source.y),
+            )
+        }
+    }
+
+    pub(super) fn current_emotion_portrait(&self) -> Option<(String, String, String, Vec<u8>)> {
+        self.selected_conversation.as_ref()?;
+        for message in self.messages.iter().rev() {
+            let (Some(character_id), Some(image_id)) =
+                (message.author_id.as_deref(), message.character_image_id.as_deref())
+            else {
+                continue;
+            };
+            let Some(character) = self
+                .characters
+                .iter()
+                .find(|character| character.id == character_id)
+            else {
+                continue;
+            };
+            if let Some(image) = character.images.iter().find(|image| image.id == image_id) {
+                return Some((
+                    character.name.clone(),
+                    image.label.clone(),
+                    image.id.clone(),
+                    image.data.clone(),
+                ));
+            }
+        }
+        let character_id = self.selected_speaker()?;
+        let character = self
+            .characters
+            .iter()
+            .find(|character| character.id == character_id)?;
+        let image_id = character.default_image_id.as_deref()?;
+        let image = character.images.iter().find(|image| image.id == image_id)?;
+        Some((
+            character.name.clone(),
+            image.label.clone(),
+            image.id.clone(),
+            image.data.clone(),
+        ))
+    }
+
+    fn render_emotion_window(
+        ui: &mut egui::Ui,
+        portrait: &(String, String, String, Vec<u8>),
+        image_size: f32,
+    ) {
+        egui::Frame::new()
+            .fill(color_surface_raised(ui))
+            .stroke(egui::Stroke::new(1.0, color_border(ui)))
+            .corner_radius(14.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    Self::character_image(
+                        ui,
+                        &portrait.2,
+                        Some(&portrait.3),
+                        &format!("{} — {}", portrait.0, portrait.1),
+                        image_size,
+                        image_size / 2.0,
+                    );
+                    ui.add_space(3.0);
+                    ui.label(egui::RichText::new(&portrait.0).strong());
+                    ui.label(
+                        egui::RichText::new(format!("Emotion: {}", portrait.1)).size(13.0),
+                    );
+                });
+            });
+    }
+
+    pub(super) fn cache_character_portraits(&mut self, ctx: &egui::Context) {
+        for (image_id, data) in self.received_character_images.drain(..) {
+            let _ = Self::cache_character_portrait(ctx, &image_id, &data);
+        }
+
+        let mut requests = Vec::new();
+        for character in &self.characters {
+            for image in &character.images {
+                if !image.data.is_empty() {
+                    let _ = Self::cache_character_portrait(ctx, &image.id, &image.data);
+                    continue;
+                }
+                let texture_key = egui::Id::new(("character-portrait", &image.id));
+                let cached = ctx.data_mut(|store| {
+                    store
+                        .get_temp::<egui::TextureHandle>(texture_key)
+                        .is_some()
+                });
+                let request_key = (character.id.clone(), image.id.clone());
+                if !cached && !self.character_image_requests.contains(&request_key) {
+                    requests.push(request_key);
+                }
+            }
+        }
+        for (character_id, image_id) in requests {
+            self.character_image_requests
+                .insert((character_id.clone(), image_id.clone()));
+            self.send(Request::GetCharacterImage {
+                session_token: self.token.clone(),
+                character_id,
+                image_id,
+            });
+        }
+    }
+
+    fn cache_character_portrait(
+        ctx: &egui::Context,
+        image_id: &str,
+        data: &[u8],
+    ) -> Option<egui::TextureHandle> {
+        let texture_key = egui::Id::new(("character-portrait", image_id));
+        if let Some(texture) =
+            ctx.data_mut(|store| store.get_temp::<egui::TextureHandle>(texture_key))
+        {
+            return Some(texture);
+        }
+        let dimensions = image::ImageReader::with_format(
+            std::io::Cursor::new(data),
+            image::ImageFormat::Png,
+        )
+        .into_dimensions()
+        .ok()?;
+        if dimensions.0 < 128
+            || dimensions.1 < 128
+            || dimensions.0 > 512
+            || dimensions.1 > 512
+        {
+            return None;
+        }
+        let rgba = image::load_from_memory_with_format(data, image::ImageFormat::Png)
+            .ok()?
+            .to_rgba8();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            rgba.as_raw(),
+        );
+        let texture = ctx.load_texture(
+            format!("character-portrait-{image_id}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        ctx.data_mut(|store| store.insert_temp(texture_key, texture.clone()));
+        Some(texture)
+    }
+
     pub(super) fn render_chat(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_rect_before_wrap();
         let compact = available.width() < 760.0;
+        let emotion_portrait = self.current_emotion_portrait();
+        let sidebar_toggle_height = if self.sidebar_visible { 0.0 } else { 50.0 };
         let typing_height = if self.typing_character.is_some() {
             24.0
         } else {
@@ -32,13 +237,38 @@ impl ChattyApp {
         let composer_height = if compact { 94.0 } else { 104.0 };
         let content_width = available.width() - if compact { 0.0 } else { 28.0 };
         let content_left = available.center().x - content_width / 2.0;
-        let messages_rect = egui::Rect::from_min_max(
-            egui::pos2(content_left, available.min.y),
+        let mut messages_rect = egui::Rect::from_min_max(
+            egui::pos2(content_left, available.min.y + sidebar_toggle_height),
             egui::pos2(
                 content_left + content_width,
                 (available.max.y - composer_height - typing_height).max(available.min.y),
             ),
         );
+        let emotion_rect = emotion_portrait.as_ref().map(|_| {
+            if compact {
+                let size = egui::vec2(128.0, 160.0);
+                messages_rect.min.y =
+                    (messages_rect.min.y + size.y + 12.0).min(messages_rect.max.y);
+                egui::Rect::from_min_size(
+                    egui::pos2(
+                        content_left + content_width - size.x - 8.0,
+                        available.min.y + sidebar_toggle_height + 8.0,
+                    ),
+                    size,
+                )
+            } else {
+                let size = egui::vec2(216.0, 250.0);
+                messages_rect.max.x =
+                    (messages_rect.max.x - size.x - 18.0).max(messages_rect.min.x);
+                egui::Rect::from_min_size(
+                    egui::pos2(
+                        content_left + content_width - size.x,
+                        available.min.y + sidebar_toggle_height + 8.0,
+                    ),
+                    size,
+                )
+            }
+        });
         let composer_rect = egui::Rect::from_min_max(
             egui::pos2(content_left, available.max.y - composer_height),
             egui::pos2(
@@ -46,6 +276,28 @@ impl ChattyApp {
                 available.max.y,
             ),
         );
+
+        if !self.sidebar_visible {
+            let toggle_rect = egui::Rect::from_min_size(
+                egui::pos2(content_left, available.min.y),
+                egui::vec2(44.0, 44.0),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(toggle_rect), |ui| {
+                if Self::sidebar_toggle_button(ui, false).clicked() {
+                    self.sidebar_visible = true;
+                }
+            });
+        }
+
+        if let (Some(rect), Some(portrait)) = (emotion_rect, emotion_portrait.as_ref()) {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                Self::render_emotion_window(
+                    ui,
+                    portrait,
+                    if compact { 96.0 } else { 180.0 },
+                );
+            });
+        }
 
         ui.scope_builder(egui::UiBuilder::new().max_rect(composer_rect), |ui| {
             ui.add_space(8.0);
@@ -108,10 +360,14 @@ impl ChattyApp {
                 egui::pos2(content_left + content_width, composer_rect.min.y),
             );
             ui.scope_builder(egui::UiBuilder::new().max_rect(typing_rect), |ui| {
+                let status = match self.generation_status {
+                    Some(GenerationStatus::SelectingEmotion) => {
+                        "AI is selecting an emotion portrait…".to_owned()
+                    }
+                    None => format!("{} is typing…", self.character_name(Some(id))),
+                };
                 ui.label(
-                    egui::RichText::new(format!("{} is typing…", self.character_name(Some(id))))
-                        .italics()
-                        .weak(),
+                    egui::RichText::new(status).italics().weak(),
                 );
             });
         }
@@ -155,9 +411,13 @@ impl ChattyApp {
                     }
                     if !self.stream_text.is_empty() {
                         let name = self.character_name(self.typing_character.as_deref());
-                        ui.strong(egui::RichText::new(name).size(16.0));
                         let text = self.stream_text.clone();
-                        self.render_markdown(ui, &text);
+                        ui.push_id("streaming-message", |ui| {
+                            ui.vertical(|ui| {
+                                ui.strong(egui::RichText::new(format!("{name}:")).size(16.0));
+                                self.render_markdown(ui, &text);
+                            });
+                        });
                     }
                 });
         });
@@ -179,24 +439,21 @@ impl ChattyApp {
                             ui.set_max_width((ui.available_width() * 0.72).clamp(150.0, 620.0));
                             ui.visuals_mut().override_text_color = Some(COLOR_ON_PRIMARY);
                             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                self.render_markdown(ui, &message.content)
+                                self.render_markdown(ui, Self::displayed_message_content(message))
                             });
                         });
                 });
             } else {
                 let name = self.character_name(message.author_id.as_deref());
-                ui.horizontal_top(|ui| {
-                    Self::avatar(ui, &name, 34.0);
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(&name)
-                                .size(14.0)
-                                .strong()
-                                .color(color_primary_text(ui)),
-                        );
-                        ui.add_space(1.0);
-                        self.render_markdown(ui, &message.content);
-                    });
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{name}:"))
+                            .size(14.0)
+                            .strong()
+                            .color(color_primary_text(ui)),
+                    );
+                    ui.add_space(1.0);
+                    self.render_markdown(ui, Self::displayed_message_content(message));
                 });
             }
         });
@@ -309,17 +566,17 @@ impl ChattyApp {
             entity_id: id.into(),
         });
     }
-    fn regenerate(&self, message: &ChatMessage) {
+    pub(super) fn regenerate(&self, message: &ChatMessage) {
         if let Some(cid) = self.selected_conversation.clone() {
             self.send(Request::Generate {
                 session_token: self.token.clone(),
                 conversation_id: cid,
                 speaker_id: message.author_id.clone(),
-                parent_id: message.parent_id.clone(),
+                parent_id: Some(message.id.clone()),
             });
         }
     }
-    fn submit_message(&mut self) {
+    pub(super) fn submit_message(&mut self) {
         let Some(cid) = self.selected_conversation.clone() else {
             self.new_chat_open = true;
             return;
@@ -330,7 +587,7 @@ impl ChattyApp {
                 session_token: self.token.clone(),
                 conversation_id: cid,
                 speaker_id: speaker,
-                parent_id: self.messages.last().map(|m| m.id.clone()),
+                parent_id: None,
             });
             return;
         }
@@ -412,7 +669,23 @@ impl ChattyApp {
                                 .inner_margin(egui::Margin::symmetric(12, 8))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        Self::avatar(ui, &c.name, 34.0);
+                                        let portrait = c
+                                            .default_image_id
+                                            .as_deref()
+                                            .and_then(|id| {
+                                                c.images.iter().find(|image| image.id == id)
+                                            });
+                                        if let Some(image) = portrait {
+                                            Self::character_portrait(
+                                                ui,
+                                                &image.id,
+                                                Some(&image.data),
+                                                &c.name,
+                                                34.0,
+                                            );
+                                        } else {
+                                            Self::avatar(ui, &c.name, 34.0);
+                                        }
                                         ui.vertical(|ui| {
                                             ui.label(egui::RichText::new(&c.name).strong());
                                             let summary = if c.personality.trim().is_empty() {

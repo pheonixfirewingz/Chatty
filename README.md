@@ -22,6 +22,7 @@ The repository does not contain a terminal client. Scripts that invoke `chatty-c
 - Private direct conversations, streamed generation, cancellation, regeneration, deletion, and automatic titles
 - Reconnect/resume and live deltas across a user's connected clients
 - Dark/light and solid/glass appearance settings
+- OS-level screen-capture exclusion in the official client where the windowing platform supports it
 - Per-user prompt and completion token accounting
 - Admin monitoring, user management, broker policy, inference settings, and Ollama model controls
 - Broker/protocol support for group modes, variants, lore, memories, conversation state, and summaries
@@ -68,8 +69,29 @@ Defaults follow the XDG Base Directory Specification:
 | GUI session and preferences | `$XDG_STATE_HOME/chatty/` or `~/.local/state/chatty/` |
 | Launcher broker log | `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log` |
 | Per-server GUI CA | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.pem` or `~/.config/chatty/server-cas/<host>.ca.pem` |
+| First-use trust material | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.der` (or `.cert.der` for a leaf-only legacy chain) |
 
 Only distribute `ca.pem` to clients. Keep `ca.key` private and offline from client systems.
+
+The official client requests native screen-capture exclusion for its window. This is
+effective on supported Windows versions and best-effort on macOS. Current Linux X11
+and Wayland windowing APIs used by Chatty do not provide a portable equivalent, so
+the setting cannot prevent screenshots there. It also cannot prevent photography,
+modified clients, or capture outside the operating system's managed APIs.
+
+Public brokers whose certificates chain to a standard public CA connect without a Chatty-specific
+certificate file. For private or LAN brokers, the GUI retrieves the public private-CA certificate
+from the TLS chain, shows its SHA-256 fingerprint for confirmation, and stores it automatically.
+Confirm the fingerprint through a separate trusted channel before selecting **Trust and connect**:
+
+```sh
+openssl x509 -in certs/ca.pem -noout -fingerprint -sha256
+```
+
+Private broker certificate files should contain the leaf certificate followed by the private CA
+certificate; the development certificate script produces this chain. Older leaf-only brokers fall
+back to an exact `<host>.cert.der` pin. If a private CA intentionally changes, remove the saved
+`<host>.ca.der` (or legacy `.cert.der`) and confirm the replacement fingerprint on next connection.
 
 ## Verify
 

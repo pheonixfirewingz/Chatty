@@ -18,7 +18,7 @@ pub use admin::{
     AdapterStatus, AdminDataRow, BrokerConfig, BrokerMonitor, OllamaAction, OllamaModel,
     OllamaRunningModel, OllamaState,
 };
-pub use character::{Character, CharacterInput};
+pub use character::{Character, CharacterImage, CharacterInput};
 pub use conversation::{
     ChatMessage, Conversation, ConversationKind, ConversationView, EntityKind, Variant,
 };
@@ -30,7 +30,7 @@ pub use frame::{
 };
 pub use memory::{MemoryEntry, MemoryInput};
 pub use request::Request;
-pub use response::Response;
+pub use response::{GenerationStatus, Response};
 pub use util::current_utc_timestamp;
 
 #[cfg(test)]
