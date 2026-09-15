@@ -110,16 +110,24 @@ Protocol mismatch is fatal by design. Deploy broker and GUI builds from the same
 
 ## Upgrade
 
-### Deploy the system service
+### Deploy the broker service
 
 Run this on the **broker host**, from a clean Chatty Git checkout with an upstream
-branch. Use the checkout owner's account with Rust installed and sudo access:
+branch. Use the checkout owner's account with Rust installed (and sudo access for
+a system service):
 
 ```sh
 ./scripts/deploy-broker.sh
 ```
 
-The defaults match `packaging/chatty-broker.service`: system service
+The script detects the system service first, then the current account's per-user
+service. Use `--user` or `--system` to select explicitly. For the per-user template
+`packaging/chatty-broker-user.service`, the default binary is
+`~/.local/libexec/chatty/chatty-broker`; deployment uses `systemctl --user` without
+sudo. Run it as the account that owns that service. If neither service is installed,
+the script stops before pulling or building; it does not create a service.
+
+The system defaults match `packaging/chatty-broker.service`: system service
 `chatty-broker.service` and executable `/usr/local/bin/chatty-broker`. For a custom
 installation:
 
