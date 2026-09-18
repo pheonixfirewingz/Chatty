@@ -19,6 +19,7 @@ Required inputs are a writable SQLite location and a server certificate/private 
 ```sh
 CHATTY_LISTEN=0.0.0.0:7443 \
 CHATTY_DATABASE='sqlite:///var/lib/chatty/chatty.db?mode=rwc' \
+CHATTY_LOG=/var/lib/chatty/chatty-boot.log \
 CHATTY_CERT=/etc/chatty/server.pem \
 CHATTY_KEY=/etc/chatty/server.key \
 CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 \
@@ -26,6 +27,8 @@ CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 \
 ```
 
 The inference endpoint may be unavailable at startup; the broker remains available and retries generation paths later. `CHATTY_LLAMA_URL` initializes a new database but does not override persisted configuration in an existing database.
+
+The broker truncates its private current-boot log at every process start and mirrors normal tracing output to it. The default path is `~/.local/share/chatty/chatty-boot.log`; set `CHATTY_LOG` for system installations. The file is mode `0600` on Unix, rolls over at 16 MiB to bound disk use, and is readable from the admin portal's **Logs** tab. Only authenticated administrators can request it, and each response is limited to the newest 512 KiB.
 
 System and per-user service templates are in `packaging/`. Review their paths, user, network exposure, and inference URL before installation.
 

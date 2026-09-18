@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 use std::{
     collections::HashMap,
-    fs::{self, File},
-    io::BufReader,
-    path::PathBuf,
+    fs::{self, File, OpenOptions},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU32, AtomicU64, Ordering},
@@ -28,7 +28,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[path = "systems/admin.rs"]
 mod admin;
@@ -53,6 +53,7 @@ use utils::*;
 struct Args {
     listen: String,
     database: Option<String>,
+    log: PathBuf,
     cert: String,
     key: String,
     llama_url: String,
@@ -63,6 +64,7 @@ const USAGE: &str = "chatty-broker -- TLS 1.3 chat broker\n\n\
 Options:\n\
   --listen <addr>     Listen address [env: CHATTY_LISTEN] [default: 0.0.0.0:7443]\n\
   --database <path>   SQLite database URL [env: CHATTY_DATABASE]\n\
+  --log <path>        Boot log file [env: CHATTY_LOG]\n\
   --cert <path>       TLS certificate PEM [default: certs/server.pem]\n\
   --key <path>        TLS private key PEM [default: certs/server.key]\n\
   --llama-url <url>   Inference adapter base URL [env: CHATTY_LLAMA_URL]\n";
@@ -75,6 +77,7 @@ struct App {
     snapshot_gate: Arc<RwLock<()>>,
     deltas: broadcast::Sender<PublishedDelta>,
     recent_errors: Arc<Mutex<Vec<String>>>,
+    log_path: Arc<PathBuf>,
     argon_gate: Arc<Semaphore>,
     image_key: Arc<[u8; 32]>,
 }
@@ -101,6 +104,85 @@ static ACTIVE_CONNECTIONS: AtomicU32 = AtomicU32::new(0);
 static STARTED_AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static CPU_SAMPLE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, u64)>>> =
     std::sync::OnceLock::new();
+const MAX_BOOT_LOG_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+struct BootLogWriter {
+    file: Arc<std::sync::Mutex<File>>,
+}
+
+impl Write for BootLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        const ROLLOVER_MARKER: &[u8] = b"[broker log rolled over after reaching 16 MiB]\n";
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("boot log lock poisoned"))?;
+        if file.metadata()?.len().saturating_add(buffer.len() as u64) > MAX_BOOT_LOG_FILE_BYTES {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(ROLLOVER_MARKER)?;
+            let available = usize::try_from(
+                MAX_BOOT_LOG_FILE_BYTES.saturating_sub(ROLLOVER_MARKER.len() as u64),
+            )
+            .unwrap_or(0);
+            let kept = &buffer[buffer.len().saturating_sub(available)..];
+            file.write_all(kept)?;
+        } else {
+            file.write_all(buffer)?;
+        }
+        drop(file);
+        let _ = std::io::stderr().write_all(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file
+            .lock()
+            .map_err(|_| io::Error::other("boot log lock poisoned"))?
+            .flush()?;
+        let _ = std::io::stderr().flush();
+        Ok(())
+    }
+}
+
+fn open_boot_log(path: &Path) -> Result<File> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create broker log directory {}", parent.display()))?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("create boot log {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("secure boot log {}", path.display()))?;
+    }
+    Ok(file)
+}
+
+fn init_boot_logging(path: &Path) -> Result<()> {
+    let file = Arc::new(std::sync::Mutex::new(open_boot_log(path)?));
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("chatty_broker=info".parse()?),
+        )
+        .with_writer(move || BootLogWriter {
+            file: Arc::clone(&file),
+        })
+        .init();
+    Ok(())
+}
 
 #[derive(Clone)]
 struct PublishedDelta {
@@ -135,19 +217,15 @@ impl Drop for BusyGuard {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .map_err(|_| format_err!("failed to install TLS crypto provider"))?;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("chatty_broker=info".parse()?),
-        )
-        .init();
     let parsed = ParsedArgs::parse(USAGE)?;
+    let log = match parsed.optional("log", "CHATTY_LOG") {
+        Some(path) => PathBuf::from(path),
+        None => default_broker_log_path()?,
+    };
     let args = Args {
         listen: parsed.string("listen", "CHATTY_LISTEN", "0.0.0.0:7443"),
         database: parsed.optional("database", "CHATTY_DATABASE"),
+        log,
         cert: parsed.string("cert", "CHATTY_CERT", "certs/server.pem"),
         key: parsed.string("key", "CHATTY_KEY", "certs/server.key"),
         llama_url: parsed.string(
@@ -156,7 +234,12 @@ async fn main() -> Result<()> {
             "http://192.168.0.97:11434/v1",
         ),
     };
+    init_boot_logging(&args.log)?;
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| format_err!("failed to install TLS crypto provider"))?;
     let _ = STARTED_AT.set(std::time::Instant::now());
+    info!(path=%args.log.display(), "boot log initialized");
     let database = match args.database.as_deref() {
         Some(database) => database.to_owned(),
         None => default_database_url()?,
@@ -185,6 +268,7 @@ async fn main() -> Result<()> {
         snapshot_gate: Arc::new(RwLock::new(())),
         deltas: delta_tx,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(args.log),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         image_key,
     };
@@ -537,6 +621,13 @@ async fn dispatch(
             send!(
                 MessageType::Response,
                 Response::BrokerMonitor(broker_monitor(&app).await)
+            );
+        }
+        Request::AdminReadBrokerLog { session_token } => {
+            require_admin(&app.db, &session_token).await?;
+            send!(
+                MessageType::Response,
+                Response::BrokerLog(read_broker_log(&app.log_path)?)
             );
         }
         Request::AdminSoftReboot { session_token } => {

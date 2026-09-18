@@ -1,4 +1,4 @@
-use chatty_protocol::{BrokerMonitor, Response, decode, encode};
+use chatty_protocol::{BrokerLog, BrokerMonitor, Response, decode, encode};
 
 #[test]
 fn monitoring_response_round_trips_over_binary_protocol() {
@@ -24,6 +24,24 @@ fn monitoring_response_round_trips_over_binary_protocol() {
                 chatty_protocol::AdapterStatus::Offline
             );
             assert_eq!(monitor.adapter_latency_ms, Some(2000));
+        }
+        _ => panic!("wrong response variant"),
+    }
+}
+
+#[test]
+fn broker_log_response_round_trips_over_binary_protocol() {
+    let response = Response::BrokerLog(BrokerLog {
+        content: "INFO broker started\n".into(),
+        truncated: true,
+        file_size_bytes: 700_000,
+    });
+    let decoded: Response = decode(&encode(&response).unwrap()).unwrap();
+    match decoded {
+        Response::BrokerLog(log) => {
+            assert_eq!(log.content, "INFO broker started\n");
+            assert!(log.truncated);
+            assert_eq!(log.file_size_bytes, 700_000);
         }
         _ => panic!("wrong response variant"),
     }

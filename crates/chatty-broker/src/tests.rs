@@ -46,6 +46,37 @@ fn database_never_falls_back_to_current_directory() {
 }
 
 #[test]
+fn boot_log_is_truncated_when_opened_for_a_new_broker_run() {
+    let path = std::env::temp_dir().join(format!("chatty-boot-log-{}.log", new_uuid()));
+    fs::write(&path, "previous boot\n").unwrap();
+    drop(open_boot_log(&path).unwrap());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "");
+    let permissions = fs::metadata(&path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(permissions.mode() & 0o777, 0o600);
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn admin_log_reader_returns_the_newest_complete_bounded_lines() {
+    let path = std::env::temp_dir().join(format!("chatty-admin-log-{}.log", new_uuid()));
+    let mut file = File::create(&path).unwrap();
+    file.write_all(&vec![b'x'; MAX_ADMIN_LOG_RESPONSE_BYTES as usize])
+        .unwrap();
+    file.write_all(b"\nnewest complete line\n").unwrap();
+    drop(file);
+    let log = read_broker_log(&path).unwrap();
+    assert!(log.truncated);
+    assert!(log.content.ends_with("newest complete line\n"));
+    assert!(!log.content.starts_with('x'));
+    assert!(log.content.len() <= MAX_ADMIN_LOG_RESPONSE_BYTES as usize);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn fragmented_sse_is_buffered_without_data_loss() {
     let mut buffer = br#"data: {"choices":[{"delta":{"cont"#.to_vec();
     let mut pending = String::new();
@@ -199,6 +230,7 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
         snapshot_gate: Arc::new(RwLock::new(())),
         deltas,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         image_key: Arc::new([7; 32]),
     };
@@ -338,6 +370,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         snapshot_gate: Arc::new(RwLock::new(())),
         deltas,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         image_key: Arc::new([7; 32]),
     };
@@ -794,6 +827,15 @@ async fn cross_tenant_character_update_is_forbidden() {
         Response::Authenticated { session_token, .. } => session_token,
         other => panic!("unexpected response: {other:?}"),
     };
+    let forbidden_log_read = call(
+        &app,
+        Request::AdminReadBrokerLog {
+            session_token: second_token.clone(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(forbidden_log_read.to_string().contains("forbidden"));
     let forbidden_message_edit = call(
         &app,
         Request::UpdateMessage {

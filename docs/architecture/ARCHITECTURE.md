@@ -79,7 +79,7 @@ Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 The broker first sends a JSON handshake:
 
 ```json
-{"protocol":13,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+{"protocol":14,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
 ```
 
 All later messages use a 14-byte header:

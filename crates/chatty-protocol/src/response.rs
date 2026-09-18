@@ -33,6 +33,7 @@ pub enum Response {
     Users(Vec<UserAccount>),
     BrokerConfig(crate::admin::BrokerConfig),
     BrokerMonitor(crate::admin::BrokerMonitor),
+    BrokerLog(crate::admin::BrokerLog),
     OllamaState(crate::admin::OllamaState),
     AdminDatabase(Vec<crate::admin::AdminDataRow>),
     ServerCapabilities {

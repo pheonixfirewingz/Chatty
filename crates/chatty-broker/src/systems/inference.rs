@@ -630,13 +630,21 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         8192,
     );
     let memories = relevant_memories(&app.db, uid, cid, &sid, &immediate).await?;
+    debug!(
+        owner_id = uid,
+        conversation_id = cid,
+        character_id = sid,
+        memory_count = memories.len(),
+        memory_ids = ?memories.iter().map(|memory| memory.id.as_str()).collect::<Vec<_>>(),
+        "selected character memories for generation"
+    );
     let context =
         sqlx::query("SELECT CAST(state AS TEXT) AS state,summary FROM conversations WHERE id=?")
             .bind(cid)
             .fetch_one(&app.db)
             .await?;
     let system = format!(
-        "{}\nYou are {}.\nDescription: {}\nPersonality: {}\nAppearance: {}\nAge: {}\nGender: {}\nRace: {}\nMisc: {}\nScenario: {}\nExample dialogue:\n{}\nGroup participants:\n{}\nWorld state:\n{}\nStory summary:\n{}\nLore:\n{}\nMemory:\n{}",
+        "{}\nYou are {}.\nDescription: {}\nPersonality: {}\nAppearance: {}\nAge: {}\nGender: {}\nRace: {}\nMisc: {}\nScenario: {}\nExample dialogue:\n{}\nGroup participants:\n{}\nWorld state:\n{}\nStory summary:\n{}\nLore:\n{}\nLong-term memory:\n{}",
         clip(&character.get::<String, _>("system_prompt"), 16_384),
         character.get::<String, _>("name"),
         clip(&character.get::<String, _>("description"), 16_384),
@@ -1336,6 +1344,7 @@ mod character_image_selection_tests {
             snapshot_gate: Arc::new(RwLock::new(())),
             deltas,
             recent_errors: Arc::new(Mutex::new(Vec::new())),
+            log_path: Arc::new(PathBuf::new()),
             argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
             image_key: Arc::new([7; 32]),
         }

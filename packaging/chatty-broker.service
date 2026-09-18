@@ -12,6 +12,7 @@ StateDirectoryMode=0750
 WorkingDirectory=/var/lib/chatty
 ExecStart=/usr/local/bin/chatty-broker
 Environment=CHATTY_DATABASE=sqlite:///var/lib/chatty/chatty.db?mode=rwc
+Environment=CHATTY_LOG=/var/lib/chatty/chatty-boot.log
 Environment=CHATTY_CERT=/etc/chatty/server.pem
 Environment=CHATTY_KEY=/etc/chatty/server.key
 Environment=CHATTY_LLAMA_URL=http://192.168.0.97:11434/v1

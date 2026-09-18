@@ -133,6 +133,19 @@ pub(super) fn default_database_url() -> Result<String> {
     ))
 }
 
+pub(super) fn default_broker_log_path() -> Result<PathBuf> {
+    let data_dir = default_user_data_dir(
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+    .context(
+        "could not determine the Linux user data directory; set XDG_DATA_HOME, HOME, or CHATTY_LOG",
+    )?;
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("create application data directory {}", data_dir.display()))?;
+    Ok(data_dir.join("chatty-boot.log"))
+}
+
 pub(super) fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -9,6 +9,7 @@ WorkingDirectory=%h/.local/share/chatty
 ExecStart=%h/.local/libexec/chatty/chatty-broker
 Environment=CHATTY_LISTEN=0.0.0.0:7443
 Environment=CHATTY_DATABASE=sqlite://%h/.local/share/chatty/chatty.db?mode=rwc
+Environment=CHATTY_LOG=%h/.local/share/chatty/chatty-boot.log
 Environment=CHATTY_CERT=%h/.config/chatty/server.pem
 Environment=CHATTY_KEY=%h/.config/chatty/server.key
 Environment=CHATTY_LLAMA_URL=http://192.168.0.97:11434/v1

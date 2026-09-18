@@ -71,6 +71,15 @@ pub struct BrokerMonitor {
     pub recent_errors: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct BrokerLog {
+    /// Newest UTF-8 log text available within the response size bound.
+    pub content: String,
+    /// True when older lines from this boot were omitted from the response.
+    pub truncated: bool,
+    pub file_size_bytes: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterStatus {
     Disabled,

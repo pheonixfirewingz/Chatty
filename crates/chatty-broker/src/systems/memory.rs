@@ -2,6 +2,12 @@ use super::*;
 
 const MAX_MEMORY_CHARS: usize = 4_096;
 const RETRIEVED_MEMORY_CHARS: usize = 6_144;
+const MEMORY_USAGE_INSTRUCTIONS: &str = concat!(
+    "Treat the saved memories below as established long-term context. Apply relevant memories ",
+    "naturally in dialogue, decisions, preferences, and continuity, even when the user does not ",
+    "repeat them in the current message. Do not contradict them. Do not recite this list, mention ",
+    "a memory system, or force an unrelated memory into the response."
+);
 
 pub(super) fn memory_kind_from_i64(value: i64) -> Result<MemoryKind> {
     match value {
@@ -339,7 +345,10 @@ pub(super) async fn relevant_memories(
 }
 
 pub(super) fn memory_prompt(memories: &[MemoryEntry]) -> String {
-    memories
+    if memories.is_empty() {
+        return "No applicable saved memories.".into();
+    }
+    let entries = memories
         .iter()
         .map(|memory| {
             let scope = if memory.conversation_id.is_some() {
@@ -350,7 +359,8 @@ pub(super) fn memory_prompt(memories: &[MemoryEntry]) -> String {
             format!("- [{}, {}] {}", memory.kind.label(), scope, memory.content)
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    format!("{MEMORY_USAGE_INSTRUCTIONS}\nSaved memories:\n{entries}")
 }
 
 #[cfg(test)]
@@ -365,6 +375,29 @@ mod tests {
             Some("\"Alice\" OR \"Rowan\" OR \"gate\" OR \"met\" OR \"north\" OR \"the\"".into())
         );
         assert_eq!(fts_query("a I --"), None);
+    }
+
+    #[test]
+    fn prompt_tells_the_model_to_apply_saved_memory_as_continuity() {
+        let prompt = memory_prompt(&[MemoryEntry {
+            id: "memory".into(),
+            conversation_id: None,
+            character_id: Some("character".into()),
+            kind: MemoryKind::Fact,
+            content: "The user appreciates beautiful nighttime views.".into(),
+            importance: 50,
+            pinned: false,
+            confidence: 1.0,
+            source: MemorySource::Manual,
+            source_message_ids: Vec::new(),
+            created_at: "2026-09-18 00:00:00".into(),
+            updated_at: "2026-09-18 00:00:00".into(),
+            revision: 1,
+        }]);
+        assert!(prompt.contains("established long-term context"));
+        assert!(prompt.contains("even when the user does not repeat them"));
+        assert!(prompt.contains("The user appreciates beautiful nighttime views."));
+        assert!(!prompt.contains("No applicable saved memories"));
     }
 
     #[tokio::test]

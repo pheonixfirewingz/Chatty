@@ -519,6 +519,8 @@ struct ChattyApp {
     users: Vec<UserAccount>,
     broker_config: BrokerConfig,
     broker_monitor: Option<BrokerMonitor>,
+    admin_log: BrokerLog,
+    admin_log_search: String,
     ollama_state: Option<OllamaState>,
     ollama_pull_model: String,
     admin_data: Vec<AdminDataRow>,
@@ -631,6 +633,8 @@ impl ChattyApp {
                 allow_self_registration: true,
             },
             broker_monitor: None,
+            admin_log: BrokerLog::default(),
+            admin_log_search: String::new(),
             ollama_state: None,
             ollama_pull_model: String::new(),
             admin_data: vec![],
@@ -746,6 +750,8 @@ impl ChattyApp {
                     self.memory_dialog_open = false;
                     self.memory_editor_open = false;
                     self.memory_delete_confirmation = None;
+                    self.admin_log = BrokerLog::default();
+                    self.admin_log_search.clear();
                     self.char_import_pending = false;
                     self.char_import_started = None;
                     self.active_request = None;
@@ -770,6 +776,8 @@ impl ChattyApp {
                     self.memory_dialog_open = false;
                     self.memory_editor_open = false;
                     self.memory_delete_confirmation = None;
+                    self.admin_log = BrokerLog::default();
+                    self.admin_log_search.clear();
                     self.char_import_pending = false;
                     self.char_import_started = None;
                     self.active_request = None;
@@ -907,6 +915,7 @@ impl ChattyApp {
                         Response::AccountUsage(v) => self.account_usage = v,
                         Response::BrokerConfig(v) => self.broker_config = v,
                         Response::BrokerMonitor(v) => self.broker_monitor = Some(v),
+                        Response::BrokerLog(v) => self.admin_log = v,
                         Response::OllamaState(v) => self.ollama_state = Some(v),
                         Response::AdminDatabase(v) => self.admin_data = v,
                         Response::GenerationStarted { character_id, .. } => {
@@ -1285,6 +1294,17 @@ impl ChattyApp {
             adapter_latency_ms: Some(18),
             recent_errors: vec!["2026-08-24 14:32:07 UTC · Adapter request timed out".into()],
         });
+        self.admin_log = BrokerLog {
+            content: concat!(
+                "2026-08-24T14:30:00Z  INFO chatty_broker: boot log initialized\n",
+                "2026-08-24T14:30:01Z  INFO chatty_broker: TLS 1.3 broker listening address=0.0.0.0:7443\n",
+                "2026-08-24T14:30:02Z  INFO chatty_broker: inference backend ready models=[\"llama3.2:3b\"]\n",
+                "2026-08-24T14:32:07Z  WARN chatty_broker: connection closed peer=192.0.2.8 error=request timed out\n"
+            )
+            .into(),
+            truncated: false,
+            file_size_bytes: 412,
+        };
         self.ollama_state = Some(OllamaState {
             version: "0.12.6".into(),
             models: vec![
@@ -3009,6 +3029,51 @@ mod visual_tests {
         }
     }
 
+    #[test]
+    fn visual_admin_logs_desktop_and_compact() {
+        for (size, light_mode, path) in [
+            (
+                egui::vec2(1440.0, 900.0),
+                false,
+                "/tmp/chatty-admin-logs-desktop.png",
+            ),
+            (
+                egui::vec2(430.0, 760.0),
+                false,
+                "/tmp/chatty-admin-logs-compact.png",
+            ),
+            (
+                egui::vec2(375.0, 667.0),
+                true,
+                "/tmp/chatty-admin-logs-small-light.png",
+            ),
+            (
+                egui::vec2(760.0, 430.0),
+                false,
+                "/tmp/chatty-admin-logs-landscape.png",
+            ),
+        ] {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(size)
+                .build_eframe(move |creation| {
+                    configure_style_with_surface(&creation.egui_ctx, light_mode, false, 20);
+                    let (commands, _) = mpsc::unbounded_channel();
+                    let (_, events) = std::sync::mpsc::channel();
+                    let mut app = ChattyApp::new(commands, events);
+                    app.load_inspection_demo();
+                    app.light_mode = light_mode;
+                    app.screen = Screen::Admin;
+                    app.admin_tab = 3;
+                    app
+                });
+            harness
+                .render()
+                .expect("render admin logs UI")
+                .save(path)
+                .expect("save admin logs UI");
+        }
+    }
+
     fn render_ollama_admin(size: egui::Vec2, path: &str) {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(size)
@@ -3515,6 +3580,8 @@ impl ChattyApp {
                     self.worlds_open = false;
                     self.memories.clear();
                     self.memory_dialog_open = false;
+                    self.admin_log = BrokerLog::default();
+                    self.admin_log_search.clear();
                     self.token.clear();
                     self.role = None;
                 }

@@ -18,6 +18,9 @@ impl ChattyApp {
             2 => self.send(Request::AdminGetOllamaState {
                 session_token: self.token.clone(),
             }),
+            3 => self.send(Request::AdminReadBrokerLog {
+                session_token: self.token.clone(),
+            }),
             _ => self.send(Request::AdminReadDatabase {
                 session_token: self.token.clone(),
             }),
@@ -54,8 +57,11 @@ impl ChattyApp {
             .max_height(max_height)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for (index, label) in ["Broker", "Users", "Ollama", "Data"].iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    for (index, label) in ["Broker", "Users", "Ollama", "Logs", "Data"]
+                        .iter()
+                        .enumerate()
+                    {
                         if ui
                             .selectable_label(self.admin_tab == index, *label)
                             .clicked()
@@ -74,6 +80,7 @@ impl ChattyApp {
                         0 => self.render_admin_broker(ui),
                         1 => self.render_admin_users(ui),
                         2 => self.render_admin_ollama(ui),
+                        3 => self.render_admin_log(ui),
                         _ => self.render_admin_data(ui),
                     });
             });
@@ -441,6 +448,69 @@ impl ChattyApp {
             ui.add_space(6.0);
         }
     }
+    fn render_admin_log(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Broker log");
+            if ui.button("Refresh").clicked() {
+                self.send(Request::AdminReadBrokerLog {
+                    session_token: self.token.clone(),
+                });
+            }
+            if ui
+                .add_enabled(
+                    !self.admin_log.content.is_empty(),
+                    egui::Button::new("Copy all"),
+                )
+                .clicked()
+            {
+                ui.ctx().copy_text(self.admin_log.content.clone());
+            }
+        });
+        ui.label("Current broker boot only. Restarting the broker clears this log.");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.admin_log_search)
+                .hint_text("Filter log lines")
+                .desired_width(f32::INFINITY),
+        );
+        let size = human_bytes(self.admin_log.file_size_bytes);
+        if self.admin_log.truncated {
+            ui.weak(format!("{size} on disk · showing the newest 512 KiB"));
+        } else {
+            ui.weak(format!("{size} on disk · complete current-boot log"));
+        }
+        ui.add_space(6.0);
+        let filter = self.admin_log_search.trim().to_lowercase();
+        let visible = if filter.is_empty() {
+            self.admin_log.content.clone()
+        } else {
+            self.admin_log
+                .content
+                .lines()
+                .filter(|line| line.to_lowercase().contains(&filter))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .corner_radius(8.0)
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                if visible.is_empty() {
+                    ui.label(if filter.is_empty() {
+                        "No log entries have been written yet."
+                    } else {
+                        "No log lines match this filter."
+                    });
+                } else {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(visible).monospace())
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+            });
+    }
     fn render_admin_data(&mut self, ui: &mut egui::Ui) {
         if ui.button("Refresh").clicked() {
             self.load_admin_tab();
@@ -495,9 +565,14 @@ fn format_duration(s: u64) -> String {
 fn human_bytes(bytes: u64) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     const MIB: f64 = 1024.0 * 1024.0;
+    const KIB: f64 = 1024.0;
     if bytes as f64 >= GIB {
         format!("{:.1} GiB", bytes as f64 / GIB)
+    } else if bytes as f64 >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else if bytes as f64 >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB)
     } else {
-        format!("{:.0} MiB", bytes as f64 / MIB)
+        format!("{bytes} B")
     }
 }

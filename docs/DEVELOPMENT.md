@@ -55,6 +55,7 @@ Useful broker variables:
 |---|---|---|
 | `CHATTY_LISTEN` | `0.0.0.0:7443` in the broker; `127.0.0.1:7443` in the launcher | Listen address |
 | `CHATTY_DATABASE` | XDG data directory | SQLite URL |
+| `CHATTY_LOG` | XDG data directory | Current-boot broker log path |
 | `CHATTY_CERT` | `certs/server.pem` | Server certificate chain |
 | `CHATTY_KEY` | `certs/server.key` | Server private key |
 | `CHATTY_LLAMA_URL` | `http://192.168.0.97:11434/v1` | Initial adapter URL for a new database |
@@ -83,7 +84,7 @@ SQLite is authoritative. Mutations must:
 
 ## Protocol changes
 
-The broker sends a JSON handshake declaring protocol version `13`; all runtime requests, responses, errors, deltas, and stream chunks use bincode 2.
+The broker sends a JSON handshake declaring protocol version `14`; all runtime requests, responses, errors, deltas, and stream chunks use bincode 2.
 
 Any incompatible request/response/type-layout change must increment the handshake version and update broker and GUI together. Keep frames bounded to 8 MiB and preserve decompression bounds.
 

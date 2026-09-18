@@ -66,6 +66,7 @@ Defaults follow the XDG Base Directory Specification:
 | Data | Default location |
 |---|---|
 | Broker database | `$XDG_DATA_HOME/chatty/chatty.db` or `~/.local/share/chatty/chatty.db` |
+| Broker current-boot log | `$XDG_DATA_HOME/chatty/chatty-boot.log` or `~/.local/share/chatty/chatty-boot.log` |
 | GUI session and preferences | `$XDG_STATE_HOME/chatty/` or `~/.local/state/chatty/` |
 | Launcher broker log | `$XDG_STATE_HOME/chatty/broker.log` or `~/.local/state/chatty/broker.log` |
 | Per-server GUI CA | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.pem` or `~/.config/chatty/server-cas/<host>.ca.pem` |

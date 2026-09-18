@@ -1,5 +1,32 @@
 use super::*;
 
+pub(super) const MAX_ADMIN_LOG_RESPONSE_BYTES: u64 = 512 * 1024;
+
+pub(super) fn read_broker_log(path: &Path) -> Result<BrokerLog> {
+    let mut file =
+        File::open(path).with_context(|| format!("open broker boot log {}", path.display()))?;
+    let file_size_bytes = file.metadata()?.len();
+    let start = file_size_bytes.saturating_sub(MAX_ADMIN_LOG_RESPONSE_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(file_size_bytes.min(MAX_ADMIN_LOG_RESPONSE_BYTES)).unwrap_or(0),
+    );
+    file.take(MAX_ADMIN_LOG_RESPONSE_BYTES)
+        .read_to_end(&mut bytes)?;
+    if start > 0 {
+        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=newline);
+        } else {
+            bytes.clear();
+        }
+    }
+    Ok(BrokerLog {
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated: start > 0,
+        file_size_bytes,
+    })
+}
+
 pub(super) async fn broker_monitor(app: &App) -> BrokerMonitor {
     let memory_used_mb = std::fs::read_to_string("/proc/self/status")
         .ok()

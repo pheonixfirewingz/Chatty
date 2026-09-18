@@ -41,7 +41,7 @@ pub(super) async fn serve(
         MessageType::Handshake,
         0,
         serde_json::to_vec(
-            &json!({"protocol":13,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
+            &json!({"protocol":14,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
         )?
         .into(),
     ))
@@ -135,6 +135,7 @@ pub(super) async fn serve(
                     .await
                     {
                         let w = classify_error(&e);
+                        warn!(request_id = frame.request_id, error = %e, "request failed");
                         let mut errors = error_log.lock().await;
                         errors.push(format!("{} · {e}", current_utc_timestamp()));
                         if errors.len() > 20 {

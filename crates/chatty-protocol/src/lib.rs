@@ -15,7 +15,7 @@ pub mod util;
 
 pub use account::{Permission, Role, TokenUsage, UserAccount};
 pub use admin::{
-    AdapterStatus, AdminDataRow, BrokerConfig, BrokerMonitor, OllamaAction, OllamaModel,
+    AdapterStatus, AdminDataRow, BrokerConfig, BrokerLog, BrokerMonitor, OllamaAction, OllamaModel,
     OllamaRunningModel, OllamaState,
 };
 pub use character::{Character, CharacterImage, CharacterInput};

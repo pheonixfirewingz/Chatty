@@ -45,6 +45,9 @@ pub enum Request {
     AdminGetBrokerMonitor {
         session_token: String,
     },
+    AdminReadBrokerLog {
+        session_token: String,
+    },
     AdminSoftReboot {
         session_token: String,
     },

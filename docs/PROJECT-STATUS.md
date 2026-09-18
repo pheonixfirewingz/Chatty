@@ -38,12 +38,12 @@ Additional compiler warnings exist in the e2e smoke binary and the GUI inspectio
 | Area | Status | Notes |
 |---|---|---|
 | TLS broker/client transport | Working | TLS 1.3-only configuration with a pinned client CA |
-| Binary protocol | Working | JSON handshake, then bincode 2 frames; protocol version 13 |
+| Binary protocol | Working | JSON handshake, then bincode 2 frames; protocol version 14 |
 | Compression/backpressure | Working | zstd for streams/deltas and payloads at least 256 bytes; bounded writer queue |
 | Accounts and authorization | Working | Argon2 passwords, 30-day sessions, first-user admin, tenant-scoped data |
 | Direct character chat | Working in GUI | Streaming, cancellation, regenerate/delete, Markdown, automatic naming |
 | Character management | Working in GUI | Identity/card fields, avatar, tags, public sharing, JSON/PNG import |
-| Admin controls | Working in GUI | Users, policy, adapter configuration, monitoring, Ollama model actions |
+| Admin controls | Working in GUI | Users, policy, adapter configuration, monitoring, current-boot logs, Ollama model actions |
 | Reconnect and state sync | Working | Snapshot plus revision-based resume and same-owner live deltas |
 | Token accounting | Working | Prompt/completion totals include generation and auxiliary model calls |
 | Group conversations | Broker/protocol only | GUI hides group conversations |
