@@ -13,6 +13,7 @@ source_dir="$build_root/source"
 app_dir="$build_root/app"
 repo_dir="$build_root/repo"
 dist_dir="$project_dir/dist"
+onnxruntime_version=1.23.2
 
 if ! command -v flatpak >/dev/null 2>&1; then
     printf '%s\n' "Flatpak is required to build the release bundle." >&2
@@ -22,10 +23,29 @@ if ! command -v cargo >/dev/null 2>&1; then
     printf '%s\n' "Cargo is required to vendor the locked Rust dependencies." >&2
     exit 1
 fi
+if ! command -v curl >/dev/null 2>&1; then
+    printf '%s\n' "curl is required to download ONNX Runtime before entering the Flatpak build sandbox." >&2
+    exit 1
+fi
 if [[ -z "$arch" ]]; then
     printf '%s\n' "Could not determine the host Flatpak architecture." >&2
     exit 1
 fi
+
+case "$arch" in
+    x86_64)
+        onnxruntime_arch=x64
+        onnxruntime_sha256=1fa4dcaef22f6f7d5cd81b28c2800414350c10116f5fdd46a2160082551c5f9b
+        ;;
+    aarch64)
+        onnxruntime_arch=aarch64
+        onnxruntime_sha256=7c63c73560ed76b1fac6cff8204ffe34fe180e70d6582b5332ec094810241e5c
+        ;;
+    *)
+        printf 'Unsupported Flatpak architecture for ONNX Runtime: %s\n' "$arch" >&2
+        exit 1
+        ;;
+esac
 if ! flatpak info "$runtime//$runtime_branch" >/dev/null 2>&1 ||
    ! flatpak info "$sdk//$runtime_branch" >/dev/null 2>&1 ||
    ! flatpak info "$rust_sdk//$runtime_branch" >/dev/null 2>&1; then
@@ -60,6 +80,17 @@ cp -p -- "$project_dir/packaging/flatpak/$app_id.desktop" \
     "$project_dir/packaging/flatpak/$app_id.metainfo.xml" \
     "$project_dir/packaging/flatpak/$app_id.svg" \
     "$source_dir/packaging/flatpak/"
+
+onnxruntime_archive="$build_root/onnxruntime-linux-$onnxruntime_arch-$onnxruntime_version.tgz"
+onnxruntime_url="https://github.com/microsoft/onnxruntime/releases/download/v$onnxruntime_version/$(basename "$onnxruntime_archive")"
+if [[ ! -f "$onnxruntime_archive" ]] ||
+   ! printf '%s  %s\n' "$onnxruntime_sha256" "$onnxruntime_archive" | sha256sum --check --status; then
+    printf '%s\n' "Downloading ONNX Runtime $onnxruntime_version for $arch…"
+    curl --fail --location --retry 3 --output "$onnxruntime_archive" "$onnxruntime_url"
+fi
+printf '%s  %s\n' "$onnxruntime_sha256" "$onnxruntime_archive" | sha256sum --check --status
+mkdir -p "$source_dir/onnxruntime"
+tar -xzf "$onnxruntime_archive" --strip-components=1 -C "$source_dir/onnxruntime"
 (
     cd "$source_dir"
     cargo vendor --quiet --locked vendor
@@ -82,8 +113,12 @@ flatpak build \
         export CARGO_HOME=/run/build/chatty/.cargo-home
         export CARGO_TARGET_DIR=/run/build/chatty/target
         export PATH=/usr/lib/sdk/rust-stable/bin:$PATH
+        export ORT_LIB_LOCATION=/run/build/chatty/onnxruntime/lib
+        export ORT_PREFER_DYNAMIC_LINK=1
         cargo build --release --locked --offline -p chatty-gui
         install -Dm755 target/release/chatty-gui /app/bin/chatty-gui
+        mkdir -p /app/lib
+        cp -a onnxruntime/lib/libonnxruntime.so* /app/lib/
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.desktop /app/share/applications/io.github.pheonixfirewingz.Chatty.desktop
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.metainfo.xml /app/share/metainfo/io.github.pheonixfirewingz.Chatty.metainfo.xml
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.svg /app/share/icons/hicolor/scalable/apps/io.github.pheonixfirewingz.Chatty.svg

@@ -250,11 +250,18 @@ pub(super) fn load_transparency(path: &std::path::Path) -> u8 {
         .min(80)
 }
 
+pub(super) fn load_tts_auto_speak(path: &std::path::Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|value| value.lines().any(|line| line.trim() == "tts_auto_speak=true"))
+}
+
 pub(super) fn save_preferences(
     path: &std::path::Path,
     light_mode: bool,
     glass_mode: bool,
     transparency: u8,
+    tts_auto_speak: bool,
 ) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -264,7 +271,9 @@ pub(super) fn save_preferences(
     let transparency = transparency.min(80);
     let _ = fs::write(
         path,
-        format!("theme={theme}\nsurface={surface}\ntransparency={transparency}\n"),
+        format!(
+            "theme={theme}\nsurface={surface}\ntransparency={transparency}\ntts_auto_speak={tts_auto_speak}\n"
+        ),
     );
 }
 
@@ -903,8 +912,8 @@ mod tests {
         CertificateVerifier, Event, EventSender, PendingCertificate, SavedSession,
         certificate_fingerprint, default_server_ca_path, default_session_path,
         is_expected_post_logout_unauthorized, last_server_path, load_glass_mode, load_last_server,
-        load_light_mode, load_session, load_transparency, save_last_server, save_preferences,
-        save_session, take_accepted_generation,
+        load_light_mode, load_session, load_transparency, load_tts_auto_speak, save_last_server,
+        save_preferences, save_session, take_accepted_generation,
     };
     use chatty_protocol::{ErrorCode, Request, Response, WireError};
     use eframe::egui;
@@ -1109,15 +1118,17 @@ mod tests {
             std::process::id()
         ));
 
-        save_preferences(&path, true, true, 80);
+        save_preferences(&path, true, true, 80, true);
         assert!(load_light_mode(&path));
         assert!(load_glass_mode(&path));
         assert_eq!(load_transparency(&path), 80);
+        assert!(load_tts_auto_speak(&path));
 
-        save_preferences(&path, false, false, 25);
+        save_preferences(&path, false, false, 25, false);
         assert!(!load_light_mode(&path));
         assert!(!load_glass_mode(&path));
         assert_eq!(load_transparency(&path), 25);
+        assert!(!load_tts_auto_speak(&path));
         let _ = std::fs::remove_file(path);
     }
 

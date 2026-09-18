@@ -8,7 +8,9 @@ license.workspace = true
 chatty-protocol = { path = "../chatty-protocol" }
 eframe.workspace = true
 image.workspace = true
+kittentts = { version = "0.3.0", features = ["espeak"] }
 rfd.workspace = true
+rodio = { version = "0.21", default-features = false, features = ["playback"] }
 rustls.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

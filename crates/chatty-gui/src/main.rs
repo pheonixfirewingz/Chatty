@@ -23,6 +23,7 @@ mod admin_monitor;
 mod characters;
 mod conversation;
 mod network;
+mod tts;
 mod ui;
 mod worlds;
 use network::{Command, ConnectionTarget, Event, EventSender, PendingCertificate};
@@ -156,6 +157,9 @@ fn main() -> Result<()> {
     let transparency = preferences_path
         .as_deref()
         .map_or(20, network::load_transparency);
+    let tts_auto_speak = preferences_path
+        .as_deref()
+        .is_some_and(network::load_tts_auto_speak);
     let size = [args.width, args.height];
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -198,6 +202,7 @@ fn main() -> Result<()> {
             app.light_mode = light_mode;
             app.glass_mode = glass_mode;
             app.transparency = transparency;
+            app.tts_auto_speak = tts_auto_speak;
             app.preferences_path = preferences_path;
             if inspect {
                 app.load_inspection_demo();
@@ -516,6 +521,9 @@ struct ChattyApp {
     glass_mode: bool,
     transparency: u8,
     preferences_path: Option<PathBuf>,
+    tts: tts::LocalTts,
+    tts_auto_speak: bool,
+    pending_tts_message_id: Option<String>,
 }
 
 impl ChattyApp {
@@ -607,6 +615,9 @@ impl ChattyApp {
             glass_mode: false,
             transparency: 20,
             preferences_path: None,
+            tts: tts::LocalTts::new(),
+            tts_auto_speak: false,
+            pending_tts_message_id: None,
         }
     }
     fn send(&self, request: Request) {
@@ -820,6 +831,20 @@ impl ChattyApp {
                             self.selected_conversation = Some(v.conversation.id);
                             self.messages = v.messages;
                             self.stream_text.clear();
+                            if self.tts_auto_speak
+                                && let Some(message_id) = self.pending_tts_message_id.take()
+                                && let Some(message) = self
+                                    .messages
+                                    .iter()
+                                    .find(|message| message.id == message_id)
+                            {
+                                let text = Self::displayed_message_content(message).to_owned();
+                                if let Err(error) =
+                                    self.tts.speak(&text, message.author_id.as_deref())
+                                {
+                                    self.set_error(error);
+                                }
+                            }
                         }
                         Response::ConversationNotFound { conversation_id } => {
                             if self.selected_conversation.as_deref()
@@ -852,7 +877,12 @@ impl ChattyApp {
                         {
                             self.generation_status = Some(status);
                         }
-                        Response::GenerationFinished { revision, .. } => {
+                        Response::GenerationFinished {
+                            message_id,
+                            revision,
+                            cancelled,
+                        } => {
+                            self.pending_tts_message_id = (!cancelled).then_some(message_id);
                             self.finish_generation(revision);
                         }
                         Response::Accepted { revision, .. } => {
@@ -881,9 +911,14 @@ impl ChattyApp {
                 }
             }
             MessageType::StreamEnd => {
-                if let Ok(Response::GenerationFinished { revision, .. }) =
+                if let Ok(Response::GenerationFinished {
+                    message_id,
+                    revision,
+                    cancelled,
+                }) =
                     decode::<Response>(&frame.payload)
                 {
+                    self.pending_tts_message_id = (!cancelled).then_some(message_id);
                     self.finish_generation(revision);
                 } else {
                     self.active_request = None;
@@ -3467,6 +3502,7 @@ impl ChattyApp {
                                     self.light_mode,
                                     self.glass_mode,
                                     self.transparency,
+                                    self.tts_auto_speak,
                                 );
                             }
                             ctx.request_repaint();
@@ -3488,6 +3524,33 @@ impl ChattyApp {
                                 ui.strong(format_token_count(self.account_usage.total()));
                                 ui.end_row();
                             });
+                        ui.add_space(18.0);
+                        ui.separator();
+                        ui.heading("Speech");
+                        ui.label("Read AI character replies with a private neural model running on this device.");
+                        let previous_auto_speak = self.tts_auto_speak;
+                        ui.add_enabled_ui(self.tts.is_available(), |ui| {
+                            ui.checkbox(&mut self.tts_auto_speak, "Automatically read new replies");
+                        });
+                        match self.tts.engine_name() {
+                            Some(engine) => ui.weak(format!("Local engine: {engine}")),
+                            None => ui.weak("Local speech is unavailable."),
+                        };
+                        ui.weak("The 25 MB voice model downloads once, then works fully offline.");
+                        if self.tts.is_speaking() && ui.button("Stop speaking").clicked() {
+                            self.tts.stop();
+                        }
+                        if previous_auto_speak != self.tts_auto_speak
+                            && let Some(path) = &self.preferences_path
+                        {
+                            network::save_preferences(
+                                path,
+                                self.light_mode,
+                                self.glass_mode,
+                                self.transparency,
+                                self.tts_auto_speak,
+                            );
+                        }
                     });
             });
         if !open {

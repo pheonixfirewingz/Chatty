@@ -64,6 +64,19 @@ fn fragmented_sse_is_buffered_without_data_loss() {
 }
 
 #[test]
+fn sse_backend_errors_are_not_treated_as_empty_answers() {
+    let mut buffer = b"data: {\"error\":{\"message\":\"context window exceeded\"}}\n\n".to_vec();
+    let error = drain_sse(
+        &mut buffer,
+        &mut String::new(),
+        &mut String::new(),
+        &mut TokenUsage::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("context window exceeded"));
+}
+
+#[test]
 fn fragmented_ollama_stream_is_buffered_without_data_loss() {
     let mut buffer = br#"{"message":{"content":"hel"},"done":false}
 {"message":{"cont"#

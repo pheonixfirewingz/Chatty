@@ -326,6 +326,13 @@ pub(super) fn drain_sse(
         }
         let value: Value =
             serde_json::from_str(data).context("malformed llama-server SSE event")?;
+        if let Some(error) = value.get("error") {
+            let message = error["message"]
+                .as_str()
+                .or_else(|| error.as_str())
+                .unwrap_or("unknown backend error");
+            bail!("model generation failed: {message}")
+        }
         if let Some(value_usage) = value.get("usage") {
             usage.prompt_tokens = value_usage["prompt_tokens"]
                 .as_u64()

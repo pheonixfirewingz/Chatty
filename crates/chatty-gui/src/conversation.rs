@@ -482,6 +482,20 @@ impl ChattyApp {
                 self.editing_message_content = message.content.clone();
             }
             if !user {
+                let speak_rect = delete_rect.translate(egui::vec2(-82.0, 1.0));
+                if ui
+                    .put(
+                        speak_rect,
+                        egui::Button::new(egui::RichText::new("🔊").size(11.0)).frame(false),
+                    )
+                    .on_hover_text("Read aloud locally")
+                    .clicked()
+                {
+                    let text = Self::displayed_message_content(message).to_owned();
+                    if let Err(error) = self.tts.speak(&text, message.author_id.as_deref()) {
+                        self.set_error(error);
+                    }
+                }
                 let regenerate_rect = delete_rect.translate(egui::vec2(-54.0, 1.0));
                 if ui
                     .put(

@@ -2,6 +2,115 @@ use super::*;
 
 const MAX_LOREBOOK_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHARACTER_TEXT_BYTES: usize = 512 * 1024;
+const MESSAGE_OVERHEAD_TOKENS: usize = 4;
+const VERBATIM_HISTORY_MESSAGES: usize = 3;
+const COMPACTED_HISTORY_MESSAGES: usize = 20;
+const COMPACTED_MESSAGE_CHARS: usize = 512;
+
+// Tokenizers vary by model, and the broker deliberately does not depend on a
+// model-specific tokenizer. Three UTF-8 bytes per token is conservative for
+// ordinary prose and substantially safer than sending a fixed message count.
+fn estimated_message_tokens(content: &str) -> usize {
+    content.len().div_ceil(3) + MESSAGE_OVERHEAD_TOKENS
+}
+
+fn clip_to_token_budget(content: &str, tokens: usize) -> String {
+    let max_bytes = tokens.saturating_sub(MESSAGE_OVERHEAD_TOKENS) * 3;
+    if content.len() <= max_bytes {
+        return content.to_owned();
+    }
+    let mut end = max_bytes.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[..end].to_owned()
+}
+
+fn prompt_input_budget(config: &BrokerConfig) -> usize {
+    let context = config.num_ctx as usize;
+    let requested_output = usize::try_from(config.num_predict).unwrap_or(0);
+    let output_reserve = if requested_output > 0 {
+        requested_output.min(context / 2)
+    } else {
+        (context / 4).max(32).min(context / 2)
+    };
+    context.saturating_sub(output_reserve)
+}
+
+fn compact_history_content(content: &str) -> String {
+    let compacted = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(
+        "[Earlier turn, compacted] {}",
+        clip(&compacted, COMPACTED_MESSAGE_CHARS)
+    )
+}
+
+/// Keeps three verbatim turns and up to twenty compacted earlier turns within
+/// the configured model window. `history` is supplied newest-first and emitted
+/// in chronological order.
+fn budget_chat_messages(
+    system: &str,
+    history: impl IntoIterator<Item = (String, String)>,
+    input_budget: usize,
+) -> Result<Vec<Value>> {
+    let history = history
+        .into_iter()
+        .take(VERBATIM_HISTORY_MESSAGES + COMPACTED_HISTORY_MESSAGES)
+        .collect::<Vec<_>>();
+    let recent_history = history
+        .iter()
+        .take(VERBATIM_HISTORY_MESSAGES)
+        .collect::<Vec<_>>();
+    let recent_tokens = recent_history
+        .iter()
+        .map(|(_, content)| estimated_message_tokens(content))
+        .sum::<usize>();
+    if recent_tokens + MESSAGE_OVERHEAD_TOKENS > input_budget {
+        bail!("the latest three messages exceed the admin-configured context window")
+    }
+    let system_budget = (input_budget / 2)
+        .min(input_budget - recent_tokens)
+        .max(MESSAGE_OVERHEAD_TOKENS);
+    let system = clip_to_token_budget(system, system_budget);
+    let mut remaining = input_budget
+        .saturating_sub(estimated_message_tokens(&system))
+        .saturating_sub(recent_tokens);
+    let mut recent = recent_history
+        .into_iter()
+        .map(|(role, content)| json!({"role":role,"content":content}))
+        .collect::<Vec<_>>();
+    recent.reverse();
+
+    let mut compacted = Vec::new();
+    for (role, content) in history
+        .iter()
+        .skip(VERBATIM_HISTORY_MESSAGES)
+        .take(COMPACTED_HISTORY_MESSAGES)
+    {
+        if remaining <= MESSAGE_OVERHEAD_TOKENS {
+            break;
+        }
+        let content = compact_history_content(content);
+        let tokens = estimated_message_tokens(&content);
+        if tokens <= remaining {
+            remaining -= tokens;
+            compacted.push(json!({"role":role,"content":content}));
+        } else {
+            let content = clip_to_token_budget(&content, remaining);
+            if !content.is_empty() {
+                compacted.push(json!({"role":role,"content":content}));
+            }
+            break;
+        }
+    }
+    compacted.reverse();
+
+    let mut messages = Vec::with_capacity(compacted.len() + recent.len() + 1);
+    messages.push(json!({"role":"system","content":system}));
+    messages.extend(compacted);
+    messages.extend(recent);
+    Ok(messages)
+}
 
 fn debug_enabled() -> bool {
     std::env::var("CHATTY_DEBUG")
@@ -383,7 +492,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         .iter()
         .find(|r| r.get::<String, _>("id") == sid)
         .context("speaker is not a participant")?;
-    let recent=sqlx::query("SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 80").bind(cid).fetch_all(&app.db).await?;
+    let recent=sqlx::query("SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 23").bind(cid).fetch_all(&app.db).await?;
     let immediate = recent
         .iter()
         .take(6)
@@ -436,16 +545,16 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    let mut messages = vec![json!({"role":"system","content":system})];
-    for r in recent.iter().rev() {
+    let history = recent.iter().map(|r| {
         let author_type = r.get::<String, _>("author_type");
         let role = match author_type.as_str() {
             "user" => "user",
             "system" => "system",
             _ => "assistant",
         };
-        messages.push(json!({"role":role,"content":clip(&r.get::<String,_>("content"),8192)}));
-    }
+        (role.to_owned(), r.get::<String, _>("content"))
+    });
+    let messages = budget_chat_messages(&system, history, prompt_input_budget(&config))?;
     debug_messages("generate", &messages);
     let mid = new_uuid();
     tx.send((
@@ -612,6 +721,9 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     }
     record_token_usage(app, uid, usage).await?;
     debug_response("generate", &complete);
+    if !cancelled && complete.trim().is_empty() {
+        bail!("model returned an empty response; the context or output limit may be too small")
+    }
     let character_owner: String = character.get("owner_id");
     let character_images = decrypt_character_images(
         &app.image_key,
@@ -950,6 +1062,114 @@ fn resolve_character_image_id(images: &[CharacterImage], answer: &str) -> Option
     }
 
     None
+}
+
+#[cfg(test)]
+mod prompt_budget_tests {
+    use super::*;
+
+    #[test]
+    fn long_chats_keep_three_verbatim_and_twenty_compacted_turns() {
+        let history = (0..30)
+            .rev()
+            .map(|index| {
+                let role = if index % 2 == 0 { "user" } else { "assistant" };
+                (
+                    role.to_owned(),
+                    format!("turn-{index}\n{}", "spaced   history ".repeat(40)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected_recent = history[..3].to_vec();
+        let messages = budget_chat_messages("short system", history, 20_000).unwrap();
+
+        assert_eq!(messages.len(), 24);
+        for (offset, (role, content)) in expected_recent.iter().rev().enumerate() {
+            let message = &messages[21 + offset];
+            assert_eq!(message["role"], role.as_str());
+            assert_eq!(message["content"], content.as_str());
+        }
+        assert!(messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[Earlier turn, compacted] turn-7 spaced history"));
+        assert!(messages[20]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[Earlier turn, compacted] turn-26 spaced history"));
+        assert!(!messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("turn-6"))
+        }));
+    }
+
+    #[test]
+    fn compacted_history_stays_inside_the_admin_context_budget() {
+        let history = (0..80)
+            .rev()
+            .map(|index| {
+                let role = if index % 2 == 0 { "user" } else { "assistant" };
+                (role.to_owned(), format!("turn-{index} {}", "x".repeat(600)))
+            })
+            .collect::<Vec<_>>();
+        let messages =
+            budget_chat_messages(&"system ".repeat(2_000), history, 3_072).unwrap();
+        let total = messages
+            .iter()
+            .map(|message| estimated_message_tokens(message["content"].as_str().unwrap()))
+            .sum::<usize>();
+
+        assert!(total <= 3_072);
+        assert!(messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("turn-79"))
+        }));
+        assert_eq!(
+            messages.last().unwrap()["content"],
+            format!("turn-79 {}", "x".repeat(600))
+        );
+        assert!(!messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("turn-0"))
+        }));
+    }
+
+    #[test]
+    fn refuses_to_silently_truncate_the_three_verbatim_turns() {
+        let history = (0..3)
+            .map(|index| ("user".to_owned(), format!("turn-{index} {}", "x".repeat(900))))
+            .collect::<Vec<_>>();
+        let error = budget_chat_messages("system", history, 128).unwrap_err();
+        assert!(error.to_string().contains("admin-configured context window"));
+    }
+
+    #[test]
+    fn prompt_budget_reserves_output_space() {
+        let mut config = BrokerConfig {
+            adapter_enabled: true,
+            adapter_url: String::new(),
+            use_ollama_api: true,
+            model: String::new(),
+            temperature: 0.8,
+            top_p: 0.9,
+            top_k: 40,
+            num_ctx: 4_096,
+            num_predict: -1,
+            repeat_penalty: 1.1,
+            seed: -1,
+            keep_alive: "5m".into(),
+            allow_public_characters: false,
+            allow_self_registration: false,
+        };
+        assert_eq!(prompt_input_budget(&config), 3_072);
+        config.num_predict = 512;
+        assert_eq!(prompt_input_budget(&config), 3_584);
+        config.num_predict = 8_192;
+        assert_eq!(prompt_input_budget(&config), 2_048);
+    }
 }
 
 #[cfg(test)]
