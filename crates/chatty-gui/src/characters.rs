@@ -487,6 +487,12 @@ impl ChattyApp {
                     self.draft_character_open = false;
                 }
             }
+            if let Some(id) = self.draft.id.clone()
+                && ui.button("Memories").clicked()
+            {
+                self.draft_character_open = false;
+                self.open_memory_manager(Some(id), None);
+            }
             if self.draft.owned_by_user {
                 ui.toggle_value(&mut self.draft.is_public, "Public");
                 if ui.button("Save").clicked() {

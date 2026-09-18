@@ -79,7 +79,7 @@ Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 The broker first sends a JSON handshake:
 
 ```json
-{"protocol":11,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+{"protocol":13,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
 ```
 
 All later messages use a 14-byte header:
@@ -108,7 +108,7 @@ user message -> persist + delta -> compile context -> select speaker
              -> persist message/variant + token usage -> final delta
 ```
 
-The compiler combines system rules, the active character, bounded group participant cards, world lore, scoped memories, conversation state, summary, and selected recent message history. Owner-scoped worlds contain character links and facts. Common knowledge is selected first; other enabled facts match keywords in the latest six messages. Selection is recalculated for each reply and bounded to 8 KiB, without persisting retrieved facts as messages or memories.
+The compiler combines system rules, the active character, bounded group participant cards, world lore, scoped memories, conversation state, summary, and selected recent message history. Owner-scoped worlds contain character links and facts. Common knowledge is selected first; other enabled facts match keywords in the latest six messages. Character memories use SQLite FTS5 plus pinned state, importance, and recency to select at most ten relevant records within a fixed character budget. Automatic extraction runs after each six new root messages without delaying the streamed reply. Deleting a conversation promotes its memories to cross-chat character scope instead of deleting them.
 
 Stream output flushes after 32 whitespace-delimited units, 60 ms, or completion. Each connection has a 32-frame writer queue, which propagates backpressure. Cancellation keys include both connection ID and request ID to prevent cross-client cancellation.
 

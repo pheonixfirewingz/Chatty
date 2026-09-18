@@ -77,25 +77,12 @@ pub(super) async fn delete_owned_entity(
                     .bind(entity_id)
                     .fetch_all(&mut **transaction)
                     .await?;
-            let memories: Vec<String> = sqlx::query_scalar(
-                "SELECT id FROM memories WHERE conversation_id=? AND owner_id=?",
-            )
-            .bind(entity_id)
-            .bind(user_id)
-            .fetch_all(&mut **transaction)
-            .await?;
-            sqlx::query("DELETE FROM memories WHERE conversation_id=? AND owner_id=?")
-                .bind(entity_id)
-                .bind(user_id)
-                .execute(&mut **transaction)
-                .await?;
             sqlx::query("DELETE FROM conversations WHERE id=? AND owner_id=?")
                 .bind(entity_id)
                 .bind(user_id)
                 .execute(&mut **transaction)
                 .await?;
             deleted.extend(messages.into_iter().map(|id| ("message", id)));
-            deleted.extend(memories.into_iter().map(|id| ("memory", id)));
             deleted.push(("conversation", entity_id.into()));
         }
         EntityKind::Message => {
@@ -354,15 +341,10 @@ pub(super) async fn send_snapshot(
         tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
-    let mut memories=sqlx::query("SELECT id,conversation_id,character_id,content,revision FROM memories WHERE owner_id=? AND revision<=? ORDER BY id").bind(user_id).bind(snapshot_revision).fetch(&app.db);
+    let mut memories=sqlx::query("SELECT id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision FROM memories WHERE owner_id=? AND status=0 AND revision<=? ORDER BY id").bind(user_id).bind(snapshot_revision).fetch(&app.db);
     while let Some(row) = memories.try_next().await? {
         let entity_id: String = row.get("id");
-        let payload = DeltaPayload::Memory(MemoryInput {
-            id: Some(entity_id.clone()),
-            conversation_id: row.get("conversation_id"),
-            character_id: row.get("character_id"),
-            content: row.get("content"),
-        });
+        let payload = DeltaPayload::Memory(memory_entry_from_row(&row)?);
         let delta = StateDelta {
             revision: row.get("revision"),
             entity_type: "memory".into(),

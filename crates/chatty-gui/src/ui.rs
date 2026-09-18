@@ -6,6 +6,7 @@ use super::*;
 pub(super) enum FooterIcon {
     Characters,
     World,
+    Memory,
     Admin,
     Settings,
     SignOut,
@@ -164,6 +165,29 @@ impl ChattyApp {
                         ],
                         stroke,
                     ));
+                }
+                FooterIcon::Memory => {
+                    for offset in [-6.0, 0.0, 6.0] {
+                        painter.add(egui::Shape::ellipse_stroke(
+                            center + egui::vec2(0.0, offset),
+                            egui::vec2(9.0, 3.0),
+                            stroke,
+                        ));
+                    }
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(-9.0, -6.0),
+                            center + egui::vec2(-9.0, 6.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(9.0, -6.0),
+                            center + egui::vec2(9.0, 6.0),
+                        ],
+                        stroke,
+                    );
                 }
                 FooterIcon::Admin => {
                     let points = [

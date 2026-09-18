@@ -666,7 +666,10 @@ async fn cross_tenant_character_update_is_forbidden() {
                 id: None,
                 conversation_id: Some(cascade_id.clone()),
                 character_id: None,
+                kind: MemoryKind::Fact,
                 content: "memory".into(),
+                importance: 50,
+                pinned: false,
             },
         },
     )
@@ -682,7 +685,7 @@ async fn cross_tenant_character_update_is_forbidden() {
     )
     .await
     .unwrap();
-    for table in ["conversations", "messages", "memories"] {
+    for table in ["conversations", "messages"] {
         let sql = format!(
             "SELECT COUNT(*) FROM {table} WHERE {}=?",
             if table == "conversations" {
@@ -698,6 +701,14 @@ async fn cross_tenant_character_update_is_forbidden() {
             .unwrap();
         assert_eq!(count, 0, "{table} was not cascade-deleted");
     }
+    let preserved_memory: (i64, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*),MAX(conversation_id) FROM memories WHERE owner_id=(SELECT id FROM users WHERE username='first-user')",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(preserved_memory.0, 1);
+    assert_eq!(preserved_memory.1, None);
     let (kind, deleted_conversation) = call(
         &app,
         Request::GetConversation {
@@ -714,12 +725,14 @@ async fn cross_tenant_character_update_is_forbidden() {
             if conversation_id == cascade_id
     ));
     let delete_types:Vec<String>=sqlx::query_scalar("SELECT entity_type FROM deltas WHERE operation=2 AND owner_id=(SELECT id FROM users WHERE username='first-user')").fetch_all(&app.db).await.unwrap();
-    for expected in ["conversation", "message", "memory"] {
+    for expected in ["conversation", "message"] {
         assert!(
             delete_types.iter().any(|kind| kind == expected),
             "missing {expected} delete delta"
         );
     }
+    let memory_updates:i64=sqlx::query_scalar("SELECT COUNT(*) FROM deltas WHERE operation=1 AND entity_type='memory' AND owner_id=(SELECT id FROM users WHERE username='first-user')").fetch_one(&app.db).await.unwrap();
+    assert_eq!(memory_updates, 1, "preserved memory should receive an update delta");
     let (snapshot_tx, mut snapshot_rx) = mpsc::channel(64);
     let snapshot_app = app.clone();
     let snapshot_token = first_token.clone();

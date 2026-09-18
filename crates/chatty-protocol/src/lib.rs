@@ -28,7 +28,7 @@ pub use frame::{
     COMPRESSION_THRESHOLD, FLAG_ZSTD, Frame, HEADER_LEN, MAX_PAYLOAD, MessageType, ProtocolCodec,
     decode, encode, read_frame, write_message, write_payload,
 };
-pub use memory::{MemoryEntry, MemoryInput};
+pub use memory::{MemoryEntry, MemoryInput, MemoryKind, MemorySource};
 pub use request::Request;
 pub use response::{GenerationStatus, Response};
 pub use util::current_utc_timestamp;

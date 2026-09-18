@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::character::CharacterInput;
 use crate::conversation::ConversationKind;
-use crate::memory::MemoryInput;
+use crate::memory::MemoryEntry;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum DeltaOperation {
@@ -46,7 +46,7 @@ pub enum DeltaPayload {
         character_image_id: Option<String>,
     },
     World(crate::world::World),
-    Memory(MemoryInput),
+    Memory(MemoryEntry),
     Variant {
         message_id: String,
         content: String,

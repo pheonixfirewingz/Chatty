@@ -22,6 +22,7 @@ use tokio_rustls::{TlsConnector, client::TlsStream};
 mod admin_monitor;
 mod characters;
 mod conversation;
+mod memories;
 mod network;
 mod tts;
 mod ui;
@@ -483,6 +484,16 @@ struct ChattyApp {
     world_import_notice: Option<String>,
     world_entry_search: String,
     worlds_open: bool,
+    memories: Vec<MemoryEntry>,
+    memory_dialog_open: bool,
+    memory_search: String,
+    memory_character_filter: Option<String>,
+    memory_conversation_filter: Option<String>,
+    memory_kind_filter: Option<MemoryKind>,
+    memory_draft: MemoryInput,
+    memory_editor_open: bool,
+    memory_delete_confirmation: Option<String>,
+    memory_notice: Option<String>,
     conversations: Vec<Conversation>,
     messages: Vec<ChatMessage>,
     selected_conversation: Option<String>,
@@ -559,6 +570,24 @@ impl ChattyApp {
             world_import_notice: None,
             world_entry_search: String::new(),
             worlds_open: false,
+            memories: vec![],
+            memory_dialog_open: false,
+            memory_search: String::new(),
+            memory_character_filter: None,
+            memory_conversation_filter: None,
+            memory_kind_filter: None,
+            memory_draft: MemoryInput {
+                id: None,
+                conversation_id: None,
+                character_id: None,
+                kind: MemoryKind::Fact,
+                content: String::new(),
+                importance: 50,
+                pinned: false,
+            },
+            memory_editor_open: false,
+            memory_delete_confirmation: None,
+            memory_notice: None,
             conversations: vec![],
             messages: vec![],
             selected_conversation: None,
@@ -651,6 +680,11 @@ impl ChattyApp {
         self.send(Request::ListWorlds {
             session_token: self.token.clone(),
         });
+        self.send(Request::ListMemories {
+            session_token: self.token.clone(),
+            conversation_id: None,
+            character_id: None,
+        });
     }
     fn authenticated(&mut self, token: String, user_id: String, role: Role, revision: i64) {
         self.connected = true;
@@ -708,6 +742,10 @@ impl ChattyApp {
                     self.world_import_started = None;
                     self.world_import_notice = None;
                     self.worlds_open = false;
+                    self.memories.clear();
+                    self.memory_dialog_open = false;
+                    self.memory_editor_open = false;
+                    self.memory_delete_confirmation = None;
                     self.char_import_pending = false;
                     self.char_import_started = None;
                     self.active_request = None;
@@ -728,6 +766,10 @@ impl ChattyApp {
                     self.world_import_started = None;
                     self.world_import_notice = None;
                     self.worlds_open = false;
+                    self.memories.clear();
+                    self.memory_dialog_open = false;
+                    self.memory_editor_open = false;
+                    self.memory_delete_confirmation = None;
                     self.char_import_pending = false;
                     self.char_import_started = None;
                     self.active_request = None;
@@ -787,6 +829,7 @@ impl ChattyApp {
                             self.character_image_requests.clear();
                             self.characters = v;
                         }
+                        Response::Memories(v) => self.memories = v,
                         Response::CharacterImage {
                             character_id,
                             image_id,
@@ -887,8 +930,18 @@ impl ChattyApp {
                         }
                         Response::Accepted { revision, .. } => {
                             self.revision = self.revision.max(revision);
+                            if self.memory_notice.as_deref() == Some("Saving memory…") {
+                                self.memory_notice = Some("Memory saved.".into());
+                            } else if self.memory_notice.as_deref() == Some("Removing memory…") {
+                                self.memory_notice = Some("Memory removed.".into());
+                            } else if self.memory_notice.as_deref() == Some("Learning from chat…") {
+                                self.memory_notice = Some("New memory learned from the chat.".into());
+                            }
                             if !self.token.is_empty() {
                                 self.refresh();
+                                if self.memory_dialog_open {
+                                    self.request_filtered_memories();
+                                }
                                 if let Some(id) = self.selected_conversation.clone() {
                                     self.open_conversation(&id)
                                 }
@@ -936,6 +989,9 @@ impl ChattyApp {
                 self.world_import_started = None;
                 self.char_import_pending = false;
                 self.char_import_started = None;
+                if self.memory_notice.as_deref().is_some_and(|notice| notice.ends_with('…')) {
+                    self.memory_notice = None;
+                }
                 if let Ok(e) = decode::<WireError>(&frame.payload) {
                     let message = match e.code {
                         ErrorCode::BackendUnavailable | ErrorCode::ModelMissing => {
@@ -962,6 +1018,19 @@ impl ChattyApp {
             self.worlds.retain(|world| world.id != d.entity_id);
             if let Some(DeltaPayload::World(world)) = payload.as_ref() {
                 self.worlds.push(world.clone());
+            }
+        }
+        if d.entity_type == "memory" {
+            self.memories.retain(|memory| memory.id != d.entity_id);
+            if let Some(DeltaPayload::Memory(mut memory)) = payload.as_ref().cloned() {
+                memory.revision = d.revision;
+                self.memories.push(memory);
+                self.memories.sort_by(|left, right| {
+                    right
+                        .pinned
+                        .cmp(&left.pinned)
+                        .then_with(|| right.updated_at.cmp(&left.updated_at))
+                });
             }
         }
         if d.entity_type == "message" {
@@ -1157,6 +1226,40 @@ impl ChattyApp {
             revision: 1,
             variants: vec![],
         });
+        self.memories = vec![
+            MemoryEntry {
+                id: "memory-pinned".into(),
+                conversation_id: None,
+                character_id: Some("assistant".into()),
+                kind: MemoryKind::Fact,
+                content: "The user feels calmer when plans are explained one step at a time."
+                    .into(),
+                importance: 90,
+                pinned: true,
+                confidence: 1.0,
+                source: MemorySource::Manual,
+                source_message_ids: vec![],
+                created_at: "2026-08-20 09:10:00".into(),
+                updated_at: "2026-08-20 09:10:00".into(),
+                revision: 2,
+            },
+            MemoryEntry {
+                id: "memory-event".into(),
+                conversation_id: Some("demo".into()),
+                character_id: Some("assistant".into()),
+                kind: MemoryKind::Event,
+                content: "Mara and the user discovered the old observatory above the valley."
+                    .into(),
+                importance: 70,
+                pinned: false,
+                confidence: 0.88,
+                source: MemorySource::Automatic,
+                source_message_ids: vec!["m1".into(), "m2".into()],
+                created_at: "2026-08-24 14:30:00".into(),
+                updated_at: "2026-08-24 14:30:00".into(),
+                revision: 3,
+            },
+        ];
         self.messages.push(ChatMessage {
             id: "m2".into(),
             author_type: "character".into(),
@@ -1505,6 +1608,45 @@ mod visual_tests {
                 app.load_inspection_demo();
                 app
             })
+    }
+
+    fn memory_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
+        egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_eframe(|creation| {
+                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
+                let (commands, _) = mpsc::unbounded_channel();
+                let (_, events) = std::sync::mpsc::channel();
+                let mut app = ChattyApp::new(commands, events);
+                app.load_inspection_demo();
+                app.memory_dialog_open = true;
+                app
+            })
+    }
+
+    #[test]
+    fn visual_desktop_memory_manager() {
+        let mut harness = memory_harness(egui::vec2(1440.0, 900.0));
+        harness.run_ok();
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Add memory");
+        harness
+            .render()
+            .expect("render desktop memory manager")
+            .save("/tmp/chatty-memory-manager-desktop.png")
+            .expect("save desktop memory manager");
+    }
+
+    #[test]
+    fn visual_compact_memory_manager() {
+        let mut harness = memory_harness(egui::vec2(430.0, 760.0));
+        harness.run_ok();
+        let add = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Add memory");
+        assert!(add.rect().left() >= 0.0 && add.rect().right() <= 430.0);
+        harness
+            .render()
+            .expect("render compact memory manager")
+            .save("/tmp/chatty-memory-manager-compact.png")
+            .expect("save compact memory manager");
     }
 
     fn certificate_trust_harness(
@@ -2955,6 +3097,7 @@ impl eframe::App for ChattyApp {
                 }
             });
         let modal_open = self.worlds_open
+            || self.memory_dialog_open
             || self.draft_character_open
             || self.new_chat_open
             || matches!(self.screen, Screen::Admin | Screen::Settings)
@@ -2968,6 +3111,9 @@ impl eframe::App for ChattyApp {
         }
         if self.worlds_open {
             self.render_world_dialog(&ctx);
+        }
+        if self.memory_dialog_open {
+            self.render_memory_dialog(&ctx);
         }
         if self.draft_character_open {
             self.render_character_dialog(&ctx)
@@ -3304,7 +3450,12 @@ impl ChattyApp {
         ui.add_space(2.0);
         let mut remaining = ui.available_rect_before_wrap();
         remaining.max.y = (remaining.max.y - 12.0).max(remaining.min.y);
-        let footer_height = 90.0_f32.min(remaining.height());
+        let footer_height = if self.role == Some(Role::Admin) {
+            136.0_f32
+        } else {
+            90.0_f32
+        }
+        .min(remaining.height());
         let footer_rect = egui::Rect::from_min_max(
             egui::pos2(remaining.left(), remaining.bottom() - footer_height),
             remaining.max,
@@ -3325,7 +3476,7 @@ impl ChattyApp {
                     status.on_hover_text(detail);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if Self::footer_icon_button(ui, FooterIcon::Characters, "Manage characters")
                     .clicked()
                 {
@@ -3334,6 +3485,11 @@ impl ChattyApp {
                 }
                 if Self::footer_icon_button(ui, FooterIcon::World, "Manage world lore").clicked() {
                     self.worlds_open = true;
+                }
+                if Self::footer_icon_button(ui, FooterIcon::Memory, "Manage character memories")
+                    .clicked()
+                {
+                    self.open_memory_manager(None, None);
                 }
                 if self.role == Some(Role::Admin)
                     && Self::footer_icon_button(ui, FooterIcon::Admin, "Open admin portal")
@@ -3357,6 +3513,8 @@ impl ChattyApp {
                     self.worlds.clear();
                     self.world_draft = World::default();
                     self.worlds_open = false;
+                    self.memories.clear();
+                    self.memory_dialog_open = false;
                     self.token.clear();
                     self.role = None;
                 }
@@ -3383,6 +3541,12 @@ impl ChattyApp {
                                     self.sidebar_visible = false;
                                 }
                             }
+                            tile.context_menu(|ui| {
+                                if ui.button("View memories").clicked() {
+                                    self.open_memory_manager(None, Some(c.id.clone()));
+                                    ui.close();
+                                }
+                            });
                             let hovered = ui
                                 .input(|input| input.pointer.hover_pos())
                                 .is_some_and(|pointer| tile_rect.contains(pointer));

@@ -55,7 +55,7 @@ impl Link {
         // Handshake is the one JSON frame, sent unsolicited.
         let hello = read_frame(&mut link.stream).await?;
         let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
-        if hello.message_type != MessageType::Handshake || value["protocol"] != 12 {
+        if hello.message_type != MessageType::Handshake || value["protocol"] != 13 {
             bail!("bad handshake");
         }
         Ok(link)

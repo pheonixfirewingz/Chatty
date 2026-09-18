@@ -2,7 +2,7 @@
 
 Status date: 2026-09-08  
 Version: `0.1.0`  
-Wire protocol: `11`
+Wire protocol: `13`
 Release state: pre-release
 
 This status is derived from the current workspace, not from historical handoff claims.
@@ -38,7 +38,7 @@ Additional compiler warnings exist in the e2e smoke binary and the GUI inspectio
 | Area | Status | Notes |
 |---|---|---|
 | TLS broker/client transport | Working | TLS 1.3-only configuration with a pinned client CA |
-| Binary protocol | Working | JSON handshake, then bincode 2 frames; protocol version 12 |
+| Binary protocol | Working | JSON handshake, then bincode 2 frames; protocol version 13 |
 | Compression/backpressure | Working | zstd for streams/deltas and payloads at least 256 bytes; bounded writer queue |
 | Accounts and authorization | Working | Argon2 passwords, 30-day sessions, first-user admin, tenant-scoped data |
 | Direct character chat | Working in GUI | Streaming, cancellation, regenerate/delete, Markdown, automatic naming |

@@ -383,14 +383,19 @@ fn parse_character_import(content: &str) -> Result<CharacterInput> {
     })
 }
 
+pub(super) struct ExtractedMemory {
+    pub content: String,
+    pub source_message_ids: Vec<String>,
+}
+
 pub(super) async fn extract_memory(
     app: &App,
     user_id: &str,
     conversation_id: &str,
-) -> Result<String> {
+) -> Result<ExtractedMemory> {
     let model = selected_model(app).await?;
-    let recent: Vec<String> = sqlx::query_scalar(
-        "SELECT author_type || ': ' || COALESCE(v.content,m.content) FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 40",
+    let recent = sqlx::query(
+        "SELECT m.id,m.author_type,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 40",
     )
     .bind(conversation_id)
     .fetch_all(&app.db)
@@ -398,7 +403,22 @@ pub(super) async fn extract_memory(
     if recent.is_empty() {
         bail!("conversation has no history to extract")
     }
-    let transcript = recent.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let source_message_ids = recent
+        .iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect::<Vec<_>>();
+    let transcript = recent
+        .iter()
+        .rev()
+        .map(|row| {
+            format!(
+                "{}: {}",
+                row.get::<String, _>("author_type"),
+                row.get::<String, _>("content")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let messages = json!([
         {"role":"system","content":"Extract exactly one durable roleplay fact worth remembering from the transcript. Return only the fact as one concise sentence. Do not add labels, markdown, instructions, guesses, or private reasoning. If there is no durable fact, return NONE."},
         {"role":"user","content":transcript}
@@ -425,7 +445,97 @@ pub(super) async fn extract_memory(
         .as_str()
         .context("memory extraction response missing content")?;
     debug_response("extract_memory", content);
-    validate_extracted_memory(content)
+    Ok(ExtractedMemory {
+        content: validate_extracted_memory(content)?,
+        source_message_ids,
+    })
+}
+
+async fn maybe_extract_automatic_memory(
+    app: &App,
+    owner_id: &str,
+    conversation_id: &str,
+    character_id: &str,
+) -> Result<()> {
+    let latest_revision: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(revision),0) FROM messages WHERE conversation_id=? AND parent_id IS NULL",
+    )
+    .bind(conversation_id)
+    .fetch_one(&app.db)
+    .await?;
+    let previous_revision: i64 = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT last_message_revision FROM memory_extraction_state WHERE owner_id=? AND conversation_id=?),0)",
+    )
+    .bind(owner_id)
+    .bind(conversation_id)
+    .fetch_one(&app.db)
+    .await?;
+    let new_messages: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id=? AND parent_id IS NULL AND revision>?",
+    )
+    .bind(conversation_id)
+    .bind(previous_revision)
+    .fetch_one(&app.db)
+    .await?;
+    if new_messages < 6 {
+        return Ok(());
+    }
+    let claimed = sqlx::query(
+        "INSERT INTO memory_extraction_state(owner_id,conversation_id,last_message_revision) VALUES(?,?,?) \
+         ON CONFLICT(owner_id,conversation_id) DO UPDATE SET last_message_revision=excluded.last_message_revision \
+         WHERE memory_extraction_state.last_message_revision<?",
+    )
+    .bind(owner_id)
+    .bind(conversation_id)
+    .bind(latest_revision)
+    .bind(latest_revision)
+    .execute(&app.db)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        return Ok(());
+    }
+    let extracted = extract_memory(app, owner_id, conversation_id).await?;
+    let duplicate: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM memories WHERE owner_id=? AND status=0 AND character_id=? AND lower(content)=lower(?))",
+    )
+    .bind(owner_id)
+    .bind(character_id)
+    .bind(&extracted.content)
+    .fetch_one(&app.db)
+    .await?;
+    if duplicate {
+        return Ok(());
+    }
+    let (entry, operation, changed) = persist_memory(
+        app,
+        owner_id,
+        MemoryInput {
+            id: None,
+            conversation_id: Some(conversation_id.to_owned()),
+            character_id: Some(character_id.to_owned()),
+            kind: MemoryKind::Fact,
+            content: extracted.content,
+            importance: 50,
+            pinned: false,
+        },
+        MemorySource::Automatic,
+        0.8,
+        extracted.source_message_ids,
+    )
+    .await?;
+    let delta = StateDelta {
+        revision: entry.revision,
+        entity_type: "memory".into(),
+        entity_id: entry.id,
+        operation,
+        changed_fields: changed,
+    };
+    let _ = app.deltas.send(PublishedDelta {
+        owner_id: owner_id.to_owned(),
+        origin: String::new(),
+        encoded: encode(&delta)?.into(),
+    });
+    Ok(())
 }
 
 pub(super) fn validate_extracted_memory(value: &str) -> Result<String> {
@@ -505,7 +615,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         &immediate,
         8192,
     );
-    let memories:Vec<String>=sqlx::query_scalar("SELECT content FROM memories WHERE owner_id=? AND (conversation_id IS NULL OR conversation_id=?) AND (character_id IS NULL OR character_id=?) LIMIT 64").bind(uid).bind(cid).bind(&sid).fetch_all(&app.db).await?;
+    let memories = relevant_memories(&app.db, uid, cid, &sid, &immediate).await?;
     let context =
         sqlx::query("SELECT CAST(state AS TEXT) AS state,summary FROM conversations WHERE id=?")
             .bind(cid)
@@ -539,11 +649,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         clip(&context.get::<String, _>("state"), 32_768),
         clip(&context.get::<String, _>("summary"), 32_768),
         world_context,
-        memories
-            .iter()
-            .map(|memory| clip(memory, 4096))
-            .collect::<Vec<_>>()
-            .join("\n")
+        memory_prompt(&memories)
     );
     let history = recent.iter().map(|r| {
         let author_type = r.get::<String, _>("author_type");
@@ -790,6 +896,24 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         .into(),
     ))
     .await?;
+    if parent.is_none() && !cancelled {
+        let memory_app = app.clone();
+        let memory_owner = uid.to_owned();
+        let memory_conversation = cid.to_owned();
+        let memory_character = sid;
+        tokio::spawn(async move {
+            if let Err(error) = maybe_extract_automatic_memory(
+                &memory_app,
+                &memory_owner,
+                &memory_conversation,
+                &memory_character,
+            )
+            .await
+            {
+                warn!(%error, "automatic character memory extraction skipped");
+            }
+        });
+    }
     Ok(())
 }
 

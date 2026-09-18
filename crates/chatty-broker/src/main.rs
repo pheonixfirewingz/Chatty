@@ -37,6 +37,8 @@ mod auth;
 mod conversations;
 #[path = "systems/inference.rs"]
 mod inference;
+#[path = "systems/memory.rs"]
+mod memory;
 mod transport;
 mod utils;
 
@@ -44,6 +46,7 @@ use admin::*;
 use auth::*;
 use conversations::*;
 use inference::*;
+use memory::*;
 use transport::*;
 use utils::*;
 
@@ -829,11 +832,48 @@ async fn dispatch(
             entity_id,
         } => {
             let uid = auth(&app.db, &session_token).await?;
+            let mut promoted_memories = if matches!(kind, EntityKind::Conversation) {
+                list_memories(&app.db, &uid, Some(&entity_id), None).await?
+            } else {
+                Vec::new()
+            };
+            let now: String = sqlx::query_scalar("SELECT CURRENT_TIMESTAMP")
+                .fetch_one(&app.db)
+                .await?;
             let mut transaction = app.db.begin().await?;
-            let deletions = delete_owned_entity(&mut transaction, &uid, kind, &entity_id).await?;
-            let empty = encode(&DeltaPayload::Empty)?;
             let mut rev = 0;
             let mut outgoing = Vec::new();
+            for memory in &mut promoted_memories {
+                memory.conversation_id = None;
+                memory.updated_at.clone_from(&now);
+                let changed = encode(&DeltaPayload::Memory(memory.clone()))?;
+                rev = delta_tx(
+                    &mut transaction,
+                    &uid,
+                    "memory",
+                    &memory.id,
+                    DeltaOperation::Update,
+                    &changed,
+                )
+                .await?;
+                memory.revision = rev;
+                sqlx::query("UPDATE memories SET conversation_id=NULL,updated_at=?,revision=? WHERE id=? AND owner_id=?")
+                    .bind(&now)
+                    .bind(rev)
+                    .bind(&memory.id)
+                    .bind(&uid)
+                    .execute(&mut *transaction)
+                    .await?;
+                outgoing.push(StateDelta {
+                    revision: rev,
+                    entity_type: "memory".into(),
+                    entity_id: memory.id.clone(),
+                    operation: DeltaOperation::Update,
+                    changed_fields: changed,
+                });
+            }
+            let deletions = delete_owned_entity(&mut transaction, &uid, kind, &entity_id).await?;
+            let empty = encode(&DeltaPayload::Empty)?;
             for (entity_type, id) in deletions {
                 rev = delta_tx(
                     &mut transaction,
@@ -1015,21 +1055,13 @@ async fn dispatch(
             character_id,
         } => {
             let uid = auth(&app.db, &session_token).await?;
-            if let Some(cid) = &conversation_id {
-                own_conversation(&app.db, &uid, cid).await?;
-            }
-            let rows=sqlx::query("SELECT id,conversation_id,character_id,content,revision FROM memories WHERE owner_id=? AND (? IS NULL OR conversation_id=?) AND (? IS NULL OR character_id=?) ORDER BY revision DESC LIMIT 500")
-                .bind(&uid).bind(&conversation_id).bind(&conversation_id).bind(&character_id).bind(&character_id).fetch_all(&app.db).await?;
-            let entries = rows
-                .into_iter()
-                .map(|r| MemoryEntry {
-                    id: r.get("id"),
-                    conversation_id: r.get("conversation_id"),
-                    character_id: r.get("character_id"),
-                    content: r.get("content"),
-                    revision: r.get("revision"),
-                })
-                .collect();
+            let entries = list_memories(
+                &app.db,
+                &uid,
+                conversation_id.as_deref(),
+                character_id.as_deref(),
+            )
+            .await?;
             send!(MessageType::Response, Response::Memories(entries));
         }
         Request::UpsertCharacter {
@@ -1680,53 +1712,17 @@ async fn dispatch(
             memory,
         } => {
             let uid = auth(&app.db, &session_token).await?;
-            if memory.content.is_empty() || memory.content.len() > 65_536 {
-                bail!("memory size invalid")
-            }
-            if let Some(cid) = &memory.conversation_id {
-                own_conversation(&app.db, &uid, cid).await?;
-            }
-            if let Some(character_id) = &memory.character_id {
-                let owned: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM characters WHERE id=? AND (owner_id=? OR is_public=1))",
-                )
-                .bind(character_id)
-                .bind(&uid)
-                .fetch_one(&app.db)
-                .await?;
-                if !owned {
-                    bail!("memory character missing or forbidden")
-                }
-            }
-            let mut operation = DeltaOperation::Add;
-            if let Some(id) = &memory.id {
-                let allowed: bool = sqlx::query_scalar(
-                    "SELECT NOT EXISTS(SELECT 1 FROM memories WHERE id=? AND owner_id<>?)",
-                )
-                .bind(id)
-                .bind(&uid)
-                .fetch_one(&app.db)
-                .await?;
-                if !allowed {
-                    bail!("forbidden memory owner")
-                }
-                let owned: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM memories WHERE id=? AND owner_id=?)",
-                )
-                .bind(id)
-                .bind(&uid)
-                .fetch_one(&app.db)
-                .await?;
-                if owned {
-                    operation = DeltaOperation::Update;
-                }
-            }
-            let changed = encode(&DeltaPayload::Memory(memory.clone()))?;
-            let eid = memory.id.unwrap_or_else(new_uuid);
-            let mut transaction = app.db.begin().await?;
-            let rev = delta_tx(&mut transaction, &uid, "memory", &eid, operation, &changed).await?;
-            sqlx::query("INSERT INTO memories VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content,revision=excluded.revision WHERE owner_id=excluded.owner_id").bind(&eid).bind(&uid).bind(memory.conversation_id).bind(memory.character_id).bind(memory.content).bind(rev).execute(&mut *transaction).await?;
-            transaction.commit().await?;
+            let (entry, operation, changed) = persist_memory(
+                &app,
+                &uid,
+                memory,
+                MemorySource::Manual,
+                1.0,
+                Vec::new(),
+            )
+            .await?;
+            let eid = entry.id;
+            let rev = entry.revision;
             send_delta!(&uid, rev, "memory", eid, operation, changed);
             send!(
                 MessageType::Response,
@@ -1744,36 +1740,34 @@ async fn dispatch(
             let uid = auth(&app.db, &session_token).await?;
             own_conversation(&app.db, &uid, &conversation_id).await?;
             if let Some(character_id) = &character_id {
-                let participant: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id=? AND c.id=? AND c.owner_id=?)")
+                let participant: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id=? AND c.id=? AND (c.owner_id=? OR c.is_public=1))")
                     .bind(&conversation_id).bind(character_id).bind(&uid).fetch_one(&app.db).await?;
                 if !participant {
                     bail!("memory character is not a conversation participant")
                 }
             }
-            let content = extract_memory(&app, &uid, &conversation_id).await?;
+            let extracted = extract_memory(&app, &uid, &conversation_id).await?;
             let eid = new_uuid();
             let memory = MemoryInput {
                 id: Some(eid.clone()),
                 conversation_id: Some(conversation_id),
                 character_id,
-                content,
+                kind: MemoryKind::Fact,
+                content: extracted.content,
+                importance: 50,
+                pinned: false,
             };
-            let changed = encode(&DeltaPayload::Memory(memory.clone()))?;
-            let mut transaction = app.db.begin().await?;
-            let rev = delta_tx(
-                &mut transaction,
+            let (entry, operation, changed) = persist_memory(
+                &app,
                 &uid,
-                "memory",
-                &eid,
-                DeltaOperation::Add,
-                &changed,
+                memory,
+                MemorySource::Automatic,
+                0.8,
+                extracted.source_message_ids,
             )
             .await?;
-            sqlx::query("INSERT INTO memories(id,owner_id,conversation_id,character_id,content,revision) VALUES(?,?,?,?,?,?)")
-                .bind(&eid).bind(&uid).bind(&memory.conversation_id).bind(&memory.character_id).bind(&memory.content).bind(rev)
-                .execute(&mut *transaction).await?;
-            transaction.commit().await?;
-            send_delta!(&uid, rev, "memory", eid, DeltaOperation::Add, changed);
+            let rev = entry.revision;
+            send_delta!(&uid, rev, "memory", eid, operation, changed);
             send!(
                 MessageType::Response,
                 Response::Accepted {
