@@ -388,6 +388,20 @@ pub(super) struct ExtractedMemory {
     pub source_message_ids: Vec<String>,
 }
 
+pub(super) const MEMORY_EXTRACTION_INSTRUCTIONS: &str = concat!(
+    "Infer exactly one durable memory worth carrying into future roleplay from the transcript. ",
+    "Read the messages in order and combine evidence across turns. Resolve references such as ",
+    "'it', 'that place', and 'the view you provide' from earlier context. The memory may be an ",
+    "explicitly stated fact or a strongly supported indirect preference, relationship development, ",
+    "promise, personal detail, or meaningful shared event. Prefer a useful memory about the user ",
+    "or their relationship with the character. Generalize away temporary wording when the durable ",
+    "meaning is clear; for example, repeated praise of a palace at night and its view can support ",
+    "'The user appreciates beautiful nighttime views.' Use only evidence present in the transcript: ",
+    "do not invent motives, certainty, names, or details that are merely possible. Return only one ",
+    "concise, self-contained sentence with no labels, markdown, instructions, or private reasoning. ",
+    "If nothing durable is explicitly stated or strongly supported, return NONE."
+);
+
 pub(super) async fn extract_memory(
     app: &App,
     user_id: &str,
@@ -420,7 +434,7 @@ pub(super) async fn extract_memory(
         .collect::<Vec<_>>()
         .join("\n");
     let messages = json!([
-        {"role":"system","content":"Extract exactly one durable roleplay fact worth remembering from the transcript. Return only the fact as one concise sentence. Do not add labels, markdown, instructions, guesses, or private reasoning. If there is no durable fact, return NONE."},
+        {"role":"system","content":MEMORY_EXTRACTION_INSTRUCTIONS},
         {"role":"user","content":transcript}
     ]);
     debug_json("extract_memory", &messages);

@@ -145,6 +145,14 @@ fn extracted_memory_is_bounded_and_rejects_empty_results() {
     assert!(validate_extracted_memory(&"x".repeat(1025)).is_err());
 }
 
+#[test]
+fn memory_extraction_instruction_supports_grounded_indirect_inference() {
+    assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("combine evidence across turns"));
+    assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("strongly supported indirect preference"));
+    assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("do not invent"));
+    assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("The user appreciates beautiful nighttime views."));
+}
+
 async fn call(app: &App, request: Request) -> Result<(MessageType, Bytes)> {
     let (tx, mut rx) = mpsc::channel(32);
     let dispatch_app = app.clone();
