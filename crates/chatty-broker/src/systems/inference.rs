@@ -16,6 +16,9 @@ fn estimated_message_tokens(content: &str) -> usize {
 
 fn clip_to_token_budget(content: &str, tokens: usize) -> String {
     let max_bytes = tokens.saturating_sub(MESSAGE_OVERHEAD_TOKENS) * 3;
+    if max_bytes == 0 {
+        return String::new();
+    }
     if content.len() <= max_bytes {
         return content.to_owned();
     }
@@ -24,6 +27,45 @@ fn clip_to_token_budget(content: &str, tokens: usize) -> String {
         end -= 1;
     }
     content[..end].to_owned()
+}
+
+fn clip_to_byte_budget(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_owned();
+    }
+    let mut end = max_bytes.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[..end].to_owned()
+}
+
+/// Gives selected long-term memory a protected share of the system-message
+/// budget. Memory used to be appended to a large system string and could be
+/// silently removed whenever that string was clipped from the end.
+fn budget_system_prompt(system: &str, priority_context: &str, tokens: usize) -> String {
+    const SEPARATOR: &str = "\n[Additional character context clipped to fit the model window]\n";
+
+    let max_bytes = tokens.saturating_sub(MESSAGE_OVERHEAD_TOKENS) * 3;
+    if max_bytes == 0 {
+        return String::new();
+    }
+    if system.len() + priority_context.len() + 1 <= max_bytes {
+        return format!("{system}\n{priority_context}");
+    }
+
+    let priority_cap = max_bytes.saturating_mul(2) / 3;
+    let priority = clip_to_byte_budget(priority_context, priority_cap);
+    let separator = if system.len() > max_bytes.saturating_sub(priority.len() + 1)
+        && priority.len() + SEPARATOR.len() <= max_bytes
+    {
+        SEPARATOR
+    } else {
+        "\n"
+    };
+    let system_cap = max_bytes.saturating_sub(priority.len() + separator.len());
+    let system = clip_to_byte_budget(system, system_cap);
+    format!("{system}{separator}{priority}")
 }
 
 fn prompt_input_budget(config: &BrokerConfig) -> usize {
@@ -50,6 +92,7 @@ fn compact_history_content(content: &str) -> String {
 /// in chronological order.
 fn budget_chat_messages(
     system: &str,
+    priority_context: &str,
     history: impl IntoIterator<Item = (String, String)>,
     input_budget: usize,
 ) -> Result<Vec<Value>> {
@@ -71,7 +114,7 @@ fn budget_chat_messages(
     let system_budget = (input_budget / 2)
         .min(input_budget - recent_tokens)
         .max(MESSAGE_OVERHEAD_TOKENS);
-    let system = clip_to_token_budget(system, system_budget);
+    let system = budget_system_prompt(system, priority_context, system_budget);
     let mut remaining = input_budget
         .saturating_sub(estimated_message_tokens(&system))
         .saturating_sub(recent_tokens);
@@ -119,17 +162,17 @@ fn debug_enabled() -> bool {
 }
 
 fn debug_messages(label: &str, messages: &[Value]) {
-    if !debug_enabled() {
-        return;
-    }
-    eprintln!("[DEBUG] === {label} prompt ===");
     for (i, msg) in messages.iter().enumerate() {
         let role = msg["role"].as_str().unwrap_or("?");
         let content = msg["content"].as_str().unwrap_or("");
-        eprintln!("[DEBUG] {role}: {content}");
-        if i < messages.len() - 1 {
-            eprintln!("[DEBUG] ---");
-        }
+        info!(
+            ai_operation = label,
+            prompt_message_index = i,
+            prompt_message_count = messages.len(),
+            role,
+            content = %content,
+            "AI prompt message"
+        );
     }
 }
 
@@ -137,23 +180,14 @@ fn debug_response(label: &str, text: &str) {
     if !debug_enabled() {
         return;
     }
-    eprintln!("[DEBUG] === {label} response ===");
-    eprintln!("[DEBUG] {text}");
+    debug!(ai_operation = label, content = %text, "AI response");
 }
 
 fn debug_json(label: &str, payload: &Value) {
-    if !debug_enabled() {
-        return;
-    }
-    eprintln!("[DEBUG] === {label} prompt ===");
     if let Some(arr) = payload.as_array() {
-        for msg in arr {
-            let role = msg["role"].as_str().unwrap_or("?");
-            let content = msg["content"].as_str().unwrap_or("");
-            eprintln!("[DEBUG] {role}: {content}");
-        }
+        debug_messages(label, arr);
     } else {
-        eprintln!("[DEBUG] {payload}");
+        info!(ai_operation = label, content = %payload, "AI prompt payload");
     }
 }
 
@@ -630,7 +664,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         8192,
     );
     let memories = relevant_memories(&app.db, uid, cid, &sid, &immediate).await?;
-    debug!(
+    info!(
         owner_id = uid,
         conversation_id = cid,
         character_id = sid,
@@ -644,7 +678,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             .fetch_one(&app.db)
             .await?;
     let system = format!(
-        "{}\nYou are {}.\nDescription: {}\nPersonality: {}\nAppearance: {}\nAge: {}\nGender: {}\nRace: {}\nMisc: {}\nScenario: {}\nExample dialogue:\n{}\nGroup participants:\n{}\nWorld state:\n{}\nStory summary:\n{}\nLore:\n{}\nLong-term memory:\n{}",
+        "{}\nYou are {}.\nDescription: {}\nPersonality: {}\nAppearance: {}\nAge: {}\nGender: {}\nRace: {}\nMisc: {}\nScenario: {}\nExample dialogue:\n{}\nGroup participants:\n{}\nWorld state:\n{}\nStory summary:\n{}\nLore:\n{}",
         clip(&character.get::<String, _>("system_prompt"), 16_384),
         character.get::<String, _>("name"),
         clip(&character.get::<String, _>("description"), 16_384),
@@ -670,9 +704,9 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             .join(", "),
         clip(&context.get::<String, _>("state"), 32_768),
         clip(&context.get::<String, _>("summary"), 32_768),
-        world_context,
-        memory_prompt(&memories)
+        world_context
     );
+    let prioritized_memory = format!("Long-term memory:\n{}", memory_prompt(&memories));
     let history = recent.iter().map(|r| {
         let author_type = r.get::<String, _>("author_type");
         let role = match author_type.as_str() {
@@ -682,7 +716,12 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         };
         (role.to_owned(), r.get::<String, _>("content"))
     });
-    let messages = budget_chat_messages(&system, history, prompt_input_budget(&config))?;
+    let messages = budget_chat_messages(
+        &system,
+        &prioritized_memory,
+        history,
+        prompt_input_budget(&config),
+    )?;
     debug_messages("generate", &messages);
     let mid = new_uuid();
     tx.send((
@@ -1227,7 +1266,9 @@ mod prompt_budget_tests {
             })
             .collect::<Vec<_>>();
         let expected_recent = history[..3].to_vec();
-        let messages = budget_chat_messages("short system", history, 20_000).unwrap();
+        let messages =
+            budget_chat_messages("short system", "Long-term memory:\nnone", history, 20_000)
+                .unwrap();
 
         assert_eq!(messages.len(), 24);
         for (offset, (role, content)) in expected_recent.iter().rev().enumerate() {
@@ -1259,8 +1300,13 @@ mod prompt_budget_tests {
                 (role.to_owned(), format!("turn-{index} {}", "x".repeat(600)))
             })
             .collect::<Vec<_>>();
-        let messages =
-            budget_chat_messages(&"system ".repeat(2_000), history, 3_072).unwrap();
+        let messages = budget_chat_messages(
+            &"system ".repeat(2_000),
+            "Long-term memory:\nnone",
+            history,
+            3_072,
+        )
+        .unwrap();
         let total = messages
             .iter()
             .map(|message| estimated_message_tokens(message["content"].as_str().unwrap()))
@@ -1288,8 +1334,25 @@ mod prompt_budget_tests {
         let history = (0..3)
             .map(|index| ("user".to_owned(), format!("turn-{index} {}", "x".repeat(900))))
             .collect::<Vec<_>>();
-        let error = budget_chat_messages("system", history, 128).unwrap_err();
+        let error =
+            budget_chat_messages("system", "Long-term memory:\nnone", history, 128).unwrap_err();
         assert!(error.to_string().contains("admin-configured context window"));
+    }
+
+    #[test]
+    fn clipping_preserves_selected_long_term_memory() {
+        let system = format!("Character instructions.\n{}", "background ".repeat(4_000));
+        let priority = format!(
+            "Long-term memory:\n- [fact, all conversations] {}\n{}",
+            "The user always orders jasmine tea.",
+            "less relevant memory. ".repeat(500)
+        );
+        let messages = budget_chat_messages(&system, &priority, Vec::new(), 1_024).unwrap();
+        let sent_system = messages[0]["content"].as_str().unwrap();
+
+        assert!(sent_system.contains("Character instructions."));
+        assert!(sent_system.contains("The user always orders jasmine tea."));
+        assert!(estimated_message_tokens(sent_system) <= 512);
     }
 
     #[test]

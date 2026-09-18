@@ -175,7 +175,7 @@ fn init_boot_logging(path: &Path) -> Result<()> {
         .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("chatty_broker=info".parse()?),
+                .add_directive("chatty_broker=trace".parse()?),
         )
         .with_writer(move || BootLogWriter {
             file: Arc::clone(&file),

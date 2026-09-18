@@ -466,7 +466,9 @@ impl ChattyApp {
                 ui.ctx().copy_text(self.admin_log.content.clone());
             }
         });
-        ui.label("Current broker boot only. Restarting the broker clears this log.");
+        ui.label(
+            "Current broker boot only. Includes full AI prompts and may contain private chat data. Restarting the broker clears this log.",
+        );
         ui.add(
             egui::TextEdit::singleline(&mut self.admin_log_search)
                 .hint_text("Filter log lines")
