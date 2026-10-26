@@ -41,7 +41,7 @@ pub(super) async fn serve(
         MessageType::Handshake,
         0,
         serde_json::to_vec(
-            &json!({"protocol":15,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
+            &json!({"protocol":17,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
         )?
         .into(),
     ))
@@ -82,93 +82,104 @@ pub(super) async fn serve(
     });
     let idle = tokio::time::sleep(IDLE_CLOSE);
     tokio::pin!(idle);
-    loop {
-        let incoming = tokio::select! {
-            frame = read_frame(&mut rd) => {
-                last_activity.store(unix_ms(), Ordering::Relaxed);
-                idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
-                frame
-            }
-            changed = lag_rx.changed() => {
-                if changed.is_ok() && *lag_rx.borrow() {
-                    break;
-                }
-                continue;
-            }
-            _ = &mut idle => {
-                let recent = unix_ms().saturating_sub(last_activity.load(Ordering::Relaxed))
-                    < IDLE_CLOSE.as_millis() as u64;
-                if recent || busy.load(Ordering::Relaxed) > 0 {
-                    // Outbound traffic or an in-flight generation/model action
-                    // (model loads and downloads can stay silent) keeps the
-                    // connection warm; wait out the remaining quiet period.
+    let connection_result: Result<()> = async {
+        loop {
+            let incoming = tokio::select! {
+                frame = read_frame(&mut rd) => {
+                    last_activity.store(unix_ms(), Ordering::Relaxed);
                     idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
+                    frame
+                }
+                changed = lag_rx.changed() => {
+                    if changed.is_ok() && *lag_rx.borrow() {
+                        break;
+                    }
                     continue;
                 }
-                break;
-            }
-        };
-        let frame = match incoming {
-            Ok(f) => f,
-            Err(ProtocolError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
-        };
-        match frame.message_type {
-            MessageType::Request => {
-                let req: Request = decode(&frame.payload)?;
-                let app = app.clone();
-                let error_log = app.recent_errors.clone();
-                let tx = tx.clone();
-                let identity = identity.clone();
-                let busy = busy.clone();
-                let connection_id = connection_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = dispatch(
-                        app,
-                        tx.clone(),
-                        identity,
-                        connection_id,
-                        frame.request_id,
-                        req,
-                        busy,
-                    )
-                    .await
-                    {
-                        let w = classify_error(&e);
-                        warn!(request_id = frame.request_id, error = %e, "request failed");
-                        let mut errors = error_log.lock().await;
-                        errors.push(format!("{} · {e}", current_utc_timestamp()));
-                        if errors.len() > 20 {
-                            errors.remove(0);
-                        }
-                        let _ = tx
-                            .send((
-                                MessageType::Error,
-                                frame.request_id,
-                                encode(&w).unwrap_or_default().into(),
-                            ))
-                            .await;
+                _ = &mut idle => {
+                    let recent = unix_ms().saturating_sub(last_activity.load(Ordering::Relaxed))
+                        < IDLE_CLOSE.as_millis() as u64;
+                    if recent || busy.load(Ordering::Relaxed) > 0 {
+                        // Outbound traffic or an in-flight generation/model action
+                        // (model loads and downloads can stay silent) keeps the
+                        // connection warm; wait out the remaining quiet period.
+                        idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
+                        continue;
                     }
-                });
-            }
-            MessageType::Cancel => {
-                if let Some(cancel) = app
-                    .cancellations
-                    .lock()
-                    .await
-                    .remove(&(connection_id.clone(), frame.request_id))
-                {
-                    let _ = cancel.send(true);
+                    break;
                 }
+            };
+            let frame = match incoming {
+                Ok(f) => f,
+                Err(ProtocolError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            };
+            match frame.message_type {
+                MessageType::Request => {
+                    let req: Request = decode(&frame.payload)?;
+                    let app = app.clone();
+                    let error_log = app.recent_errors.clone();
+                    let tx = tx.clone();
+                    let identity = identity.clone();
+                    let busy = busy.clone();
+                    let connection_id = connection_id.clone();
+                    let control =
+                        dispatch_control(&app, &connection_id, frame.request_id, &req, busy).await;
+                    tokio::spawn(async move {
+                        let cancellations = app.cancellations.clone();
+                        let key = (connection_id.clone(), frame.request_id);
+                        let result = dispatch(
+                            app,
+                            tx.clone(),
+                            identity,
+                            connection_id,
+                            frame.request_id,
+                            req,
+                            control,
+                        )
+                        .await;
+                        cancellations.lock().await.remove(&key);
+                        if let Err(e) = result {
+                            let w = classify_error(&e);
+                            warn!(request_id = frame.request_id, error = %e, "request failed");
+                            let mut errors = error_log.lock().await;
+                            errors.push(format!("{} · {e}", current_utc_timestamp()));
+                            if errors.len() > 20 {
+                                errors.remove(0);
+                            }
+                            let _ = tx
+                                .send((
+                                    MessageType::Error,
+                                    frame.request_id,
+                                    encode(&w).unwrap_or_default().into(),
+                                ))
+                                .await;
+                        }
+                    });
+                }
+                MessageType::Cancel => {
+                    if let Some(cancel) = app
+                        .cancellations
+                        .lock()
+                        .await
+                        .remove(&(connection_id.clone(), frame.request_id))
+                    {
+                        let _ = cancel.send(true);
+                    }
+                }
+                _ => return Err(ProtocolError::Invalid("unexpected client message").into()),
             }
-            _ => return Err(ProtocolError::Invalid("unexpected client message").into()),
         }
+        Ok(())
     }
+    .await;
     forwarder.abort();
     drop(tx);
     cancel_connection(&app.cancellations, connection_id).await;
-    writer.await??;
+    let writer_result = writer.await;
     ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+    connection_result?;
+    writer_result??;
     Ok(())
 }
 

@@ -136,12 +136,13 @@ pub(super) async fn adapter_health(app: &App) -> (AdapterStatus, u32, Option<u64
 }
 
 pub(super) async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> {
-    let row = sqlx::query("SELECT adapter_enabled,adapter_url,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration FROM broker_settings WHERE singleton=1")
+    let row = sqlx::query("SELECT adapter_enabled,adapter_url,adapter_plugin,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration FROM broker_settings WHERE singleton=1")
         .fetch_one(db)
         .await?;
     Ok(BrokerConfig {
         adapter_enabled: row.get("adapter_enabled"),
         adapter_url: row.get("adapter_url"),
+        adapter_plugin: row.get("adapter_plugin"),
         use_ollama_api: row.get("use_ollama_api"),
         model: row.get("model"),
         temperature: row.get("temperature"),
@@ -217,6 +218,17 @@ pub(super) async fn load_ollama_state(app: &App) -> Result<OllamaState> {
 
 pub(super) async fn run_ollama_action(app: &App, action: OllamaAction) -> Result<()> {
     let config = load_broker_config(&app.db).await?;
+    let model = match &action {
+        OllamaAction::Pull { model }
+        | OllamaAction::Delete { model }
+        | OllamaAction::Load { model }
+        | OllamaAction::Unload { model } => model,
+    };
+    let _operation = app.adapters.reserve_model_operation(
+        &config,
+        model,
+        matches!(&action, OllamaAction::Pull { .. }),
+    )?;
     let action = match action {
         OllamaAction::Pull { model } => crate::adapter_api::ModelAction::Pull { model },
         OllamaAction::Delete { model } => crate::adapter_api::ModelAction::Delete { model },
@@ -249,4 +261,64 @@ pub(super) async fn search_hugging_face_models(
             files: result.files,
         })
         .collect())
+}
+
+/// Download progress stays scoped to this request and connection. Dropping the
+/// operation drops the upstream body and releases its concurrency slot.
+pub(super) async fn download_model(
+    app: &App,
+    tx: &mpsc::Sender<Out>,
+    request_id: u64,
+    model: String,
+    mut cancel: watch::Receiver<bool>,
+) -> Result<()> {
+    let work = async {
+        let config = load_broker_config(&app.db).await?;
+        let _operation = app
+            .adapters
+            .reserve_model_operation(&config, &model, true)?;
+        let mut stream = app.adapters.management(&config)?.pull(model).await?;
+        let mut last_sent = None::<Instant>;
+        while let Some(update) = stream.next().await? {
+            if let Some(progress) = update.download
+                && (update.done
+                    || last_sent.is_none_or(|last| last.elapsed() >= Duration::from_millis(250)))
+            {
+                let progress = chatty_protocol::admin::ModelDownloadProgress {
+                    status: progress.status.chars().take(256).collect(),
+                    digest: progress
+                        .digest
+                        .map(|digest| digest.chars().take(128).collect()),
+                    total: progress.total,
+                    completed: progress.completed,
+                };
+                tx.send((
+                    MessageType::Response,
+                    request_id,
+                    encode(&Response::ModelDownloadProgress(progress))?.into(),
+                ))
+                .await?;
+                last_sent = Some(Instant::now());
+            }
+            if update.done {
+                return Ok::<_, Error>(());
+            }
+        }
+        bail!("model download ended before reporting success")
+    };
+    let cancelled = tokio::select! {
+        biased;
+        _ = async {
+            if !*cancel.borrow() { let _ = cancel.changed().await; }
+        } => true,
+        _ = tx.closed() => true,
+        result = work => { result?; false },
+    };
+    tx.send((
+        MessageType::Response,
+        request_id,
+        encode(&Response::ModelDownloadFinished { cancelled })?.into(),
+    ))
+    .await?;
+    Ok(())
 }

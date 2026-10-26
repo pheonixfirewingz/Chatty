@@ -8,7 +8,24 @@ pub(super) struct AdapterHost {
     registry: Registry,
     selected_plugin: Option<String>,
     freetoken_credential: Option<(String, String)>,
+    model_operations: ModelOperations,
 }
+type ModelOperationKey = (String, String, String);
+#[derive(Clone, Default)]
+struct ModelOperations(Arc<std::sync::Mutex<HashMap<ModelOperationKey, bool>>>);
+
+pub(super) struct ModelOperationGuard {
+    operations: ModelOperations,
+    key: ModelOperationKey,
+}
+impl Drop for ModelOperationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut operations) = self.operations.0.lock() {
+            operations.remove(&self.key);
+        }
+    }
+}
+
 impl AdapterHost {
     pub fn from_environment() -> Result<Self> {
         let directory = std::env::var_os("CHATTY_ADAPTER_DIR").map(PathBuf::from);
@@ -37,6 +54,48 @@ impl AdapterHost {
             registry,
             selected_plugin,
             freetoken_credential,
+            model_operations: ModelOperations::default(),
+        })
+    }
+    pub fn reserve_model_operation(
+        &self,
+        config: &BrokerConfig,
+        model: &str,
+        download: bool,
+    ) -> Result<ModelOperationGuard> {
+        if model.trim().is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+            bail!("model name is invalid")
+        }
+        let plugin = self.plugin_id(config);
+        let mut name = model.trim();
+        if plugin == "ollama" {
+            name = name.strip_prefix("registry.ollama.ai/").unwrap_or(name);
+            name = name.strip_prefix("library/").unwrap_or(name);
+            name = name.strip_suffix(":latest").unwrap_or(name);
+        }
+        let key = (
+            plugin.to_owned(),
+            config.adapter_url.clone(),
+            name.to_owned(),
+        );
+        let mut operations = self
+            .model_operations
+            .0
+            .lock()
+            .map_err(|_| format_err!("model operation lock unavailable"))?;
+        if operations.contains_key(&key) {
+            bail!("another operation is already active for this model")
+        }
+        if download
+            && operations.values().filter(|pull| **pull).count()
+                >= chatty_protocol::admin::MAX_PARALLEL_DOWNLOADS
+        {
+            bail!("download limit reached (4 parallel downloads)")
+        }
+        operations.insert(key.clone(), download);
+        Ok(ModelOperationGuard {
+            operations: self.model_operations.clone(),
+            key,
         })
     }
     pub fn inference(&self, config: &BrokerConfig) -> Result<Adapter> {
@@ -45,14 +104,24 @@ impl AdapterHost {
         }
         self.configured_adapter(self.plugin_id(config), &config.adapter_url)
     }
-    fn plugin_id(&self, config: &BrokerConfig) -> &str {
+    fn plugin_id<'a>(&'a self, config: &'a BrokerConfig) -> &'a str {
         self.selected_plugin
             .as_deref()
-            .unwrap_or(if config.use_ollama_api {
-                "ollama"
-            } else {
-                "openai-compatible"
-            })
+            .unwrap_or_else(|| config.adapter_plugin_id())
+    }
+    pub fn validate_selection(&self, config: &BrokerConfig) -> Result<()> {
+        let id = config.adapter_plugin_id();
+        if id == "hugging-face" || !self.registry.contains(id) {
+            bail!("inference adapter plugin not installed: {id}")
+        }
+        Ok(())
+    }
+    pub fn config_response(&self, config: BrokerConfig) -> Response {
+        Response::BrokerConfig {
+            config,
+            adapter_plugins: self.registry.inference_plugin_ids(),
+            adapter_override: self.selected_plugin.clone(),
+        }
     }
     pub fn configuration_changed(&self, config: &BrokerConfig) -> Result<()> {
         Ok(self
@@ -87,6 +156,7 @@ pub(super) fn test_adapter_host() -> AdapterHost {
             .clone(),
         selected_plugin: None,
         freetoken_credential: None,
+        model_operations: ModelOperations::default(),
     }
 }
 

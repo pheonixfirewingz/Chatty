@@ -203,6 +203,18 @@ impl Registry {
             credential: None,
         })
     }
+    /// Enumerate installed inference IDs without compiling unused modules.
+    pub fn inference_plugin_ids(&self) -> Vec<String> {
+        let mut ids: Vec<_> = self
+            .plugins
+            .keys()
+            .filter(|id| id.as_str() != "hugging-face")
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    }
+
     pub fn contains(&self, id: &str) -> bool {
         self.plugins.contains_key(canonical_plugin_id(id))
     }
@@ -334,6 +346,14 @@ impl Adapter {
                 Some(20_000),
                 vec![HttpMethod::Get],
                 4,
+                MAX_MESSAGE_BYTES,
+            ),
+            AdapterRequest::Pull { .. } => (
+                ResponseKind::Action,
+                true,
+                Some(6 * 60 * 60 * 1000),
+                vec![HttpMethod::Post],
+                1,
                 MAX_MESSAGE_BYTES,
             ),
             AdapterRequest::Action(_) => (
@@ -495,8 +515,14 @@ impl Adapter {
         }
     }
     pub async fn stream(&self, request: ChatRequest) -> Result<AdapterStream> {
+        self.start_stream(AdapterRequest::Stream(request)).await
+    }
+    pub async fn pull(&self, model: String) -> Result<AdapterStream> {
+        self.start_stream(AdapterRequest::Pull { model }).await
+    }
+    async fn start_stream(&self, request: AdapterRequest) -> Result<AdapterStream> {
         let mut session = self.plugin.session()?;
-        let plan = self.prepare(&mut session, AdapterRequest::Stream(request))?;
+        let plan = self.prepare(&mut session, request)?;
         if !plan.stream || plan.requests.len() != 1 {
             return Err(Error::new("adapter returned no streaming HTTP plan"));
         }

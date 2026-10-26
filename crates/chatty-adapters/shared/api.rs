@@ -95,12 +95,20 @@ pub struct SearchResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AdapterRequest {
-    Models { timeout_ms: u64 },
+    Models {
+        timeout_ms: u64,
+    },
     Complete(ChatRequest),
     Stream(ChatRequest),
+    /// Optional v1 capability: stream model download progress.
+    Pull {
+        model: String,
+    },
     State,
     Action(ModelAction),
-    Search { query: String },
+    Search {
+        query: String,
+    },
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ResponseKind {
@@ -168,6 +176,9 @@ impl HttpPlan {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreamUpdate {
+    /// Optional additive metadata for streamed model pulls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<DownloadProgress>,
     pub text: String,
     /// Optional additive JSON metadata; older v1 guests may omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,6 +186,14 @@ pub struct StreamUpdate {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    pub status: String,
+    pub digest: Option<String>,
+    pub total: Option<u64>,
+    pub completed: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

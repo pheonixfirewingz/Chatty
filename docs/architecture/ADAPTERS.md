@@ -39,7 +39,9 @@ Inputs are UTF-8 JSON `PluginInput` values; outputs are serialized `PluginResult
 
 `Prepare` converts an `AdapterRequest` and configured base URL into an `HttpPlan`. `Decode` converts JSON HTTP responses into a normalized result. `Stream` converts a batch of complete newline-terminated records into text, optional token counters, and a completion marker. The host retains incomplete records across network chunks and appends a final newline at EOF. A stream read can be cancelled and retried without losing buffered bytes.
 
-`StreamUpdate.finish_reason` is optional additive JSON metadata, defaulting to absent for older v1 guests. It does not change exports or existing required JSON fields, so ABI version remains 1. OpenAI-compatible decoders preserve this metadata without ending before the trailing usage event and `[DONE]`. Reasoning fields stay outside final content.
+`AdapterRequest::Pull` is an optional v1 capability for streamed model downloads. It prepares a single POST plan with `ResponseKind::Action` and `stream=true`. Older plugins without this operation fail explicitly; existing v1 operations are unchanged. Ollama requests streamed pulls and returns `StreamUpdate.download` with the current status, optional layer digest, total bytes, and completed bytes. The success record marks `done`; EOF before success is an error. The host reuses the bounded NDJSON decoder and drops its HTTP body on cancellation.
+
+`StreamUpdate.download` and `StreamUpdate.finish_reason` are optional additive JSON metadata, defaulting to absent for older v1 guests. It does not change exports or existing required JSON fields, so ABI version remains 1. OpenAI-compatible decoders preserve this metadata without ending before the trailing usage event and `[DONE]`. Reasoning fields stay outside final content.
 
 Guests should keep translation stateless. A request owns its guest instance; streams keep their decoder instance until completion or cancellation. No instance state is shared between users. Unsupported operations return a descriptive error, rather than silently choosing a different provider.
 

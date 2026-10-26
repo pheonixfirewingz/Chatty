@@ -75,6 +75,20 @@ pub fn translate(input: PluginInput) -> PluginResult {
                     vec![HttpRequest::get(format!("{base}/api/tags"), timeout_ms)],
                     ResponseKind::Models,
                 ),
+                AdapterRequest::Pull { model } => {
+                    let mut plan = HttpPlan::new(
+                        vec![HttpRequest::post(
+                            format!("{base}/api/pull"),
+                            json!({"model": model_name(&model)?, "stream": true}),
+                            Some(6 * 60 * 60 * 1000),
+                        )],
+                        ResponseKind::Action,
+                    );
+                    plan.stream = true;
+                    plan.stream_content_types =
+                        vec!["application/x-ndjson".into(), "application/json".into()];
+                    plan
+                }
                 AdapterRequest::State => HttpPlan::new(
                     ["version", "tags", "ps"]
                         .iter()
@@ -200,7 +214,21 @@ pub fn translate(input: PluginInput) -> PluginResult {
                 let value: Value = serde_json::from_str(line)
                     .map_err(|_| "malformed Ollama NDJSON stream event")?;
                 if let Some(error) = value["error"].as_str() {
-                    return Err(format!("Ollama generation failed: {error}"));
+                    return Err(format!("Ollama operation failed: {error}"));
+                }
+                if let Some(status) = value["status"].as_str() {
+                    update.download = Some(DownloadProgress {
+                        status: status.chars().take(256).collect(),
+                        digest: value["digest"]
+                            .as_str()
+                            .map(|s| s.chars().take(128).collect()),
+                        total: value["total"].as_u64(),
+                        completed: value["completed"].as_u64(),
+                    });
+                    if status == "success" {
+                        update.done = true;
+                        break;
+                    }
                 }
                 if let Some(text) = value["message"]["content"].as_str() {
                     update.text.push_str(text);

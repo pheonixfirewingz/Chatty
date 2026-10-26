@@ -45,6 +45,7 @@ pub(crate) type NetworkCommand = Command;
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
     ModelRequestStarted(u64),
+    DownloadStarted { request_id: u64, model: String },
     Status(String),
     Connected { resuming_session: bool },
     ConnectionFailed(String),
@@ -507,7 +508,7 @@ async fn verify_chatty_handshake(mut stream: TlsStream<TcpStream>) -> Result<Tls
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
-        || value["protocol"] != 15
+        || value["protocol"] != 17
         || value["encoding"] != "bincode2"
     {
         bail!("unsupported broker handshake");
@@ -849,7 +850,9 @@ pub(crate) async fn run(
                     }
                     Some(Command::Request(request)) => {
                         next_id += 1;
-                        if matches!(&*request, Request::AdminOllamaAction { .. } | Request::AdminSearchModels { .. } | Request::AdminGetOllamaState { .. }) {
+                        if let Request::AdminOllamaAction { action: chatty_protocol::OllamaAction::Pull { model }, .. } = &*request {
+                            let _ = events.send(Event::DownloadStarted { request_id: next_id, model: model.clone() });
+                        } else if matches!(&*request, Request::AdminOllamaAction { .. } | Request::AdminSearchModels { .. } | Request::AdminGetOllamaState { .. }) {
                             let _ = events.send(Event::ModelRequestStarted(next_id));
                         }
                         if matches!(&*request, Request::Logout { .. }) {

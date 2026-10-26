@@ -690,6 +690,12 @@ impl ChattyApp {
                 Task::none()
             }
             Message::SignOut => {
+                for download in self.admin.models.downloads.values() {
+                    if let Some(id) = download.request_id.filter(|_| !download.finished) {
+                        let _ = self.commands.send(Command::Cancel(id));
+                    }
+                }
+                self.admin.models = admin_monitor::ModelsState::default();
                 self.send(Request::Logout {
                     session_token: self.token.clone(),
                 });
@@ -764,6 +770,10 @@ impl ChattyApp {
                     self.screen = Screen::Chat;
                 } else if matches!(msg, AdminMessage::RefreshMonitor) {
                     self.refresh_admin_monitor_if_due();
+                } else if let AdminMessage::CancelDownload(model) = &msg {
+                    if let Some(id) = self.admin.models.cancel_download(model) {
+                        let _ = self.commands.send(Command::Cancel(id));
+                    }
                 } else {
                     let reqs = self.admin.update(msg, &self.token);
                     for req in reqs {
@@ -1932,12 +1942,18 @@ impl ChattyApp {
 
     pub(crate) fn handle_event(&mut self, event: Event) {
         match event {
+            Event::DownloadStarted { request_id, model } => {
+                if self.admin.models.download_started(&model, request_id) {
+                    let _ = self.commands.send(Command::Cancel(request_id));
+                }
+            }
             Event::ModelRequestStarted(id) => {
                 self.admin.models.request_id = Some(id);
                 self.admin.models.busy = true;
             }
             Event::Status(status) => {
                 if status.contains("Offline:") || status.contains("Idle · offline:") {
+                    self.admin.models.interrupt_downloads();
                     self.admin.models.busy = false;
                     self.admin.models.request_id = None;
                     self.admin.models.notice = Some("Connection interrupted. Refresh to check whether the operation finished on the server.".into());
@@ -1950,6 +1966,7 @@ impl ChattyApp {
                 self.restoring_session = resuming_session;
             }
             Event::ConnectionFailed(message) => {
+                self.admin.models.interrupt_downloads();
                 self.admin.models.busy = false;
                 self.admin.models.request_id = None;
                 self.admin.models.notice =
@@ -1971,6 +1988,7 @@ impl ChattyApp {
                 self.pending_certificate = Some(certificate);
             }
             Event::Disconnected => {
+                self.admin.models.interrupt_downloads();
                 self.admin.models.busy = false;
                 self.admin.models.request_id = None;
                 self.admin.models.notice =
@@ -2000,6 +2018,11 @@ impl ChattyApp {
                 self.status_tooltip = None;
             }
             Event::SessionExpired => {
+                for download in self.admin.models.downloads.values() {
+                    if let Some(id) = download.request_id.filter(|_| !download.finished) {
+                        let _ = self.commands.send(Command::Cancel(id));
+                    }
+                }
                 self.admin.models = admin_monitor::ModelsState::default();
                 self.restoring_session = false;
                 self.worlds.clear();
@@ -2026,6 +2049,16 @@ impl ChattyApp {
     }
 
     pub(crate) fn handle_frame(&mut self, frame: Frame) {
+        if frame.message_type == MessageType::Error
+            && let Some(download) = self.admin.models.download_for_request(frame.request_id)
+        {
+            download.finished = true;
+            download.request_id = None;
+            download.progress.status = decode::<WireError>(&frame.payload)
+                .map(|error| error.message)
+                .unwrap_or_else(|_| "Download failed.".into());
+            return;
+        }
         if self.admin.models.request_id == Some(frame.request_id)
             && matches!(
                 frame.message_type,
@@ -2155,9 +2188,41 @@ impl ChattyApp {
                                 self.refresh();
                             }
                         }
+                        Response::ModelDownloadProgress(progress) => {
+                            if let Some(download) =
+                                self.admin.models.download_for_request(frame.request_id)
+                            {
+                                download.progress = progress;
+                            }
+                        }
+                        Response::ModelDownloadFinished { cancelled } => {
+                            if let Some(download) =
+                                self.admin.models.download_for_request(frame.request_id)
+                            {
+                                download.finished = true;
+                                download.request_id = None;
+                                download.progress.status = if cancelled {
+                                    "Cancelled"
+                                } else {
+                                    "Download complete"
+                                }
+                                .into();
+                                if !cancelled {
+                                    self.send(Request::AdminGetOllamaState {
+                                        session_token: self.token.clone(),
+                                    });
+                                }
+                            }
+                        }
                         Response::Users(v) => self.admin.users = v,
                         Response::AccountUsage(v) => self.account_usage = v,
-                        Response::BrokerConfig(v) => {
+                        Response::BrokerConfig {
+                            config: v,
+                            adapter_plugins,
+                            adapter_override,
+                        } => {
+                            self.admin.adapter_plugins = adapter_plugins;
+                            self.admin.adapter_override = adapter_override;
                             self.admin.models.saved_adapter_url = Some(v.adapter_url.clone());
                             self.admin.models.saved_model = v.model.clone();
                             self.admin.broker_config = v;
@@ -2674,8 +2739,37 @@ impl ChattyApp {
             truncated: false,
             file_size_bytes: 412,
         };
+        self.admin.adapter_plugins = vec![
+            "freetoken".into(),
+            "ollama".into(),
+            "openai-compatible".into(),
+        ];
         self.admin.broker_config.adapter_url = "http://192.0.2.50:11434".into();
         self.admin.models.saved_adapter_url = Some(self.admin.broker_config.adapter_url.clone());
+        self.admin.models.downloads.insert(
+            "demo-roleplay:27b".into(),
+            admin_monitor::ModelDownload {
+                destination: self.admin.broker_config.adapter_url.clone(),
+                progress: chatty_protocol::admin::ModelDownloadProgress {
+                    status: "pulling layer".into(),
+                    digest: Some("sha256:demo-layer".into()),
+                    total: Some(20_000_000_000),
+                    completed: Some(7_500_000_000),
+                },
+                ..Default::default()
+            },
+        );
+        self.admin.models.downloads.insert(
+            "demo-story:9b".into(),
+            admin_monitor::ModelDownload {
+                destination: self.admin.broker_config.adapter_url.clone(),
+                progress: chatty_protocol::admin::ModelDownloadProgress {
+                    status: "pulling manifest".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
         self.admin.models.results = vec![ModelSearchResult {
             id: "bartowski/Llama-3.2-1B-Instruct-GGUF".into(),
             downloads: 12345,
@@ -3107,5 +3201,83 @@ mod tests {
         app.admin.models.busy = true;
         app.handle_event(Event::Status("Offline: connection lost".into()));
         assert!(!app.admin.models.busy);
+    }
+
+    #[test]
+    fn download_progress_cancellation_and_errors_are_request_scoped() {
+        let (commands, mut sent) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        for model in ["a", "b"] {
+            app.admin
+                .update(AdminMessage::DownloadModel(model.into()), "session");
+        }
+        app.handle_event(Event::DownloadStarted {
+            request_id: 41,
+            model: "a".into(),
+        });
+        app.handle_event(Event::DownloadStarted {
+            request_id: 42,
+            model: "b".into(),
+        });
+        let progress = chatty_protocol::admin::ModelDownloadProgress {
+            status: "pulling layer".into(),
+            total: Some(100),
+            completed: Some(25),
+            digest: None,
+        };
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 41,
+            payload: encode(&Response::ModelDownloadProgress(progress)).unwrap(),
+        });
+        assert_eq!(app.admin.models.downloads["a"].progress.completed, Some(25));
+        assert_eq!(app.admin.models.downloads["b"].progress.completed, None);
+        assert!(!app.admin.models.busy);
+        let _ = app.update(Message::Admin(AdminMessage::CancelDownload("a".into())));
+        assert!(matches!(sent.try_recv().unwrap(), Command::Cancel(41)));
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 41,
+            payload: encode(&Response::ModelDownloadFinished { cancelled: true }).unwrap(),
+        });
+        assert!(app.admin.models.downloads["a"].finished);
+        assert!(!app.admin.models.downloads["b"].finished);
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Error,
+            request_id: 42,
+            payload: encode(&WireError {
+                code: ErrorCode::BackendUnavailable,
+                message: "disk full".into(),
+                retryable: false,
+            })
+            .unwrap(),
+        });
+        assert_eq!(app.admin.models.downloads["b"].progress.status, "disk full");
+        assert!(app.admin.models.downloads["b"].finished);
+
+        // Cancelling before the network assigns an ID must still cancel upstream.
+        app.admin
+            .update(AdminMessage::DownloadModel("a".into()), "session");
+        let _ = app.update(Message::Admin(AdminMessage::CancelDownload("a".into())));
+        assert!(sent.try_recv().is_err());
+        app.handle_event(Event::DownloadStarted {
+            request_id: 43,
+            model: "a".into(),
+        });
+        assert!(matches!(sent.try_recv().unwrap(), Command::Cancel(43)));
+        // A late terminal event from the previous attempt cannot finish its retry.
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 41,
+            payload: encode(&Response::ModelDownloadFinished { cancelled: false }).unwrap(),
+        });
+        assert!(!app.admin.models.downloads["a"].finished);
+        app.handle_event(Event::Status("Offline: connection lost".into()));
+        assert!(app.admin.models.downloads["a"].finished);
     }
 }

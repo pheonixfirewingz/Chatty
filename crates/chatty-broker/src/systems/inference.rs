@@ -1437,6 +1437,7 @@ mod prompt_budget_tests {
         let mut config = BrokerConfig {
             adapter_enabled: true,
             adapter_url: String::new(),
+            adapter_plugin: String::new(),
             use_ollama_api: true,
             model: String::new(),
             temperature: 0.8,

@@ -55,7 +55,7 @@ Broker source is split along runtime boundaries:
 
 The host loads provider translators as import-free WASM plugins, checks ABI version 1, and owns their HTTP transport. The broker calls one typed interface for discovery, completion, streaming, model lifecycle, and catalogue operations. Plugins translate API paths/options and normalize JSON/SSE/NDJSON into neutral results. No provider HTTP schema remains in broker systems.
 
-OpenAI-compatible, FreeToken, Ollama, and Hugging Face plugins ship under `crates/chatty-adapters/` as Rust source and prebuilt WASM. Operator-installed manifests are discovered at startup without rebuilding the broker. Modules load on demand; only the selected inference provider is retained, while Hugging Face exists only for active catalogue operations. Model management shares the selected provider. Existing database settings select the bundled providers unless an operator selects a custom plugin. Guest memory, fuel, messages, network origins, methods, timeouts, and response sizes are bounded. See [adapter contract](ADAPTERS.md) and [ADR 0003](adr/0003-wasm-inference-adapter-plugins.md).
+OpenAI-compatible, FreeToken, Ollama, and Hugging Face plugins ship under `crates/chatty-adapters/` as Rust source and prebuilt WASM. Operator-installed manifests are discovered at startup without rebuilding the broker. Modules load on demand; only the selected inference provider is retained, while Hugging Face exists only for active catalogue operations. Model management shares the selected provider. The admin portal selects installed inference plugins through broker-authorized configuration. An empty plugin selection preserves the legacy OpenAI/Ollama setting; migration 0013 adds the selection column without rewriting existing settings. `CHATTY_ADAPTER_PLUGIN` takes precedence over the persisted selection and is reported to administrators. Adapter lists come from startup manifests without loading unused modules; the catalogue-only Hugging Face adapter is excluded. Guest memory, fuel, messages, network origins, methods, timeouts, and response sizes are bounded. See [adapter contract](ADAPTERS.md) and [ADR 0003](adr/0003-wasm-inference-adapter-plugins.md).
 
 ### Shared protocol (`chatty-protocol`)
 
@@ -86,7 +86,7 @@ Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 The broker first sends a JSON handshake:
 
 ```json
-{"protocol":15,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+{"protocol":17,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
 ```
 
 All later messages use a 14-byte header:
@@ -99,7 +99,7 @@ Payloads are bincode 2. Stream chunks and deltas are always zstd-compressed; oth
 
 Client message types are requests and cancellation. Broker message types include responses, errors, deltas, stream chunks, and stream completion. Request IDs correlate direct responses and generation cancellation.
 
-Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 15 adds the search request/response; broker and GUI must upgrade together.
+Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 17 includes persisted runtime adapter selection, installed inference plugin IDs and operator overrides, plus request-scoped download progress and terminal cancellation/completion responses. Broker and GUI must upgrade together.
 
 ### Synchronization
 
@@ -139,7 +139,7 @@ Passwords are hashed with Argon2. Concurrent Argon2 operations are capped at ten
 - Connection writer queues are bounded.
 - Protocol allocation and decompression are bounded.
 - Active generation prevents idle close while the upstream model is silent.
-- Active Ollama lifecycle requests also prevent idle close; pulls have a six-hour upstream timeout.
+- Active Ollama lifecycle requests also prevent idle close; pulls have a six-hour upstream timeout. Up to four model downloads run concurrently across the broker. Progress is direct to the requesting connection, reports the current layer, and is coalesced to at most four updates per second plus the terminal update. Downloads never hold the SQLite snapshot gate. Same-model lifecycle operations are rejected while an operation is active; unrelated deletions remain available. Cancellation is scoped by connection and request ID, including before upstream connection establishment. Disconnect or transport failure cancels outstanding pulls. Partial blobs remain managed by the inference server.
 - Otherwise a connection quiet in both directions closes after 120 seconds; the GUI reconnects on demand and resumes from its revision.
 - Disconnect cancels generation work owned by that connection.
 - Startup inference probing is best-effort and does not prevent the broker from accepting clients.

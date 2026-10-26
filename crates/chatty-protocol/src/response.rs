@@ -14,6 +14,10 @@ pub enum GenerationStatus {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Response {
+    ModelDownloadProgress(crate::admin::ModelDownloadProgress),
+    ModelDownloadFinished {
+        cancelled: bool,
+    },
     ModelSearchResults(Vec<crate::admin::ModelSearchResult>),
     Authenticated {
         session_token: String,
@@ -32,7 +36,13 @@ pub enum Response {
         data: Vec<u8>,
     },
     Users(Vec<UserAccount>),
-    BrokerConfig(crate::admin::BrokerConfig),
+    BrokerConfig {
+        config: crate::admin::BrokerConfig,
+        /// Installed inference plugins; catalogue-only adapters are excluded.
+        adapter_plugins: Vec<String>,
+        /// Operator override, which takes precedence over persisted selection.
+        adapter_override: Option<String>,
+    },
     BrokerMonitor(crate::admin::BrokerMonitor),
     BrokerLog(crate::admin::BrokerLog),
     OllamaState(crate::admin::OllamaState),

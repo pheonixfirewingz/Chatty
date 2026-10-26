@@ -406,6 +406,16 @@ async fn external_wasm_plugin_loads_and_calls_a_remote_server() {
     use tokio::io::AsyncWriteExt;
     let directory = PluginDirectory::new("custom-provider");
     let registry = Registry::load(Some(&directory.0)).unwrap();
+    assert!(
+        registry
+            .inference_plugin_ids()
+            .contains(&"custom-provider".into())
+    );
+    assert!(
+        !registry
+            .inference_plugin_ids()
+            .contains(&"hugging-face".into())
+    );
     let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1", server.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -759,10 +769,12 @@ fn management_and_inference_use_the_same_administrator_selection() {
         registry: registry.clone(),
         selected_plugin: None,
         freetoken_credential: None,
+        model_operations: Default::default(),
     };
     let mut config = crate::BrokerConfig {
         adapter_enabled: true,
         adapter_url: "http://inference.example:11434/v1".into(),
+        adapter_plugin: String::new(),
         use_ollama_api: false,
         model: String::new(),
         temperature: 0.8,
@@ -793,7 +805,7 @@ fn management_and_inference_use_the_same_administrator_selection() {
     );
     drop(compatible);
     drop(management);
-    config.use_ollama_api = true;
+    config.adapter_plugin = "ollama".into();
     host.configuration_changed(&config).unwrap();
     assert!(selected.upgrade().is_none());
     let management = host.management(&config).unwrap();
@@ -805,6 +817,25 @@ fn management_and_inference_use_the_same_administrator_selection() {
         .unwrap();
     assert_eq!(plan.requests.len(), 3);
     drop(management);
+    config.adapter_plugin = "freetoken".into();
+    host.configuration_changed(&config).unwrap();
+    let inference = host.inference(&config).unwrap();
+    let management = host.management(&config).unwrap();
+    assert!(
+        inference
+            .plugin
+            .weak_module()
+            .ptr_eq(&management.plugin.weak_module())
+    );
+    assert_eq!(host.plugin_id(&config), "freetoken");
+    let mut overridden = host.clone();
+    overridden.selected_plugin = Some("openai-compatible".into());
+    assert_eq!(overridden.plugin_id(&config), "openai-compatible");
+    assert!(
+        matches!(overridden.config_response(config.clone()), crate::Response::BrokerConfig {
+        adapter_override: Some(id), ..
+    } if id == "openai-compatible")
+    );
     config.adapter_enabled = false;
     host.configuration_changed(&config).unwrap();
     assert!(registry.selected.lock().unwrap().module.is_none());

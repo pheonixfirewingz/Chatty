@@ -1,7 +1,7 @@
 //! Admin model discovery and lifecycle workspace. All network access stays in the broker.
 use super::{AdminMessage, AdminViewState, format_token_count, human_bytes, inference_config_view};
 use crate::ui;
-use iced::widget::{Space, button, column, pick_list, row, rule, text, text_input};
+use iced::widget::{Space, button, column, pick_list, progress_bar, row, rule, text, text_input};
 use iced::{Alignment, Element, Length};
 
 fn action<'a, Message: 'a + Clone + From<AdminMessage>>(
@@ -77,6 +77,66 @@ where
             .push(action("Save model settings", AdminMessage::SaveBrokerConfig, idle))
             .into();
     }
+    if !models.downloads.is_empty() {
+        let active = models
+            .downloads
+            .values()
+            .filter(|download| !download.finished)
+            .count();
+        items = items.push(
+            text(format!(
+                "Downloads · {active}/{} active",
+                chatty_protocol::admin::MAX_PARALLEL_DOWNLOADS
+            ))
+            .size(18),
+        );
+        for (model, download) in &models.downloads {
+            let mut card = column![
+                text(model).size(14).wrapping(text::Wrapping::Glyph),
+                text(&download.destination).size(12),
+                text(if download.cancelling && !download.finished {
+                    "Cancelling…"
+                } else {
+                    &download.progress.status
+                })
+                .size(13),
+            ]
+            .spacing(8)
+            .width(Length::Fill);
+            if let (Some(completed), Some(total)) = (
+                download.progress.completed,
+                download.progress.total.filter(|total| *total > 0),
+            ) {
+                let fraction = completed.min(total) as f32 / total as f32;
+                card = card.push(progress_bar(0.0..=1.0, fraction)).push(
+                    text(format!(
+                        "Current layer: {} / {} ({:.1}%)",
+                        human_bytes(completed.min(total)),
+                        human_bytes(total),
+                        fraction * 100.0
+                    ))
+                    .size(13),
+                );
+            }
+            if let Some(digest) = &download.progress.digest {
+                card = card.push(
+                    text(format!(
+                        "Layer {}",
+                        digest.chars().take(19).collect::<String>()
+                    ))
+                    .size(12),
+                );
+            }
+            if !download.finished {
+                card = card.push(action(
+                    "Cancel download",
+                    AdminMessage::CancelDownload(model.clone()),
+                    !download.cancelling,
+                ));
+            }
+            items = items.push(ui::card(card, state.light_mode, state.glass_mode));
+        }
+    }
     if models.page == 1 {
         items = items.push(text("Search Hugging Face").size(18))
             .push(text("Public GGUF models, sorted by downloads. Choose a file to set its quantization. Split and gated files are excluded.").size(14))
@@ -106,6 +166,9 @@ where
             let target = selected
                 .as_ref()
                 .map(|file| format!("hf.co/{}:{file}", result.id));
+            let can_download = target
+                .as_deref()
+                .is_some_and(|model| models.can_download(model));
             let card = column![
                 text(&result.id).size(16),
                 text(format!(
@@ -118,7 +181,7 @@ where
                 action(
                     "Download selected file",
                     AdminMessage::DownloadModel(target.unwrap_or_default()),
-                    idle && destination_saved && selected.is_some()
+                    destination_saved && can_download
                 ),
             ]
             .spacing(8);
@@ -129,7 +192,7 @@ where
             .push(text("Use an Ollama tag or hf.co/owner/repository:filename.gguf. Downloads stay on the inference server.").size(14))
             .push(text_input("llama3.2:3b or hf.co/owner/repository:Q4_K_M", state.ollama_pull_model)
                 .on_input(|s| Message::from(AdminMessage::OllamaPullModelChanged(s))).padding(10))
-            .push(action("Download model", AdminMessage::OllamaPull, idle && destination_saved && !state.ollama_pull_model.trim().is_empty()));
+            .push(action("Download model", AdminMessage::OllamaPull, destination_saved && models.can_download(state.ollama_pull_model.trim())));
         return items.into();
     }
     items = items.push(
@@ -230,7 +293,7 @@ where
             action(
                 "Delete",
                 AdminMessage::ConfirmModelDelete(model.name.clone()),
-                idle && !selected && running.is_none()
+                idle && !selected && running.is_none() && !models.is_downloading(&model.name)
             ),
         ]
         .spacing(8)
@@ -245,7 +308,7 @@ where
         if models.delete_model.as_deref() == Some(&model.name) {
             card = card.push(text(format!("Delete {} from the inference server? This frees {}. Download again to restore.", model.name, human_bytes(model.size))).size(14))
                 .push(row![
-                    action("Confirm delete", AdminMessage::OllamaDelete(model.name.clone()), idle && !selected && running.is_none()),
+                    action("Confirm delete", AdminMessage::OllamaDelete(model.name.clone()), idle && !selected && running.is_none() && !models.is_downloading(&model.name)),
                     action("Cancel", AdminMessage::CancelModelDelete, true),
                 ].spacing(8).wrap());
         }

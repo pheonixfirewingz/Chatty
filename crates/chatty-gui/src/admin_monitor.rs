@@ -35,7 +35,7 @@ pub enum AdminMessage {
     // Broker configuration form controls
     ToggleAdapter(bool),
     AdapterUrlChanged(String),
-    ToggleOllamaApi(bool),
+    SelectRuntimeAdapter(String),
     SelectAdapterModel(String),
     TemperatureChanged(f32),
     TopPChanged(f32),
@@ -52,6 +52,7 @@ pub enum AdminMessage {
     ModelSearchChanged(String),
     SearchModels,
     DownloadModel(String),
+    CancelDownload(String),
     ChooseModelFile {
         id: String,
         file: String,
@@ -151,6 +152,7 @@ impl From<AdminRoleOption> for Role {
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelsState {
+    pub downloads: std::collections::BTreeMap<String, ModelDownload>,
     pub saved_adapter_url: Option<String>,
     pub saved_model: String,
     pub page: usize,
@@ -164,11 +166,94 @@ pub struct ModelsState {
     pub notice: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ModelDownload {
+    pub destination: String,
+    pub request_id: Option<u64>,
+    pub progress: chatty_protocol::admin::ModelDownloadProgress,
+    pub finished: bool,
+    pub cancelling: bool,
+}
+
+impl ModelsState {
+    pub fn is_downloading(&self, model: &str) -> bool {
+        self.downloads
+            .get(model)
+            .is_some_and(|download| !download.finished)
+    }
+    pub fn can_download(&self, model: &str) -> bool {
+        !model.trim().is_empty()
+            && !self.is_downloading(model.trim())
+            && self
+                .downloads
+                .values()
+                .filter(|download| !download.finished)
+                .count()
+                < chatty_protocol::admin::MAX_PARALLEL_DOWNLOADS
+    }
+    fn queue_download(&mut self, model: String, destination: String) {
+        if self.downloads.len() >= 16 {
+            self.downloads.retain(|_, download| !download.finished);
+        }
+        self.downloads.insert(
+            model,
+            ModelDownload {
+                destination,
+                progress: chatty_protocol::admin::ModelDownloadProgress {
+                    status: "Starting download…".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+    }
+    /// Return true if a cancellation was requested before the request ID arrived.
+    pub fn download_started(&mut self, model: &str, id: u64) -> bool {
+        let Some(download) = self
+            .downloads
+            .get_mut(model)
+            .filter(|download| !download.finished)
+        else {
+            return true;
+        };
+        download.request_id = Some(id);
+        download.cancelling
+    }
+    pub fn download_for_request(&mut self, id: u64) -> Option<&mut ModelDownload> {
+        self.downloads
+            .values_mut()
+            .find(|download| !download.finished && download.request_id == Some(id))
+    }
+    pub fn cancel_download(&mut self, model: &str) -> Option<u64> {
+        let download = self
+            .downloads
+            .get_mut(model)
+            .filter(|download| !download.finished && !download.cancelling)?;
+        download.cancelling = true;
+        download.request_id
+    }
+    pub fn interrupt_downloads(&mut self) {
+        for download in self
+            .downloads
+            .values_mut()
+            .filter(|download| !download.finished)
+        {
+            download.finished = true;
+            download.request_id = None;
+            download.progress.status =
+                "Connection interrupted. Download stopped; retry to resume available partial data."
+                    .into();
+        }
+    }
+}
+
 /// Read-only snapshot of admin portal state passed to Iced view functions.
 #[derive(Debug, Clone)]
 pub struct AdminViewState<'a> {
     pub models: &'a ModelsState,
     pub broker_config: &'a BrokerConfig,
+    pub adapter_plugins: &'a [String],
+    pub adapter_override: Option<&'a str>,
     pub broker_monitor: Option<&'a BrokerMonitor>,
     pub ollama_state: Option<&'a OllamaState>,
     pub ollama_pull_model: &'a str,
@@ -190,6 +275,8 @@ pub struct AdminViewState<'a> {
 pub struct AdminState {
     pub models: ModelsState,
     pub broker_config: BrokerConfig,
+    pub adapter_plugins: Vec<String>,
+    pub adapter_override: Option<String>,
     pub broker_monitor: Option<BrokerMonitor>,
     pub ollama_state: Option<OllamaState>,
     pub ollama_pull_model: String,
@@ -210,9 +297,12 @@ impl Default for AdminState {
     fn default() -> Self {
         Self {
             models: ModelsState::default(),
+            adapter_plugins: Vec::new(),
+            adapter_override: None,
             broker_config: BrokerConfig {
                 adapter_enabled: false,
                 adapter_url: String::new(),
+                adapter_plugin: String::new(),
                 use_ollama_api: false,
                 model: String::new(),
                 temperature: 0.8,
@@ -250,6 +340,8 @@ impl AdminState {
         AdminViewState {
             models: &self.models,
             broker_config: &self.broker_config,
+            adapter_plugins: &self.adapter_plugins,
+            adapter_override: self.adapter_override.as_deref(),
             broker_monitor: self.broker_monitor.as_ref(),
             ollama_state: self.ollama_state.as_ref(),
             ollama_pull_model: &self.ollama_pull_model,
@@ -283,16 +375,24 @@ impl AdminState {
             return vec![];
         }
         if let AdminMessage::DownloadModel(model) = message {
-            if self.models.busy {
-                return vec![];
-            }
             self.ollama_pull_model = model;
             return self.update(AdminMessage::OllamaPull, session_token);
         }
+        if matches!(&message, AdminMessage::OllamaPull) {
+            let model = self.ollama_pull_model.trim().to_owned();
+            if !self.models.can_download(&model) {
+                return vec![];
+            }
+            self.models
+                .queue_download(model.clone(), self.broker_config.adapter_url.clone());
+            return vec![Request::AdminOllamaAction {
+                session_token: session_token.into(),
+                action: OllamaAction::Pull { model },
+            }];
+        }
         let model_action = matches!(
             &message,
-            AdminMessage::OllamaPull
-                | AdminMessage::OllamaLoad(_)
+            AdminMessage::OllamaLoad(_)
                 | AdminMessage::OllamaUnload(_)
                 | AdminMessage::OllamaDelete(_)
                 | AdminMessage::SearchModels
@@ -310,27 +410,25 @@ impl AdminState {
                 || running
                 || self.broker_config.model == *model
                 || self.models.saved_model == *model
+                || self.models.is_downloading(model)
             {
                 return vec![];
             }
             self.models.delete_model = None;
         }
-        if matches!(message, AdminMessage::OllamaPull) && self.ollama_pull_model.trim().is_empty() {
-            return vec![];
-        }
         if model_action {
             self.models.busy = true;
             self.models.notice = Some(match &message {
-                AdminMessage::OllamaPull => format!(
-                    "Downloading {} to the inference server. Large models can take several minutes…",
-                    self.ollama_pull_model.trim()
-                ),
                 AdminMessage::SearchModels => "Searching Hugging Face…".into(),
                 _ => "Updating models…".into(),
             });
         }
         match message {
             AdminMessage::DownloadModel(_) => unreachable!(),
+            AdminMessage::CancelDownload(model) => {
+                self.models.cancel_download(&model);
+                vec![]
+            }
             AdminMessage::ModelsPage(page) => {
                 self.models.page = page;
                 vec![]
@@ -397,8 +495,11 @@ impl AdminState {
                 self.broker_config.adapter_url = url;
                 vec![]
             }
-            AdminMessage::ToggleOllamaApi(api) => {
-                self.broker_config.use_ollama_api = api;
+            AdminMessage::SelectRuntimeAdapter(id) => {
+                if self.adapter_override.is_none() && self.adapter_plugins.contains(&id) {
+                    self.broker_config.use_ollama_api = id == "ollama";
+                    self.broker_config.adapter_plugin = id;
+                }
                 vec![]
             }
             AdminMessage::SelectAdapterModel(model) => {
@@ -454,17 +555,7 @@ impl AdminState {
                 self.ollama_pull_model = model;
                 vec![]
             }
-            AdminMessage::OllamaPull => {
-                let model = self.ollama_pull_model.trim().to_string();
-                if model.is_empty() {
-                    vec![]
-                } else {
-                    vec![Request::AdminOllamaAction {
-                        session_token: session_token.to_string(),
-                        action: OllamaAction::Pull { model },
-                    }]
-                }
-            }
+            AdminMessage::OllamaPull => unreachable!(),
             AdminMessage::OllamaLoad(model) => {
                 vec![Request::AdminOllamaAction {
                     session_token: session_token.to_string(),
@@ -981,6 +1072,25 @@ where
     Message: 'a + Clone + From<AdminMessage>,
 {
     let mut items = column![].spacing(14).width(Length::Fill);
+    let ctx_row = row![
+        text(format!(
+            "Context length: {} tokens",
+            state.broker_config.num_ctx
+        ))
+        .size(13)
+        .width(Length::Fixed(220.0)),
+        slider(
+            512..=131072,
+            state.broker_config.num_ctx,
+            |v| Message::from(AdminMessage::NumCtxChanged(v)),
+        )
+        .width(Length::Fill),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    items = items.push(ctx_row.wrap());
+
     let adapter_enabled = toggler(state.broker_config.adapter_enabled)
         .label("Enabled")
         .on_toggle(|v| Message::from(AdminMessage::ToggleAdapter(v)));
@@ -994,15 +1104,27 @@ where
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let use_ollama = toggler(state.broker_config.use_ollama_api)
-        .label("Ollama native API")
-        .on_toggle(|v| Message::from(AdminMessage::ToggleOllamaApi(v)));
-
-    let use_ollama_help = text(
-        "Uses /api/chat so context, Top K, repeat penalty, and keep-alive are honored. Leave off for generic OpenAI-compatible servers.",
-    )
-    .size(11)
-    .color(Color::from_rgba(0.6, 0.6, 0.6, 1.0));
+    let runtime_adapter: Element<'a, Message> = if let Some(id) = state.adapter_override {
+        column![
+            text(format!("Runtime adapter: {id}")).size(13),
+            text("CHATTY_ADAPTER_PLUGIN overrides this selection. Remove it from the broker environment and restart to choose here.")
+                .size(13).color(ui::secondary_text_color(state.light_mode)),
+        ].spacing(8).into()
+    } else {
+        column![
+            text("Runtime adapter").size(13),
+            pick_list(
+                state.adapter_plugins.to_vec(),
+                Some(state.broker_config.adapter_plugin_id().to_owned()),
+                |id| Message::from(AdminMessage::SelectRuntimeAdapter(id)),
+            ).width(Length::Fill),
+            text(if state.adapter_plugins.is_empty() {
+                "Loading installed adapters from the broker…"
+            } else {
+                "Choose an installed adapter, then save settings. Ollama uses its native API; openai-compatible supports generic servers."
+            }).size(13).color(ui::secondary_text_color(state.light_mode)),
+        ].spacing(8).into()
+    };
 
     // Model selection
     let mut model_options = vec!["Automatic (first available)".to_string()];
@@ -1033,8 +1155,7 @@ where
 
     items = items.push(adapter_enabled);
     items = items.push(adapter_url.wrap());
-    items = items.push(use_ollama);
-    items = items.push(use_ollama_help);
+    items = items.push(runtime_adapter);
     items = items.push(model_row.wrap());
     items = items.push(text("Model ID (leave empty for automatic selection)").size(13));
     items = items.push(
@@ -1084,20 +1205,6 @@ where
         slider(0..=1000, state.broker_config.top_k, |v| Message::from(
             AdminMessage::TopKChanged(v)
         ),)
-        .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let ctx_row = row![
-        text(format!("Context tokens: {}", state.broker_config.num_ctx))
-            .size(13)
-            .width(Length::Fixed(160.0)),
-        slider(
-            512..=131072,
-            state.broker_config.num_ctx,
-            |v| Message::from(AdminMessage::NumCtxChanged(v)),
-        )
         .width(Length::Fill),
     ]
     .spacing(8)
@@ -1153,7 +1260,6 @@ where
     items = items.push(temp_row.wrap());
     items = items.push(topp_row.wrap());
     items = items.push(topk_row.wrap());
-    items = items.push(ctx_row.wrap());
     items = items.push(predict_row.wrap());
     items = items.push(repeat_row.wrap());
     items = items.push(seed_row.wrap());
@@ -1337,6 +1443,35 @@ pub mod tests {
     use super::*;
 
     #[test]
+    fn runtime_adapter_selection_is_saved_and_respects_operator_override() {
+        let mut state = AdminState {
+            adapter_plugins: vec!["freetoken".into(), "ollama".into()],
+            ..AdminState::default()
+        };
+        for id in ["ollama", "freetoken"] {
+            assert!(
+                state
+                    .update(AdminMessage::SelectRuntimeAdapter(id.into()), "admin")
+                    .is_empty()
+            );
+            assert_eq!(state.broker_config.adapter_plugin_id(), id);
+            let requests = state.update(AdminMessage::SaveBrokerConfig, "admin");
+            assert!(
+                matches!(&requests[0], Request::AdminSetBrokerConfig { config, .. }
+                if config.adapter_plugin == id)
+            );
+        }
+        state.update(
+            AdminMessage::SelectRuntimeAdapter("missing".into()),
+            "admin",
+        );
+        assert_eq!(state.broker_config.adapter_plugin, "freetoken");
+        state.adapter_override = Some("ollama".into());
+        state.update(AdminMessage::SelectRuntimeAdapter("ollama".into()), "admin");
+        assert_eq!(state.broker_config.adapter_plugin, "freetoken");
+    }
+
+    #[test]
     fn test_admin_message_variants() {
         let msg = AdminMessage::SelectTab(2);
         assert_eq!(msg, AdminMessage::SelectTab(2));
@@ -1359,8 +1494,8 @@ pub mod tests {
             AdminMessage::AdapterUrlChanged("http://localhost:11434".into())
         );
 
-        let msg = AdminMessage::ToggleOllamaApi(true);
-        assert_eq!(msg, AdminMessage::ToggleOllamaApi(true));
+        let msg = AdminMessage::SelectRuntimeAdapter("ollama".into());
+        assert_eq!(msg, AdminMessage::SelectRuntimeAdapter("ollama".into()));
 
         let msg = AdminMessage::SelectAdapterModel("llama3.2".into());
         assert_eq!(
@@ -1572,7 +1707,8 @@ pub mod tests {
         state.update(AdminMessage::AdapterUrlChanged("http://remote:11434".into()), token);
         assert_eq!(state.broker_config.adapter_url, "http://remote:11434");
 
-        state.update(AdminMessage::ToggleOllamaApi(true), token);
+        state.adapter_plugins = vec!["ollama".into(), "openai-compatible".into()];
+        state.update(AdminMessage::SelectRuntimeAdapter("ollama".into()), token);
         assert!(state.broker_config.use_ollama_api);
 
         state.update(AdminMessage::SelectAdapterModel("llama3.2".into()), token);
@@ -1808,13 +1944,64 @@ pub mod tests {
         assert!(matches!(&requests[..], [Request::AdminOllamaAction {
             session_token, action: OllamaAction::Pull { model }
         }] if session_token == "admin-session" && model == name));
-        assert!(state.models.busy);
+        assert!(!state.models.busy);
         assert!(
             state
-                .update(AdminMessage::DownloadModel("other".into()), "admin-session")
+                .update(AdminMessage::DownloadModel(name.into()), "admin-session")
                 .is_empty()
         );
-        assert_eq!(state.ollama_pull_model, name);
+        assert_eq!(
+            state
+                .update(AdminMessage::DownloadModel("other".into()), "admin-session")
+                .len(),
+            1
+        );
+        assert_eq!(state.models.downloads.len(), 2);
+    }
+
+    #[test]
+    fn parallel_download_limit_does_not_block_unrelated_deletion() {
+        let mut state = AdminState::default();
+        for model in ["a", "b", "c", "d"] {
+            assert_eq!(
+                state
+                    .update(AdminMessage::DownloadModel(model.into()), "session")
+                    .len(),
+                1
+            );
+        }
+        assert!(
+            state
+                .update(AdminMessage::DownloadModel("overflow".into()), "session")
+                .is_empty()
+        );
+        state.update(AdminMessage::ConfirmModelDelete("a".into()), "session");
+        assert!(
+            state
+                .update(AdminMessage::OllamaDelete("a".into()), "session")
+                .is_empty()
+        );
+        state.update(
+            AdminMessage::ConfirmModelDelete("unrelated".into()),
+            "session",
+        );
+        assert_eq!(
+            state
+                .update(AdminMessage::OllamaDelete("unrelated".into()), "session")
+                .len(),
+            1
+        );
+        state.models.download_started("a", 1);
+        state.models.download_for_request(1).unwrap().finished = true;
+        assert_eq!(
+            state
+                .update(AdminMessage::DownloadModel("overflow".into()), "session")
+                .len(),
+            1
+        );
+        state.models.page = 1;
+        let _view: Element<'_, AdminMessage> =
+            super::model_manager::ollama_tab_view(&state.as_view_state());
     }
 
     #[test]
@@ -1869,15 +2056,11 @@ pub mod tests {
                 .len(),
             1
         );
-        state.models.request_id = Some(99);
+        state.models.download_started("llama3.2:3b", 99);
         state.update(AdminMessage::SelectTab(1), "session");
-        assert!(
-            state
-                .update(AdminMessage::SelectTab(2), "session")
-                .is_empty()
-        );
-        assert_eq!(state.models.request_id, Some(99));
-        assert!(state.models.busy);
+        assert_eq!(state.update(AdminMessage::SelectTab(2), "session").len(), 2);
+        assert_eq!(state.models.downloads["llama3.2:3b"].request_id, Some(99));
+        assert!(!state.models.busy);
     }
 
 }

@@ -136,7 +136,7 @@ async fn call(app: &App, request: Request) -> Result<(MessageType, Bytes)> {
             new_uuid(),
             1,
             request,
-            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)).into(),
         )
         .await
     });
@@ -149,6 +149,135 @@ async fn call(app: &App, request: Request) -> Result<(MessageType, Bytes)> {
     }
     task.await??;
     result.context("missing response")
+}
+
+#[tokio::test]
+async fn runtime_adapter_selection_is_authorized_validated_and_persisted() {
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    sqlx::query("INSERT INTO broker_settings(singleton,adapter_url,use_ollama_api) VALUES(1,'http://inference.example:11434',1)")
+        .execute(&db).await.unwrap();
+    let (deltas, _) = broadcast::channel(32);
+    let app = App {
+        db,
+        adapters: test_adapter_host(),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        deltas,
+        recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
+    };
+    let mut tokens = Vec::new();
+    for username in ["adapter-admin", "adapter-user"] {
+        let (_, payload) = call(
+            &app,
+            Request::Register {
+                username: username.into(),
+                password: "test-password".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let Response::Authenticated { session_token, .. } = decode::<Response>(&payload).unwrap()
+        else {
+            panic!("registration failed")
+        };
+        tokens.push(session_token);
+    }
+    let mut config = load_broker_config(&app.db).await.unwrap();
+    assert_eq!(
+        config.adapter_plugin_id(),
+        "ollama",
+        "legacy setting is preserved"
+    );
+    let (_, payload) = call(
+        &app,
+        Request::AdminGetBrokerConfig {
+            session_token: tokens[0].clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let Response::BrokerConfig {
+        adapter_plugins,
+        adapter_override,
+        ..
+    } = decode::<Response>(&payload).unwrap()
+    else {
+        panic!("missing adapter choices")
+    };
+    assert_eq!(
+        adapter_plugins,
+        ["freetoken", "ollama", "openai-compatible"]
+    );
+    assert!(adapter_override.is_none());
+    assert!(
+        call(
+            &app,
+            Request::AdminGetBrokerConfig {
+                session_token: tokens[1].clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    config.adapter_plugin = "freetoken".into();
+    assert!(
+        call(
+            &app,
+            Request::AdminSetBrokerConfig {
+                session_token: tokens[1].clone(),
+                config: config.clone(),
+            }
+        )
+        .await
+        .is_err()
+    );
+    let (_, payload) = call(
+        &app,
+        Request::AdminSetBrokerConfig {
+            session_token: tokens[0].clone(),
+            config: config.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(decode::<Response>(&payload).unwrap(), Response::BrokerConfig { config, .. }
+        if config.adapter_plugin == "freetoken")
+    );
+    assert_eq!(
+        load_broker_config(&app.db)
+            .await
+            .unwrap()
+            .adapter_plugin_id(),
+        "freetoken"
+    );
+    for id in ["not-installed", "hugging-face"] {
+        config.adapter_plugin = id.into();
+        assert!(
+            call(
+                &app,
+                Request::AdminSetBrokerConfig {
+                    session_token: tokens[0].clone(),
+                    config: config.clone(),
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            load_broker_config(&app.db).await.unwrap().adapter_plugin,
+            "freetoken"
+        );
+    }
 }
 
 #[tokio::test]
@@ -260,7 +389,7 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
                 session_token: token,
                 since_revision: 0,
             },
-            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)).into(),
         )
         .await
     });
@@ -735,7 +864,7 @@ async fn cross_tenant_character_update_is_forbidden() {
             Request::Snapshot {
                 session_token: snapshot_token,
             },
-            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)).into(),
         )
         .await
     });
@@ -1016,6 +1145,7 @@ async fn cross_tenant_character_update_is_forbidden() {
             config: BrokerConfig {
                 adapter_enabled: false,
                 adapter_url: "http://127.0.0.1:11434/v1".into(),
+                adapter_plugin: String::new(),
                 use_ollama_api: false,
                 model: String::new(),
                 temperature: 0.8,

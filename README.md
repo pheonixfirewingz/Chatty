@@ -64,9 +64,9 @@ Admins can open **Admin Portal → Models** to manage the inference server:
 
 - **Installed:** filter by model name or family, inspect disk/VRAM use, load or unload models, and confirm deletion.
 - **Find & download:** search public Hugging Face GGUF repositories, select a file/quantization, and download it through Ollama. You can also enter an Ollama model tag or `hf.co/owner/repository:filename.gguf` directly. Search excludes gated repositories and split GGUF files.
-- **Configure:** choose the chat model, server URL, native Ollama API mode, and generation defaults, then save. These defaults apply across the broker. Unload a model and save a different chat model before deleting it.
+- **Configure:** choose the runtime adapter, chat model, server URL, and generation defaults, then save. The runtime list comes from installed broker adapters, including FreeToken, Ollama, OpenAI-compatible, and custom plugins. These defaults apply across the broker. Unload a model and save a different chat model before deleting it.
 
-Downloads are stored on the inference server, not the desktop client or broker. When inference runs on another machine, set the adapter URL to that machine's reachable Ollama address (for example, `http://192.168.1.50:11434`), then save before downloading. `127.0.0.1` refers to the broker's machine. Hugging Face search requires broker internet access; downloads require an Ollama server with Hugging Face support. Search runs only when requested, and download status reports completion or failure without byte-level progress.
+Downloads are stored on the inference server, not the desktop client or broker. When inference runs on another machine, set the adapter URL to that machine's reachable Ollama address (for example, `http://192.168.1.50:11434`), then save before downloading. `127.0.0.1` refers to the broker's machine. Hugging Face search requires broker internet access; downloads require an Ollama server with Hugging Face support. Search runs only when requested. Up to four downloads run in parallel; Installed and Find & download show per-layer byte progress and a Cancel download button. Other models can be deleted while downloads run. Downloads stop when their client disconnects; retrying lets Ollama reuse available partial data.
 
 
 ## Local speech

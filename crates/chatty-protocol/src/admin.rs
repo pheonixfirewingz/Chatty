@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct BrokerConfig {
     pub adapter_enabled: bool,
     pub adapter_url: String,
+    /// Installed inference plugin ID. Empty preserves the legacy API selection.
+    pub adapter_plugin: String,
     /// Use Ollama's native `/api/chat` surface so all runtime options are honored.
     pub use_ollama_api: bool,
     /// Empty selects the first model returned by the adapter.
@@ -23,6 +25,21 @@ pub struct BrokerConfig {
     pub keep_alive: String,
     pub allow_public_characters: bool,
     pub allow_self_registration: bool,
+}
+
+impl BrokerConfig {
+    /// Resolve settings written before explicit plugin selection was available.
+    pub fn adapter_plugin_id(&self) -> &str {
+        if self.adapter_plugin.is_empty() {
+            if self.use_ollama_api {
+                "ollama"
+            } else {
+                "openai-compatible"
+            }
+        } else {
+            &self.adapter_plugin
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -103,3 +120,15 @@ pub struct ModelSearchResult {
     pub downloads: u64,
     pub files: Vec<String>,
 }
+
+/// Progress for the current download layer, not a whole-model percentage.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ModelDownloadProgress {
+    pub status: String,
+    pub digest: Option<String>,
+    pub total: Option<u64>,
+    pub completed: Option<u64>,
+}
+
+/// Bounds concurrent pulls in both the broker and the GUI.
+pub const MAX_PARALLEL_DOWNLOADS: usize = 4;

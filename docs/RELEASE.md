@@ -29,7 +29,7 @@ Record the Rust toolchain used to build the modules. Run workspace tests and str
 - Restart broker and GUI; verify session resume and persisted conversation state.
 - Connect a second GUI as the same account and verify live deltas.
 - Verify a second account cannot access the first account's private data.
-- Exercise admin user, policy, monitor, adapter, and Ollama controls.
+- Exercise admin user, policy, monitor, adapter, and Ollama controls. Start concurrent downloads, verify per-layer progress, delete an unrelated installed model, cancel one download while another continues, and verify disconnect cleanup.
 - Test an unavailable inference server without losing broker availability.
 
 ## Flatpak bundle
