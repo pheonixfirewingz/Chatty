@@ -13,3 +13,6 @@
 .chatty/
 broker.log
 *.log
+
+# Legacy adapter build outputs; current builds use Cargo target directories.
+/crates/chatty-adapters/*/adapter.wasm

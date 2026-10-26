@@ -78,7 +78,7 @@ Plugin development and limits are documented in [Adapter contract](architecture/
 
 ### FreeToken on a remote machine
 
-FreeToken is bundled: choose `freetoken` in the admin portal's runtime adapter list and save settings. Operators can also force it with `CHATTY_ADAPTER_PLUGIN=freetoken` in the broker service environment, followed by a broker restart. No additional plugin directory is needed. The source, ABI-1 manifest, and import-free `wasm32-unknown-unknown` artifact live in `crates/chatty-adapters/freetoken/`. Do not copy a bundled ID into `CHATTY_ADAPTER_DIR`; duplicate IDs are rejected.
+FreeToken is bundled: choose `freetoken` in the admin portal's runtime adapter list and save settings. Operators can also force it with `CHATTY_ADAPTER_PLUGIN=freetoken` in the broker service environment, followed by a broker restart. No additional plugin directory is needed. The source and ABI-1 manifest live in `crates/chatty-adapters/freetoken/`. Broker builds generate the import-free WASM module in Cargo build output and embed it automatically. Do not copy a bundled ID into `CHATTY_ADAPTER_DIR`; duplicate IDs are rejected.
 
 In the admin portal, enable inference and set the existing server URL to the remote **serve** endpoint, for example `https://inference.example:1919/v1`. Both the server root and a trailing `/v1` are accepted, including an optional reverse-proxy prefix. Select a dynamically discovered model ID or leave the existing default selection behavior. Do not point this URL at FreeToken's daemon (normally port 1900). FreeToken's serve port defaults to 1919 and its bind address defaults to loopback; configure access on the inference machine or through a reverse proxy. Model installation, weight storage, and inference execution remain on that machine.
 
@@ -204,9 +204,10 @@ installation:
 
 Back up SQLite first. The script fast-forwards the checkout with `git pull
 --ff-only`, ensures the `wasm32-unknown-unknown` Rust target is installed, and rebuilds
-all bundled adapters before building the broker that embeds them. Both builds use
-a fresh temporary target directory and `Cargo.lock`; deployment passes `--online`
-to `scripts/build-adapters.sh` so Cargo can download missing dependencies.
+the broker from source in a fresh temporary target directory with `Cargo.lock`.
+The broker build automatically compiles and embeds its bundled adapters beneath
+that build directory. Native Cargo resolves dependencies before the locked,
+offline guest build; no generated modules are copied into the checkout.
 The script then stops the service and atomically replaces the binary. The
 old executable is retained alongside it as `chatty-broker.backup.<timestamp>.<pid>`.
 Temporary build files are removed on exit. The service configuration, certificates,

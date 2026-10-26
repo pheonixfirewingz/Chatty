@@ -54,6 +54,11 @@ pub enum Response {
     Conversations(Vec<Conversation>),
     ConversationView(ConversationView),
     Memories(Vec<MemoryEntry>),
+    /// Result of merging redundant memories. Counts cover changed scopes only.
+    MemoriesCondensed {
+        before: usize,
+        after: usize,
+    },
     SyncComplete {
         revision: i64,
     },

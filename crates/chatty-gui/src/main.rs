@@ -11,17 +11,17 @@ pub mod worlds;
 
 use chatty_protocol::util::args::ParsedArgs;
 use chatty_protocol::util::current_utc_timestamp;
-use chatty_protocol::util::{format_err, Error, Result};
+use chatty_protocol::util::{Error, Result, format_err};
 use chatty_protocol::*;
-use iced::futures::stream::BoxStream;
 use iced::futures::StreamExt;
+use iced::futures::stream::BoxStream;
 use iced::widget::{
     Id, Space, button, column, container, mouse_area, responsive, row, scrollable, stack, text,
     text_input, toggler, tooltip,
 };
 use iced::{
-    Alignment, Background, Border, Color, Element, Length, Padding, Point, Size,
-    Subscription, Task, Theme, font, window,
+    Alignment, Background, Border, Color, Element, Length, Padding, Point, Size, Subscription,
+    Task, Theme, font, window,
 };
 use iced_dialog::dialog;
 use std::collections::{HashMap, HashSet};
@@ -31,26 +31,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use admin_monitor::{
-    admin_dialog_view, admin_subscription, AdminMessage, AdminState,
-};
-use characters::{character_dialog_view, CharacterMessage, DraftCharacter};
+use admin_monitor::{AdminMessage, AdminState, admin_dialog_view, admin_subscription};
+use characters::{CharacterMessage, DraftCharacter, character_dialog_view};
 use conversation::{
-    conversation_view, new_chat_dialog_view, ConversationMessage, ConversationViewState,
-    NewChatViewState,
+    ConversationMessage, ConversationViewState, NewChatViewState, conversation_view,
+    new_chat_dialog_view,
 };
 use memories::{
-    memory_dialog_view, MemoryAction, MemoryDialogState, MemoryMessage, MemoryViewState,
+    MemoryAction, MemoryDialogState, MemoryMessage, MemoryViewState, memory_dialog_view,
 };
 use network::{
-    save_preferences, session_path, Command, ConnectionTarget, Event, PendingCertificate,
+    Command, ConnectionTarget, Event, PendingCertificate, save_preferences, session_path,
 };
-use tts::{test_speech, tts_channel, LocalTts, TtsEvent};
-use ui::{
-    icon_button,
-    sidebar_panel, sidebar_toggle_button, FooterIcon,
-};
-use worlds::{world_dialog_view, WorldAction, WorldDialogState, WorldMessage, WorldViewState};
+use tts::{LocalTts, TtsEvent, test_speech, tts_channel};
+use ui::{FooterIcon, icon_button, sidebar_panel, sidebar_toggle_button};
+use worlds::{WorldAction, WorldDialogState, WorldMessage, WorldViewState, world_dialog_view};
 
 const USAGE: &str = "chatty-gui -- Chatty client\n\n\
 Options:\n\
@@ -152,7 +147,10 @@ impl From<ConversationMessage> for Message {
 }
 
 #[derive(Clone)]
-struct ChannelHolder<T>(Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<T>>>>, usize);
+struct ChannelHolder<T>(
+    Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<T>>>>,
+    usize,
+);
 
 impl<T> std::hash::Hash for ChannelHolder<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -168,9 +166,7 @@ impl<T> PartialEq for ChannelHolder<T> {
 
 impl<T> Eq for ChannelHolder<T> {}
 
-fn run_channel_stream<T: Send + 'static>(
-    holder: &ChannelHolder<T>,
-) -> BoxStream<'static, T> {
+fn run_channel_stream<T: Send + 'static>(holder: &ChannelHolder<T>) -> BoxStream<'static, T> {
     let mutex = holder.0.clone();
     iced::stream::channel(
         100,
@@ -451,8 +447,11 @@ impl ChattyApp {
                 match parts[0] {
                     "resize" => {
                         if parts.len() >= 3 {
-                            if let (Ok(w), Ok(h)) = (parts[1].parse::<f32>(), parts[2].parse::<f32>()) {
-                                return window::latest().and_then(move |id| window::resize(id, Size::new(w, h)));
+                            if let (Ok(w), Ok(h)) =
+                                (parts[1].parse::<f32>(), parts[2].parse::<f32>())
+                            {
+                                return window::latest()
+                                    .and_then(move |id| window::resize(id, Size::new(w, h)));
                             }
                         }
                     }
@@ -469,7 +468,9 @@ impl ChattyApp {
                     "screenshot" => {
                         if parts.len() >= 2 {
                             self.pending_screenshot_path = Some(PathBuf::from(parts[1]));
-                            return window::latest().and_then(window::screenshot).map(Message::ScreenshotCaptured);
+                            return window::latest()
+                                .and_then(window::screenshot)
+                                .map(Message::ScreenshotCaptured);
                         }
                     }
                     "sidebar" => {
@@ -505,7 +506,8 @@ impl ChattyApp {
                     "models" => {
                         self.screen = Screen::Admin;
                         self.admin.admin_tab = 2;
-                        self.admin.models.page = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+                        self.admin.models.page =
+                            parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
                     }
                     "settings" => {
                         self.screen = Screen::Settings;
@@ -589,7 +591,8 @@ impl ChattyApp {
                     if let Some(target) = connection_target(&self.server_address) {
                         self.server_address = target.server_name.clone();
                         self.connecting = true;
-                        self.status = format!("Connecting to {}:\u{202f}7443\u{2026}", self.server_address);
+                        self.status =
+                            format!("Connecting to {}:\u{202f}7443\u{2026}", self.server_address);
                         self.error = None;
                         let _ = self.commands.send(Command::Connect(target));
                     } else {
@@ -738,7 +741,8 @@ impl ChattyApp {
                     if trust {
                         let _ = self.commands.send(Command::TrustCertificate(cert));
                         self.connecting = true;
-                        self.status = format!("Connecting to {}:\u{202f}7443\u{2026}", self.server_address);
+                        self.status =
+                            format!("Connecting to {}:\u{202f}7443\u{2026}", self.server_address);
                     } else {
                         let _ = self.commands.send(Command::RejectCertificate);
                         self.connected = false;
@@ -926,6 +930,15 @@ impl ChattyApp {
                             self.memory_state.status_message = Some("Learning from chat…".into());
                         }
                     }
+                    MemoryAction::Condense => {
+                        self.send(Request::CondenseMemories {
+                            session_token: self.token.clone(),
+                            conversation_id: self.memory_state.filter_conversation_id.clone(),
+                            character_id: self.memory_state.filter_character_id.clone(),
+                            kind: self.memory_state.filter_kind,
+                        });
+                        self.memory_state.status_message = Some("Condensing memories…".into());
+                    }
                     MemoryAction::Refresh { .. } => {
                         self.request_filtered_memories();
                     }
@@ -1012,7 +1025,8 @@ impl ChattyApp {
                         self.selected_characters.insert(id);
                     }
                     ConversationMessage::CreateNewChat => {
-                        let participant_ids: Vec<String> = self.selected_characters.iter().cloned().collect();
+                        let participant_ids: Vec<String> =
+                            self.selected_characters.iter().cloned().collect();
                         let title = if self.new_conversation_title.trim().is_empty() {
                             "New Conversation".to_string()
                         } else {
@@ -1066,6 +1080,9 @@ impl ChattyApp {
             Color::from_rgba(0.0, 0.0, 0.0, 0.35)
         };
 
+        // Keep the base wrapped in the dialog stack even when no modal is open. Returning the
+        // bare base would change the root widget type whenever a modal opens or closes, which
+        // discards the widget tree state and resets every scroll offset to the top.
         let root: Element<Message> = if let Some(cert) = &self.pending_certificate {
             dialog(
                 true,
@@ -1090,7 +1107,9 @@ impl ChattyApp {
                 .max_height((size.height - 16.0).max(1.0))
                 .max_width(400.0)
                 .on_press(Message::DismissError)
-                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .container_style(move |_| {
+                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
+                })
                 .into()
         } else if self.worlds_open {
             let world_state = WorldViewState {
@@ -1115,10 +1134,13 @@ impl ChattyApp {
                 .max_width(740.0)
                 .max_height((size.height - 32.0).clamp(1.0, 780.0))
                 .on_press(Message::CloseWorldsDialog)
-                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .container_style(move |_| {
+                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
+                })
                 .into()
         } else if self.memory_dialog_open {
-            let can_extract = self.selected_conversation.is_some() && self.selected_speaker().is_some();
+            let can_extract =
+                self.selected_conversation.is_some() && self.selected_speaker().is_some();
             let memory_view_state = MemoryViewState::new(
                 &self.memories,
                 &self.characters,
@@ -1135,7 +1157,9 @@ impl ChattyApp {
                 .max_width(780.0)
                 .max_height((size.height - 32.0).clamp(1.0, 780.0))
                 .on_press(Message::CloseMemoriesDialog)
-                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .container_style(move |_| {
+                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
+                })
                 .into()
         } else if self.draft_character_open {
             let char_view = character_dialog_view(
@@ -1157,7 +1181,9 @@ impl ChattyApp {
                 .max_width(940.0)
                 .max_height((size.height - 32.0).clamp(1.0, 740.0))
                 .on_press(Message::CloseCharactersDialog)
-                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .container_style(move |_| {
+                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
+                })
                 .into()
         } else if self.new_chat_open {
             let new_chat_state = NewChatViewState {
@@ -1175,11 +1201,15 @@ impl ChattyApp {
                     .padding_outer(8)
                     .max_width(460.0)
                     .max_height((size.height - 32.0).clamp(1.0, 580.0))
-                    .on_press(Message::Conversation(ConversationMessage::CloseNewChatDialog))
-                    .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                    .on_press(Message::Conversation(
+                        ConversationMessage::CloseNewChatDialog,
+                    ))
+                    .container_style(move |_| {
+                        ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
+                    })
                     .into()
             } else {
-                base
+                dialog(false, base, Space::new()).into()
             }
         } else if self.screen == Screen::Admin {
             let admin_view_state = self.admin.as_view_state();
@@ -1208,10 +1238,12 @@ impl ChattyApp {
                 .max_width(440.0)
                 .max_height((size.height - 32.0).clamp(1.0, 600.0))
                 .on_press(Message::CloseSettingsDialog)
-                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .container_style(move |_| {
+                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
+                })
                 .into()
         } else {
-            base
+            dialog(false, base, Space::new()).into()
         };
 
         let light_mode = self.light_mode;
@@ -1229,8 +1261,9 @@ impl ChattyApp {
             .map(Message::Network);
         let tts_sub =
             Subscription::run_with(self.tts_holder.clone(), run_tts_stream).map(Message::Tts);
-        let admin_sub = admin_subscription(self.screen == Screen::Admin && self.admin.admin_tab == 0)
-            .map(Message::Admin);
+        let admin_sub =
+            admin_subscription(self.screen == Screen::Admin && self.admin.admin_tab == 0)
+                .map(Message::Admin);
 
         let fifo_sub = if let Some(path) = &self.fifo_path {
             Subscription::run_with(path.clone(), run_fifo_stream).map(Message::InspectControl)
@@ -1250,12 +1283,10 @@ impl ChattyApp {
     }
 
     fn server_connection_view<'a>(&'a self) -> Element<'a, Message> {
-        let title = text("Connect to Chatty")
-            .size(28)
-            .font(font::Font {
-                weight: font::Weight::Bold,
-                ..Default::default()
-            });
+        let title = text("Connect to Chatty").size(28).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        });
         let subtitle = text("Enter the IP address or domain of your Chatty server.")
             .size(14)
             .color(ui::secondary_text_color(self.light_mode));
@@ -1428,10 +1459,13 @@ impl ChattyApp {
         .align_y(Alignment::Center);
 
         let new_chat_btn = button(
-            row![text("+").size(18), text("New chat").size(15).font(font::Font {
-                weight: font::Weight::Bold,
-                ..Default::default()
-            })]
+            row![
+                text("+").size(18),
+                text("New chat").size(15).font(font::Font {
+                    weight: font::Weight::Bold,
+                    ..Default::default()
+                })
+            ]
             .spacing(8)
             .align_y(Alignment::Center),
         )
@@ -1476,12 +1510,18 @@ impl ChattyApp {
                     }
                 } else {
                     let bg = match status {
-                        button::Status::Hovered => {
-                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.08)
-                        }
-                        button::Status::Pressed => {
-                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.14)
-                        }
+                        button::Status::Hovered => Color::from_rgba(
+                            theme.palette().text.r,
+                            theme.palette().text.g,
+                            theme.palette().text.b,
+                            0.08,
+                        ),
+                        button::Status::Pressed => Color::from_rgba(
+                            theme.palette().text.r,
+                            theme.palette().text.g,
+                            theme.palette().text.b,
+                            0.14,
+                        ),
                         _ => Color::TRANSPARENT,
                     };
                     button::Style {
@@ -1506,7 +1546,11 @@ impl ChattyApp {
                     ui::COLOR_PRIMARY_STRONG
                 } else {
                     let base = ui::surface_color(self.light_mode, self.glass_mode);
-                    let overlay = if self.light_mode { Color::BLACK } else { Color::WHITE };
+                    let overlay = if self.light_mode {
+                        Color::BLACK
+                    } else {
+                        Color::WHITE
+                    };
                     Color::from_rgb(
                         base.r * 0.92 + overlay.r * 0.08,
                         base.g * 0.92 + overlay.g * 0.08,
@@ -1583,32 +1627,29 @@ impl ChattyApp {
                 .style(move |_| container::Style {
                     background: Some(Background::Color(tile_bg)),
                     border: Border {
-                        radius: iced::border::Radius { top_left: 0.0, top_right: 8.0, bottom_right: 8.0, bottom_left: 0.0 },
+                        radius: iced::border::Radius {
+                            top_left: 0.0,
+                            top_right: 8.0,
+                            bottom_right: 8.0,
+                            bottom_left: 0.0,
+                        },
                         ..Default::default()
                     },
                     ..Default::default()
                 });
 
-                let overlay = row![
-                    Space::new().width(Length::Fill),
-                    fade_box,
-                ]
-                .width(Length::Fill)
-                .height(Length::Fill);
+                let overlay = row![Space::new().width(Length::Fill), fade_box,]
+                    .width(Length::Fill)
+                    .height(Length::Fill);
 
-                let tile_stack = stack![
-                    title_btn,
-                    overlay,
-                ];
+                let tile_stack = stack![title_btn, overlay,];
 
                 mouse_area(tile_stack)
                     .on_enter(Message::HoverConversation(Some(conv_hover_id)))
                     .on_exit(Message::HoverConversation(None))
                     .into()
             } else {
-                let tile_stack = stack![
-                    title_btn,
-                ];
+                let tile_stack = stack![title_btn,];
 
                 mouse_area(tile_stack)
                     .on_enter(Message::HoverConversation(Some(conv_hover_id)))
@@ -1814,7 +1855,10 @@ impl ChattyApp {
         container(content).width(Length::Fill).into()
     }
 
-    fn certificate_trust_dialog_view<'a>(&'a self, cert: &'a PendingCertificate) -> Element<'a, Message> {
+    fn certificate_trust_dialog_view<'a>(
+        &'a self,
+        cert: &'a PendingCertificate,
+    ) -> Element<'a, Message> {
         let title = text("Trust this Chatty server?").size(20).font(font::Font {
             weight: font::Weight::Bold,
             ..Default::default()
@@ -1941,7 +1985,13 @@ impl ChattyApp {
         });
     }
 
-    pub(crate) fn authenticated(&mut self, token: String, user_id: String, role: Role, revision: i64) {
+    pub(crate) fn authenticated(
+        &mut self,
+        token: String,
+        user_id: String,
+        role: Role,
+        revision: i64,
+    ) {
         self.connected = true;
         self.connecting = false;
         self.restoring_session = false;
@@ -1973,6 +2023,7 @@ impl ChattyApp {
             }
             Event::Status(status) => {
                 if status.contains("Offline:") || status.contains("Idle · offline:") {
+                    self.memory_state.condensing = false;
                     self.admin.models.interrupt_downloads();
                     self.admin.models.busy = false;
                     self.admin.models.request_id = None;
@@ -1986,6 +2037,7 @@ impl ChattyApp {
                 self.restoring_session = resuming_session;
             }
             Event::ConnectionFailed(message) => {
+                self.memory_state.condensing = false;
                 self.admin.models.interrupt_downloads();
                 self.admin.models.busy = false;
                 self.admin.models.request_id = None;
@@ -2137,6 +2189,19 @@ impl ChattyApp {
                             self.characters = v;
                         }
                         Response::Memories(v) => self.memories = v,
+                        Response::MemoriesCondensed { before, after } => {
+                            self.memory_state.condensing = false;
+                            self.memory_state.status_message = Some(if before == 0 {
+                                "No redundant memories found.".into()
+                            } else {
+                                format!("Condensed {before} memories into {after}.")
+                            });
+                            if !self.token.is_empty() {
+                                self.send(Request::GetAccountUsage {
+                                    session_token: self.token.clone(),
+                                });
+                            }
+                        }
                         Response::CharacterImage {
                             character_id,
                             image_id,
@@ -2342,6 +2407,7 @@ impl ChattyApp {
                 self.world_state.import_started = None;
                 self.char_import_pending = false;
                 self.char_import_started = None;
+                self.memory_state.condensing = false;
                 if self
                     .memory_state
                     .status_message
@@ -2730,8 +2796,9 @@ impl ChattyApp {
             id: "m2".into(),
             author_type: "character".into(),
             author_id: Some("assistant".into()),
-            content: "# The old observatory\n\nIt has watched the valley for **two hundred years**."
-                .into(),
+            content:
+                "# The old observatory\n\nIt has watched the valley for **two hundred years**."
+                    .into(),
             parent_id: Some("m1".into()),
             selected_variant_id: None,
             character_image_id: Some("demo-neutral".into()),
@@ -2795,7 +2862,10 @@ impl ChattyApp {
         self.admin.models.results = vec![ModelSearchResult {
             id: "bartowski/Llama-3.2-1B-Instruct-GGUF".into(),
             downloads: 12345,
-            files: vec!["Llama-3.2-1B-Instruct-Q4_K_M.gguf".into(), "Llama-3.2-1B-Instruct-Q8_0.gguf".into()],
+            files: vec![
+                "Llama-3.2-1B-Instruct-Q4_K_M.gguf".into(),
+                "Llama-3.2-1B-Instruct-Q8_0.gguf".into(),
+            ],
         }];
         self.admin.ollama_state = Some(OllamaState {
             version: "0.12.6".into(),
@@ -3018,7 +3088,10 @@ mod tests {
                 revision: 2,
             }],
         };
-        assert_eq!(ChattyApp::displayed_message_content(&message), "replacement");
+        assert_eq!(
+            ChattyApp::displayed_message_content(&message),
+            "replacement"
+        );
 
         message.selected_variant_id = Some("missing".into());
         assert_eq!(ChattyApp::displayed_message_content(&message), "original");
@@ -3301,5 +3374,77 @@ mod tests {
         assert!(!app.admin.models.downloads["a"].finished);
         app.handle_event(Event::Status("Offline: connection lost".into()));
         assert!(app.admin.models.downloads["a"].finished);
+    }
+
+    #[test]
+    fn memory_condense_flow_updates_status_and_recovers_on_error() {
+        let (commands, mut sent) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.token = "session-token".into();
+        app.memory_state.filter_character_id = Some("char-1".into());
+        app.memory_state.filter_conversation_id = Some("conv-1".into());
+        app.memory_state.filter_kind = Some(chatty_protocol::MemoryKind::Fact);
+
+        let _ = app.update(Message::Memory(MemoryMessage::Condense));
+        assert!(app.memory_state.condensing);
+        assert_eq!(
+            app.memory_state.status_message.as_deref(),
+            Some("Condensing memories…")
+        );
+        match sent.try_recv().unwrap() {
+            Command::Request(req) => match *req {
+                Request::CondenseMemories {
+                    session_token,
+                    conversation_id,
+                    character_id,
+                    kind,
+                } => {
+                    assert_eq!(session_token, "session-token");
+                    assert_eq!(conversation_id.as_deref(), Some("conv-1"));
+                    assert_eq!(character_id.as_deref(), Some("char-1"));
+                    assert_eq!(kind, Some(chatty_protocol::MemoryKind::Fact));
+                }
+                other => panic!("unexpected request: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 1,
+            payload: encode(&Response::MemoriesCondensed {
+                before: 4,
+                after: 2,
+            })
+            .unwrap(),
+        });
+        assert!(!app.memory_state.condensing);
+        assert_eq!(
+            app.memory_state.status_message.as_deref(),
+            Some("Condensed 4 memories into 2.")
+        );
+        match sent.try_recv().unwrap() {
+            Command::Request(req) => assert!(matches!(*req, Request::GetAccountUsage { .. })),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let _ = app.update(Message::Memory(MemoryMessage::Condense));
+        assert!(app.memory_state.condensing);
+        let _ = sent.try_recv().unwrap();
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Error,
+            request_id: 2,
+            payload: encode(&WireError {
+                code: ErrorCode::BackendUnavailable,
+                message: "model busy".into(),
+                retryable: true,
+            })
+            .unwrap(),
+        });
+        assert!(!app.memory_state.condensing);
+        assert_eq!(app.memory_state.status_message, None);
     }
 }

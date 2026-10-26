@@ -42,6 +42,7 @@ Requirements:
 Run the broker and GUI together:
 
 ```sh
+rustup target add wasm32-unknown-unknown
 CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 ./start-chatty.sh
 ```
 

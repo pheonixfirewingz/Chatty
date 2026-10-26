@@ -59,20 +59,35 @@ impl Registry {
         for (id, bytes) in [
             (
                 "openai-compatible",
-                include_bytes!("../../../../chatty-adapters/openai-compatible/adapter.wasm")
-                    .as_slice(),
+                include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_openai_compatible.wasm"
+                ))
+                .as_slice(),
             ),
             (
                 "freetoken",
-                include_bytes!("../../../../chatty-adapters/freetoken/adapter.wasm").as_slice(),
+                include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_freetoken.wasm"
+                ))
+                .as_slice(),
             ),
             (
                 "ollama",
-                include_bytes!("../../../../chatty-adapters/ollama/adapter.wasm").as_slice(),
+                include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_ollama.wasm"
+                ))
+                .as_slice(),
             ),
             (
                 "hugging-face",
-                include_bytes!("../../../../chatty-adapters/hugging-face/adapter.wasm").as_slice(),
+                include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_hugging_face.wasm"
+                ))
+                .as_slice(),
             ),
         ] {
             plugins.insert(id.into(), PluginSource::Bundled(bytes));

@@ -1,6 +1,6 @@
 # ADR 0003: WASM inference adapter plugins
 
-Status: accepted  
+Status: accepted; checked-in artifact policy superseded by [ADR 0004](0004-source-built-bundled-adapters.md)
 Recorded: 2026-10-26
 
 ## Context

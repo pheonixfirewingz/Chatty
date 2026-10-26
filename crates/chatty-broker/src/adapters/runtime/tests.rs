@@ -361,7 +361,10 @@ impl PluginDirectory {
         .unwrap();
         std::fs::write(
             plugin.join("adapter.wasm"),
-            include_bytes!("../../../../chatty-adapters/openai-compatible/adapter.wasm"),
+            include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/wasm/wasm32-unknown-unknown/release/chatty_adapter_openai_compatible.wasm"
+            )),
         )
         .unwrap();
         Self(path)

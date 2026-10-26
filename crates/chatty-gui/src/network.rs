@@ -317,14 +317,21 @@ fn save_last_server(path: &Path, server: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(path, format!("{server}
-"));
+    let _ = fs::write(
+        path,
+        format!(
+            "{server}
+"
+        ),
+    );
 }
 
 pub(crate) fn load_tts_auto_speak(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .is_some_and(|value| value.lines().any(|line| line.trim() == "tts_auto_speak=true"))
+    fs::read_to_string(path).ok().is_some_and(|value| {
+        value
+            .lines()
+            .any(|line| line.trim() == "tts_auto_speak=true")
+    })
 }
 
 pub(crate) fn save_preferences(path: &Path, tts_auto_speak: bool) {
@@ -508,7 +515,7 @@ async fn verify_chatty_handshake(mut stream: TlsStream<TcpStream>) -> Result<Tls
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
-        || value["protocol"] != 17
+        || value["protocol"] != 18
         || value["encoding"] != "bincode2"
     {
         bail!("unsupported broker handshake");
@@ -973,9 +980,9 @@ mod tests {
     use super::{
         CertificateVerifier, Event, EventSender, PendingCertificate, SavedSession,
         certificate_fingerprint, default_server_ca_path, default_session_path,
-        is_expected_post_logout_unauthorized, last_server_path, load_last_server,
-        load_session, load_tts_auto_speak, save_last_server,
-        save_preferences, save_session, take_accepted_generation,
+        is_expected_post_logout_unauthorized, last_server_path, load_last_server, load_session,
+        load_tts_auto_speak, save_last_server, save_preferences, save_session,
+        take_accepted_generation,
     };
     use chatty_protocol::{ErrorCode, Request, Response, WireError};
     use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
@@ -1025,7 +1032,9 @@ mod tests {
 
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_sender = EventSender::from_tokio(tokio_tx);
-        tokio_sender.send(Event::Status("FromTokio".into())).unwrap();
+        tokio_sender
+            .send(Event::Status("FromTokio".into()))
+            .unwrap();
         assert!(matches!(
             tokio_rx.blocking_recv(),
             Some(Event::Status(status)) if status == "FromTokio"
@@ -1173,10 +1182,8 @@ mod tests {
 
     #[test]
     fn speech_preferences_round_trip() {
-        let path = std::env::temp_dir().join(format!(
-            "chatty-speech-preferences-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("chatty-speech-preferences-{}", std::process::id()));
         save_preferences(&path, true);
         assert!(load_tts_auto_speak(&path));
         save_preferences(&path, false);
@@ -1186,18 +1193,20 @@ mod tests {
 
     #[test]
     fn legacy_appearance_preferences_preserve_speech_setting() {
-        let path = std::env::temp_dir().join(format!(
-            "chatty-legacy-appearance-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("chatty-legacy-appearance-{}", std::process::id()));
         std::fs::write(
             &path,
             "theme=light\nsurface=solid\ntransparency=80\ntts_auto_speak=true\n",
-        ).unwrap();
+        )
+        .unwrap();
         let speech = load_tts_auto_speak(&path);
         assert!(speech);
         save_preferences(&path, speech);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tts_auto_speak=true\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "tts_auto_speak=true\n"
+        );
         let _ = std::fs::remove_file(path);
     }
 

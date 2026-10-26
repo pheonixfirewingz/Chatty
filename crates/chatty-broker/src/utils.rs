@@ -217,6 +217,7 @@ pub(super) fn is_mutating(request: &Request) -> bool {
             | Request::DeleteWorld { .. }
             | Request::UpsertMemory { .. }
             | Request::ExtractMemory { .. }
+            | Request::CondenseMemories { .. }
     )
 }
 

@@ -133,9 +133,7 @@ revision=$(git rev-parse HEAD)
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/chatty-deploy.XXXXXXXX")
 host_target=$(rustc -vV | sed -n 's/^host: //p')
 [[ -n "$host_target" ]] || die 'Cannot determine the Rust host target'
-printf 'Building bundled WASM adapters for revision %s…\n' "$revision"
 rustup target add wasm32-unknown-unknown
-CARGO_TARGET_DIR="$build_dir" bash scripts/build-adapters.sh --online
 printf 'Building broker revision %s from scratch for %s…\n' "$revision" "$host_target"
 cargo build --locked --release --package chatty-broker --bin chatty-broker \
     --target "$host_target" --target-dir "$build_dir"

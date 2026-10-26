@@ -27,7 +27,7 @@ pub(super) fn memory_source_from_i64(value: i64) -> Result<MemorySource> {
     }
 }
 
-fn memory_kind_value(value: MemoryKind) -> i64 {
+pub(super) fn memory_kind_value(value: MemoryKind) -> i64 {
     match value {
         MemoryKind::Fact => 0,
         MemoryKind::Event => 1,
@@ -36,7 +36,7 @@ fn memory_kind_value(value: MemoryKind) -> i64 {
     }
 }
 
-fn memory_source_value(value: MemorySource) -> i64 {
+pub(super) fn memory_source_value(value: MemorySource) -> i64 {
     match value {
         MemorySource::Manual => 0,
         MemorySource::Automatic => 1,

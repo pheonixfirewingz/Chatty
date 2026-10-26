@@ -1,11 +1,9 @@
 //! Memories management view and messages for Iced 0.14.
 #![allow(dead_code)]
 
-use chatty_protocol::{
-    Character, Conversation, MemoryEntry, MemoryInput, MemoryKind,
-};
+use chatty_protocol::{Character, Conversation, MemoryEntry, MemoryInput, MemoryKind};
 use iced::widget::{
-    button, column, container, pick_list, row, scrollable, slider, text, text_input, Space,
+    Space, button, column, container, pick_list, row, scrollable, slider, text, text_input,
 };
 use iced::{Alignment, Element, Length, Padding};
 
@@ -32,6 +30,8 @@ pub enum MemoryMessage {
     AddMemory,
     /// Request the broker extract memories from recent chat messages.
     ExtractFromChat,
+    /// Merge redundant unpinned memories in the current scope in one click.
+    Condense,
     /// Refresh memory list from the broker.
     Refresh,
     /// Open editor for an existing memory entry.
@@ -73,6 +73,7 @@ pub enum MemoryAction {
     Save(MemoryInput),
     Delete(String),
     ExtractFromChat,
+    Condense,
     Refresh {
         character_id: Option<String>,
         conversation_id: Option<String>,
@@ -90,6 +91,7 @@ pub struct MemoryDialogState {
     pub search_query: String,
     pub editing_memory: Option<MemoryInput>,
     pub delete_confirm_id: Option<String>,
+    pub condensing: bool,
     pub status_message: Option<String>,
 }
 
@@ -98,10 +100,7 @@ impl MemoryDialogState {
         Self::default()
     }
 
-    pub fn with_filters(
-        character_id: Option<String>,
-        conversation_id: Option<String>,
-    ) -> Self {
+    pub fn with_filters(character_id: Option<String>, conversation_id: Option<String>) -> Self {
         Self {
             filter_character_id: character_id,
             filter_conversation_id: conversation_id,
@@ -110,11 +109,7 @@ impl MemoryDialogState {
     }
 
     /// Handles a `MemoryMessage` and returns an outgoing `MemoryAction`.
-    pub fn update(
-        &mut self,
-        memories: &[MemoryEntry],
-        message: MemoryMessage,
-    ) -> MemoryAction {
+    pub fn update(&mut self, memories: &[MemoryEntry], message: MemoryMessage) -> MemoryAction {
         match message {
             MemoryMessage::SearchChanged(query) => {
                 self.search_query = query;
@@ -150,6 +145,14 @@ impl MemoryDialogState {
                 MemoryAction::None
             }
             MemoryMessage::ExtractFromChat => MemoryAction::ExtractFromChat,
+            MemoryMessage::Condense => {
+                if self.condensing {
+                    MemoryAction::None
+                } else {
+                    self.condensing = true;
+                    MemoryAction::Condense
+                }
+            }
             MemoryMessage::Refresh => MemoryAction::Refresh {
                 character_id: self.filter_character_id.clone(),
                 conversation_id: self.filter_conversation_id.clone(),
@@ -242,10 +245,7 @@ impl MemoryDialogState {
 // -----------------------------------------------------------------------------
 
 /// Constructs a blank `MemoryInput` pre-populated with optional scope and default values.
-pub fn blank_memory(
-    character_id: Option<String>,
-    conversation_id: Option<String>,
-) -> MemoryInput {
+pub fn blank_memory(character_id: Option<String>, conversation_id: Option<String>) -> MemoryInput {
     MemoryInput {
         id: None,
         conversation_id,
@@ -287,6 +287,28 @@ pub fn filter_memories<'a>(
             q.is_empty() || m.content.to_lowercase().contains(&q)
         })
         .collect()
+}
+
+/// Returns whether the selected scope contains at least two unpinned memories
+/// sharing a `(conversation_id, character_id, kind)` group that can be condensed.
+pub fn can_condense_memories(
+    memories: &[MemoryEntry],
+    character_id: Option<&str>,
+    conversation_id: Option<&str>,
+    kind: Option<MemoryKind>,
+) -> bool {
+    let scoped = filter_memories(memories, character_id, conversation_id, kind, "");
+    let unpinned: Vec<&MemoryEntry> = scoped.into_iter().filter(|m| !m.pinned).collect();
+    for (idx, left) in unpinned.iter().enumerate() {
+        if unpinned[idx + 1..].iter().any(|right| {
+            left.conversation_id == right.conversation_id
+                && left.character_id == right.character_id
+                && left.kind == right.kind
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 // -----------------------------------------------------------------------------
@@ -377,9 +399,7 @@ impl<'a> MemoryViewState<'a> {
 }
 
 /// Renders the Iced 0.14 Memories management dialog.
-pub fn memory_dialog_view<'a, Message>(
-    view: &MemoryViewState<'a>,
-) -> Element<'a, Message>
+pub fn memory_dialog_view<'a, Message>(view: &MemoryViewState<'a>) -> Element<'a, Message>
 where
     Message: 'a + Clone + From<MemoryMessage>,
 {
@@ -412,15 +432,16 @@ where
         });
     }
     let selected_char_opt = if let Some(ref cid) = state.filter_character_id {
-        char_options.iter().find(|o| o.id.as_deref() == Some(cid)).cloned()
+        char_options
+            .iter()
+            .find(|o| o.id.as_deref() == Some(cid))
+            .cloned()
     } else {
         Some(char_options[0].clone())
     };
-    let char_picker = pick_list(
-        char_options,
-        selected_char_opt,
-        |opt: CharacterOption| Message::from(MemoryMessage::FilterCharacter(opt.id)),
-    );
+    let char_picker = pick_list(char_options, selected_char_opt, |opt: CharacterOption| {
+        Message::from(MemoryMessage::FilterCharacter(opt.id))
+    });
 
     // Conversation filter options
     let mut conv_options = vec![ConversationOption {
@@ -434,7 +455,10 @@ where
         });
     }
     let selected_conv_opt = if let Some(ref cvid) = state.filter_conversation_id {
-        conv_options.iter().find(|o| o.id.as_deref() == Some(cvid)).cloned()
+        conv_options
+            .iter()
+            .find(|o| o.id.as_deref() == Some(cvid))
+            .cloned()
     } else {
         Some(conv_options[0].clone())
     };
@@ -446,35 +470,43 @@ where
 
     // Kind filter options
     let kind_options = vec![
-        KindOption { kind: None, label: "All kinds" },
-        KindOption { kind: Some(MemoryKind::Fact), label: "Facts" },
-        KindOption { kind: Some(MemoryKind::Event), label: "Events" },
-        KindOption { kind: Some(MemoryKind::Relationship), label: "Relationships" },
-        KindOption { kind: Some(MemoryKind::Reflection), label: "Reflections" },
+        KindOption {
+            kind: None,
+            label: "All kinds",
+        },
+        KindOption {
+            kind: Some(MemoryKind::Fact),
+            label: "Facts",
+        },
+        KindOption {
+            kind: Some(MemoryKind::Event),
+            label: "Events",
+        },
+        KindOption {
+            kind: Some(MemoryKind::Relationship),
+            label: "Relationships",
+        },
+        KindOption {
+            kind: Some(MemoryKind::Reflection),
+            label: "Reflections",
+        },
     ];
     let selected_kind_opt = kind_options
         .iter()
         .find(|o| o.kind == state.filter_kind)
         .copied()
         .unwrap_or(kind_options[0]);
-    let kind_picker = pick_list(
-        kind_options,
-        Some(selected_kind_opt),
-        |opt: KindOption| Message::from(MemoryMessage::FilterKind(opt.kind)),
-    );
+    let kind_picker = pick_list(kind_options, Some(selected_kind_opt), |opt: KindOption| {
+        Message::from(MemoryMessage::FilterKind(opt.kind))
+    });
 
     let search_bar = text_input("Search memories…", &state.search_query)
         .on_input(|q| Message::from(MemoryMessage::SearchChanged(q)))
         .width(Length::Fixed(180.0));
 
-    let mut filter_row = row![
-        char_picker,
-        conv_picker,
-        kind_picker,
-        search_bar,
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let mut filter_row = row![char_picker, conv_picker, kind_picker, search_bar,]
+        .spacing(8)
+        .align_y(Alignment::Center);
 
     if !state.search_query.is_empty() {
         filter_row = filter_row.push(
@@ -483,6 +515,19 @@ where
                 .on_press(Message::from(MemoryMessage::ClearSearch)),
         );
     }
+
+    let can_condense = !state.condensing
+        && can_condense_memories(
+            view.memories,
+            state.filter_character_id.as_deref(),
+            state.filter_conversation_id.as_deref(),
+            state.filter_kind,
+        );
+    let condense_label = if state.condensing {
+        "Condensing…"
+    } else {
+        "Condense memories"
+    };
 
     let mut action_row = row![].spacing(8).align_y(Alignment::Center);
     if view.can_extract {
@@ -493,33 +538,43 @@ where
         );
     }
     action_row = action_row.push(
+        button(text(condense_label).size(13))
+            .padding(Padding::from([4, 10]))
+            .on_press_maybe(can_condense.then(|| Message::from(MemoryMessage::Condense))),
+    );
+    action_row = action_row.push(
         button(text("New memory").size(13))
             .padding(Padding::from([4, 10]))
             .on_press(Message::from(MemoryMessage::AddMemory)),
     );
 
-    let toolbar_box = column![filter_row.wrap(), action_row.wrap()].spacing(6);
+    let mut toolbar_box = column![filter_row.wrap(), action_row.wrap()].spacing(6);
+    if let Some(ref status) = state.status_message {
+        toolbar_box = toolbar_box.push(text(status).size(12));
+    }
 
     // 3. Delete Confirmation Prompt (if active)
-    let delete_confirm_widget: Option<Element<'a, Message>> = state.delete_confirm_id.as_ref().map(|id| {
-        let del_id = id.clone();
-        let prompt_text = text("Are you sure you want to permanently delete this memory?").size(13);
-        let confirm_btn = button(text("Delete").size(12))
-            .padding(Padding::from([4, 10]))
-            .on_press(Message::from(MemoryMessage::ConfirmDelete(del_id)));
-        let cancel_btn = button(text("Cancel").size(12))
-            .padding(Padding::from([4, 10]))
-            .on_press(Message::from(MemoryMessage::CancelDelete));
-        let actions = row![confirm_btn, cancel_btn].spacing(8);
+    let delete_confirm_widget: Option<Element<'a, Message>> =
+        state.delete_confirm_id.as_ref().map(|id| {
+            let del_id = id.clone();
+            let prompt_text =
+                text("Are you sure you want to permanently delete this memory?").size(13);
+            let confirm_btn = button(text("Delete").size(12))
+                .padding(Padding::from([4, 10]))
+                .on_press(Message::from(MemoryMessage::ConfirmDelete(del_id)));
+            let cancel_btn = button(text("Cancel").size(12))
+                .padding(Padding::from([4, 10]))
+                .on_press(Message::from(MemoryMessage::CancelDelete));
+            let actions = row![confirm_btn, cancel_btn].spacing(8);
 
-        ui::card(
-            column![prompt_text, actions].spacing(8),
-            view.light_mode,
-            view.glass_mode,
-        )
-        .width(Length::Fill)
-        .into()
-    });
+            ui::card(
+                column![prompt_text, actions].spacing(8),
+                view.light_mode,
+                view.glass_mode,
+            )
+            .width(Length::Fill)
+            .into()
+        });
 
     // 4. Memory Editor (if active)
     let editor_widget: Option<Element<'a, Message>> = state.editing_memory.as_ref().map(|draft| {
@@ -555,7 +610,10 @@ where
             });
         }
         let current_char_opt = if let Some(ref cid) = draft.character_id {
-            edit_char_options.iter().find(|o| o.id.as_deref() == Some(cid)).cloned()
+            edit_char_options
+                .iter()
+                .find(|o| o.id.as_deref() == Some(cid))
+                .cloned()
         } else {
             Some(edit_char_options[0].clone())
         };
@@ -577,7 +635,10 @@ where
             });
         }
         let current_conv_opt = if let Some(ref cvid) = draft.conversation_id {
-            edit_conv_options.iter().find(|o| o.id.as_deref() == Some(cvid)).cloned()
+            edit_conv_options
+                .iter()
+                .find(|o| o.id.as_deref() == Some(cvid))
+                .cloned()
         } else {
             Some(edit_conv_options[0].clone())
         };
@@ -588,20 +649,16 @@ where
         );
 
         // Importance Slider
-        let importance_slider = slider(
-            1..=10,
-            draft.importance,
-            |val| Message::from(MemoryMessage::ImportanceChanged(val)),
-        )
+        let importance_slider = slider(1..=10, draft.importance, |val| {
+            Message::from(MemoryMessage::ImportanceChanged(val))
+        })
         .width(Length::Fixed(140.0));
         let importance_label = text(format!("Importance: {}/10", draft.importance)).size(12);
 
         // Pinned Toggle
-        let pinned_toggle = ui::toggle_switch(
-            draft.pinned,
-            Some("Pinned"),
-            |val| Message::from(MemoryMessage::PinnedToggled(val)),
-        );
+        let pinned_toggle = ui::toggle_switch(draft.pinned, Some("Pinned"), |val| {
+            Message::from(MemoryMessage::PinnedToggled(val))
+        });
 
         let selectors_row = row![
             column![text("Kind").size(11), kind_picker].spacing(2),
@@ -656,13 +713,9 @@ where
     let mut list_column = column![].spacing(8).width(Length::Fill);
 
     if filtered.is_empty() {
-        list_column = list_column.push(
-            text("No memories found matching the filters.").size(13),
-        );
+        list_column = list_column.push(text("No memories found matching the filters.").size(13));
     } else {
-        list_column = list_column.push(
-            text(format!("{} memories found", filtered.len())).size(12),
-        );
+        list_column = list_column.push(text(format!("{} memories found", filtered.len())).size(12));
 
         for memory in filtered {
             let mid = memory.id.clone();
@@ -672,22 +725,17 @@ where
             let importance_badge = text(format!("★ {}", memory.importance)).size(12);
             let source_badge = text(memory.source.label()).size(11);
 
-            let mut meta_row = row![
-                kind_badge,
-                importance_badge,
-                source_badge,
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center);
+            let mut meta_row = row![kind_badge, importance_badge, source_badge,]
+                .spacing(10)
+                .align_y(Alignment::Center);
 
             if memory.pinned {
                 meta_row = meta_row.push(text("📌 Pinned").size(11));
             }
 
             if memory.confidence > 0.0 {
-                meta_row = meta_row.push(
-                    text(format!("{:.0}% conf", memory.confidence * 100.0)).size(11),
-                );
+                meta_row =
+                    meta_row.push(text(format!("{:.0}% conf", memory.confidence * 100.0)).size(11));
             }
 
             meta_row = meta_row.push(Space::new().width(Length::Fill));
@@ -730,27 +778,19 @@ where
             };
             let scope_label = text(scope_text).size(11);
 
-            let card_inner = column![
-                meta_row,
-                content_display,
-                scope_label,
-            ]
-            .spacing(6);
+            let card_inner = column![meta_row, content_display, scope_label,].spacing(6);
 
-            let memory_card = ui::card(card_inner, view.light_mode, view.glass_mode)
-                .width(Length::Fill);
+            let memory_card =
+                ui::card(card_inner, view.light_mode, view.glass_mode).width(Length::Fill);
 
             list_column = list_column.push(memory_card);
         }
     }
 
     // 6. Dialog Content Composition
-    let mut dialog_content = column![
-        header,
-        toolbar_box,
-    ]
-    .spacing(10)
-    .width(Length::Fill);
+    let mut dialog_content = column![header, toolbar_box,]
+        .spacing(10)
+        .width(Length::Fill);
 
     if let Some(confirm_w) = delete_confirm_widget {
         dialog_content = dialog_content.push(confirm_w);
@@ -837,10 +877,64 @@ pub mod tests {
         let mut entries = sample_entries();
         entries[1].conversation_id = Some("other-chat".into());
         let filtered = filter_memories(&entries, Some("char-1"), Some("conv-1"), None, "");
-        assert_eq!(filtered.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), ["m1", "m3"]);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["m1", "m3"]
+        );
         let other_chat = filter_memories(&entries, Some("char-1"), Some("new-chat"), None, "");
         assert_eq!(other_chat.len(), 1);
         assert_eq!(other_chat[0].id, "m3");
+    }
+
+    #[test]
+    fn one_click_condense_dispatches_immediately_and_blocks_duplicate_clicks() {
+        let mut entries = sample_entries();
+        // Distinct groups or pinned entries alone cannot be condensed.
+        assert!(!can_condense_memories(&entries, None, None, None));
+
+        // Adding a second unpinned memory in the same (conversation, character, kind) group enables it.
+        entries.push(MemoryEntry {
+            id: "m4".into(),
+            conversation_id: None,
+            character_id: Some("char-1".into()),
+            kind: MemoryKind::Relationship,
+            content: "Lyra admires courageous travelers.".into(),
+            importance: 6,
+            pinned: false,
+            confidence: 0.8,
+            source: MemorySource::Automatic,
+            source_message_ids: vec![],
+            created_at: "2026-09-03T15:00:00Z".into(),
+            updated_at: "2026-09-03T15:00:00Z".into(),
+            revision: 2,
+        });
+        assert!(can_condense_memories(&entries, None, None, None));
+        assert!(can_condense_memories(
+            &entries,
+            Some("char-1"),
+            None,
+            Some(MemoryKind::Relationship),
+        ));
+        assert!(!can_condense_memories(
+            &entries,
+            Some("char-1"),
+            None,
+            Some(MemoryKind::Fact),
+        ));
+
+        let mut state = MemoryDialogState::new();
+        assert!(matches!(
+            state.update(&entries, MemoryMessage::Condense),
+            MemoryAction::Condense
+        ));
+        assert!(state.condensing);
+        assert!(matches!(
+            state.update(&entries, MemoryMessage::Condense),
+            MemoryAction::None
+        ));
     }
 
     #[test]
@@ -852,10 +946,16 @@ pub mod tests {
         assert_eq!(msg_clear, MemoryMessage::ClearSearch);
 
         let msg_char = MemoryMessage::FilterCharacter(Some("char-1".into()));
-        assert_eq!(msg_char, MemoryMessage::FilterCharacter(Some("char-1".into())));
+        assert_eq!(
+            msg_char,
+            MemoryMessage::FilterCharacter(Some("char-1".into()))
+        );
 
         let msg_conv = MemoryMessage::FilterConversation(Some("conv-1".into()));
-        assert_eq!(msg_conv, MemoryMessage::FilterConversation(Some("conv-1".into())));
+        assert_eq!(
+            msg_conv,
+            MemoryMessage::FilterConversation(Some("conv-1".into()))
+        );
 
         let msg_kind = MemoryMessage::FilterKind(Some(MemoryKind::Fact));
         assert_eq!(msg_kind, MemoryMessage::FilterKind(Some(MemoryKind::Fact)));
@@ -866,6 +966,9 @@ pub mod tests {
         let msg_extract = MemoryMessage::ExtractFromChat;
         assert_eq!(msg_extract, MemoryMessage::ExtractFromChat);
 
+        let msg_condense = MemoryMessage::Condense;
+        assert_eq!(msg_condense, MemoryMessage::Condense);
+
         let msg_refresh = MemoryMessage::Refresh;
         assert_eq!(msg_refresh, MemoryMessage::Refresh);
 
@@ -873,7 +976,10 @@ pub mod tests {
         assert_eq!(msg_edit, MemoryMessage::EditMemory("m1".into()));
 
         let msg_content = MemoryMessage::ContentChanged("new text".into());
-        assert_eq!(msg_content, MemoryMessage::ContentChanged("new text".into()));
+        assert_eq!(
+            msg_content,
+            MemoryMessage::ContentChanged("new text".into())
+        );
 
         let msg_prio = MemoryMessage::ImportanceChanged(9);
         assert_eq!(msg_prio, MemoryMessage::ImportanceChanged(9));
@@ -961,7 +1067,10 @@ pub mod tests {
         let mut state = MemoryDialogState::new();
 
         // 1. Filter changes
-        let act = state.update(&entries, MemoryMessage::FilterCharacter(Some("char-1".into())));
+        let act = state.update(
+            &entries,
+            MemoryMessage::FilterCharacter(Some("char-1".into())),
+        );
         match act {
             MemoryAction::Refresh {
                 character_id,
@@ -983,7 +1092,10 @@ pub mod tests {
         assert_eq!(draft.importance, 5);
 
         // 3. Edit fields
-        state.update(&entries, MemoryMessage::ContentChanged("Valuable ancient coin".into()));
+        state.update(
+            &entries,
+            MemoryMessage::ContentChanged("Valuable ancient coin".into()),
+        );
         state.update(&entries, MemoryMessage::KindChanged(MemoryKind::Fact));
         state.update(&entries, MemoryMessage::ImportanceChanged(9));
         state.update(&entries, MemoryMessage::PinnedToggled(true));
@@ -1011,7 +1123,10 @@ pub mod tests {
         assert!(state.editing_memory.is_some());
         let editing = state.editing_memory.as_ref().unwrap();
         assert_eq!(editing.id, Some("m2".into()));
-        assert_eq!(editing.content, "The party defeated the shadow beast at the river crossing.");
+        assert_eq!(
+            editing.content,
+            "The party defeated the shadow beast at the river crossing."
+        );
 
         // Cancel editing
         state.update(&entries, MemoryMessage::CancelEdit);

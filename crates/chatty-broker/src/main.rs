@@ -1953,6 +1953,46 @@ async fn dispatch(
                 }
             );
         }
+        Request::CondenseMemories {
+            session_token,
+            conversation_id,
+            character_id,
+            kind,
+        } => {
+            let uid = auth(&app.db, &session_token).await?;
+            if let Some(conversation_id) = &conversation_id {
+                own_conversation(&app.db, &uid, conversation_id).await?;
+            }
+            if let Some(character_id) = &character_id {
+                let accessible: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM characters WHERE id=? AND (owner_id=? OR is_public=1))",
+                )
+                .bind(character_id)
+                .bind(&uid)
+                .fetch_one(&app.db)
+                .await?;
+                if !accessible {
+                    bail!("memory character missing or forbidden")
+                }
+            }
+            let condensed = condense_memories(
+                &app,
+                &uid,
+                conversation_id.as_deref(),
+                character_id.as_deref(),
+                kind,
+            )
+            .await?;
+            let before = condensed.before;
+            let after = condensed.after;
+            for (entity_id, operation, changed, revision) in condensed.deltas {
+                send_delta!(&uid, revision, "memory", entity_id, operation, changed);
+            }
+            send!(
+                MessageType::Response,
+                Response::MemoriesCondensed { before, after }
+            );
+        }
         Request::SelectVariant {
             session_token,
             message_id,

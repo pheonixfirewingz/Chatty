@@ -55,7 +55,7 @@ Broker source is split along runtime boundaries:
 
 The host loads provider translators as import-free WASM plugins, checks ABI version 1, and owns their HTTP transport. The broker calls one typed interface for discovery, completion, streaming, model lifecycle, and catalogue operations. Plugins translate API paths/options and normalize JSON/SSE/NDJSON into neutral results. No provider HTTP schema remains in broker systems.
 
-OpenAI-compatible, FreeToken, Ollama, and Hugging Face plugins ship under `crates/chatty-adapters/` as Rust source and prebuilt WASM. Operator-installed manifests are discovered at startup without rebuilding the broker. Modules load on demand; only the selected inference provider is retained, while Hugging Face exists only for active catalogue operations. Model management shares the selected provider. The admin portal selects installed inference plugins through broker-authorized configuration. An empty plugin selection preserves the legacy OpenAI/Ollama setting; migration 0013 adds the selection column without rewriting existing settings. `CHATTY_ADAPTER_PLUGIN` takes precedence over the persisted selection and is reported to administrators. Adapter lists come from startup manifests without loading unused modules; the catalogue-only Hugging Face adapter is excluded. Guest memory, fuel, messages, network origins, methods, timeouts, and response sizes are bounded. See [adapter contract](ADAPTERS.md) and [ADR 0003](adr/0003-wasm-inference-adapter-plugins.md).
+OpenAI-compatible, FreeToken, Ollama, and Hugging Face plugins live under `crates/chatty-adapters/` as Rust source and manifests. The broker build compiles them into its Cargo output directory and embeds those generated modules; no WASM binaries are stored in the source tree. Broker builds require the Rust WASM target, while deployed binaries need no compiler or additional module files. See [ADR 0004](adr/0004-source-built-bundled-adapters.md). Operator-installed manifests are discovered at startup without rebuilding the broker. Modules load on demand; only the selected inference provider is retained, while Hugging Face exists only for active catalogue operations. Model management shares the selected provider. The admin portal selects installed inference plugins through broker-authorized configuration. An empty plugin selection preserves the legacy OpenAI/Ollama setting; migration 0013 adds the selection column without rewriting existing settings. `CHATTY_ADAPTER_PLUGIN` takes precedence over the persisted selection and is reported to administrators. Adapter lists come from startup manifests without loading unused modules; the catalogue-only Hugging Face adapter is excluded. Guest memory, fuel, messages, network origins, methods, timeouts, and response sizes are bounded. See [adapter contract](ADAPTERS.md) and [ADR 0003](adr/0003-wasm-inference-adapter-plugins.md).
 
 ### Shared protocol (`chatty-protocol`)
 
@@ -86,7 +86,7 @@ Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 The broker first sends a JSON handshake:
 
 ```json
-{"protocol":17,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+{"protocol":18,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
 ```
 
 All later messages use a 14-byte header:
@@ -99,7 +99,7 @@ Payloads are bincode 2. Stream chunks and deltas are always zstd-compressed; oth
 
 Client message types are requests and cancellation. Broker message types include responses, errors, deltas, stream chunks, and stream completion. Request IDs correlate direct responses and generation cancellation.
 
-Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 17 includes persisted runtime adapter selection, installed inference plugin IDs and operator overrides, plus request-scoped download progress and terminal cancellation/completion responses. Broker and GUI must upgrade together.
+Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 18 includes persisted runtime adapter selection, installed inference plugin IDs and operator overrides, request-scoped download progress and terminal cancellation/completion responses, and scoped memory condensation. Broker and GUI must upgrade together.
 
 ### Synchronization
 
@@ -117,7 +117,7 @@ user message -> persist + delta -> compile context -> select speaker
              -> persist message/variant + token usage -> final delta
 ```
 
-The compiler combines system rules, the active character, bounded group participant cards, world lore, scoped memories, conversation state, summary, and selected recent message history. Owner-scoped worlds contain character links and facts. Common knowledge is selected first; other enabled facts match keywords in the latest six messages. Character memories use SQLite FTS5 plus pinned state, importance, and recency to select at most ten relevant records within a fixed character budget. Automatic extraction runs after each completed, non-cancelled root reply without delaying the streamed reply. It extracts up to eight new durable facts into owner-scoped, cross-chat character memory, budgets its input against the configured model context, and advances its message checkpoint only after successful persistence (including a valid empty result). One background job per owner/conversation coalesces overlapping replies; failed work remains pending for the next reply. Deleting a conversation promotes its memories to cross-chat character scope instead of deleting them.
+The compiler combines system rules, the active character, bounded group participant cards, world lore, scoped memories, conversation state, summary, and selected recent message history. Owner-scoped worlds contain character links and facts. Common knowledge is selected first; other enabled facts match keywords in the latest six messages. Character memories use SQLite FTS5 plus pinned state, importance, and recency to select at most ten relevant records within a fixed character budget. Automatic extraction runs after each completed, non-cancelled root reply without delaying the streamed reply. It extracts up to eight new durable facts into owner-scoped, cross-chat character memory, budgets its input against the configured model context, and advances its message checkpoint only after successful persistence (including a valid empty result). One background job per owner/conversation coalesces overlapping replies; failed work remains pending for the next reply. Explicit condensation groups unpinned memories by conversation, character, and kind within the model context budget, validates model output, and transactionally replaces only shortened groups while emitting owner-scoped deltas. Deleting a conversation promotes its memories to cross-chat character scope instead of deleting them.
 
 Stream output flushes after 32 whitespace-delimited units, 60 ms, or completion. Each connection has a 32-frame writer queue, which propagates backpressure. Cancellation keys include both connection ID and request ID to prevent cross-client cancellation.
 
@@ -166,3 +166,5 @@ Horizontal broker scaling is not supported: live broadcasts, cancellation owners
 - [ADR 0002: Hybrid public PKI and private certificate enrollment](adr/0002-hybrid-public-pki-and-private-certificate-enrollment.md)
 
 - [ADR 0003: WASM inference adapter plugins](adr/0003-wasm-inference-adapter-plugins.md)
+
+- [ADR 0004: Build bundled adapters from source](adr/0004-source-built-bundled-adapters.md)

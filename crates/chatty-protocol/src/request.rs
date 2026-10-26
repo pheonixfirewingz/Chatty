@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::account::Role;
 use crate::character::CharacterInput;
 use crate::conversation::{ConversationKind, EntityKind};
-use crate::memory::MemoryInput;
+use crate::memory::{MemoryInput, MemoryKind};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Request {
@@ -171,6 +171,14 @@ pub enum Request {
         session_token: String,
         conversation_id: String,
         character_id: Option<String>,
+    },
+    /// Merge redundant saved memories in the selected scope into fewer entries.
+    /// The broker validates the model output and replaces only unpinned sources.
+    CondenseMemories {
+        session_token: String,
+        conversation_id: Option<String>,
+        character_id: Option<String>,
+        kind: Option<MemoryKind>,
     },
     GetAccountUsage {
         session_token: String,

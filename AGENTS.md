@@ -44,7 +44,9 @@ Resolve conflicts in this order:
 
 Use an edition-2024-compatible Rust toolchain and the locked dependencies. Native
 Linux builds need Wayland, WGPU, SQLite, audio/speech dependencies, and the XDG file
-portal; OpenSSL is needed for development certificates. Use `--offline` once dependencies
+portal; OpenSSL is needed for development certificates. Broker builds also require
+the Rust `wasm32-unknown-unknown` target. Generated adapter modules belong only
+in Cargo target directories. Use `--offline` once dependencies
 are cached. An inference server is needed only for live generation tests.
 
 ```sh

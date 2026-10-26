@@ -11,15 +11,18 @@ results, the source revision, Rust version, and target architecture used for art
 
 ## Adapter artifacts
 
-The broker embeds the checked-in WASM modules from `crates/chatty-adapters/`; native builds do not need a WASM Rust target. When changing guest code or the shared adapter API module, rebuild and include the resulting modules:
+The broker builds and embeds bundled adapters from source through `crates/chatty-broker/build.rs`. Install the matching Rust target before building the broker:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-./scripts/build-adapters.sh
-./scripts/build-adapters.sh --check
+cargo build --release -p chatty-broker --locked --offline
 ```
 
-Record the Rust toolchain used to build the modules. Run workspace tests and strict Clippy after rebuilding: host tests exercise the actual embedded WASM, including dynamic loading, request translation, fragmented streaming, remote downloads, fuel/memory limits, and cancellation. Check that an operator-installed plugin can be selected without rebuilding the broker. Never publish guest source changes with stale embedded modules. The script builds and checks OpenAI, Ollama, Hugging Face, and FreeToken artifacts. FreeToken host tests cover its remote serving API, fragmented UTF-8 SSE, reasoning exclusion, finish/usage metadata, unsupported lifecycle operations, cancellation, and credential origin isolation.
+Modules are generated beneath Cargo's `OUT_DIR`, never in source directories. The build uses locked, cached guest dependencies and automatically reruns when adapter source, shared API, workspace configuration, or the lockfile changes. Do not commit generated `.wasm` files.
+
+For standalone adapter development, `./scripts/build-adapters.sh` emits modules in Cargo's target directory; `--check` runs a WASM-target source check, and `--online` permits dependency downloads. Broker builds generate their own embedded modules, so no separate adapter build step is required.
+
+Record the Rust toolchain used for artifacts. Workspace tests exercise the generated modules, including dynamic loading, remote HTTP, streaming, progress, cancellation, fuel/memory limits, and credential isolation. Check that an operator-installed plugin can be selected without rebuilding the broker.
 
 ## Functional gate
 
