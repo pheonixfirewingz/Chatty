@@ -10,8 +10,7 @@ use chatty_protocol::{
     OllamaState, Request, Role, UserAccount,
 };
 use iced::widget::{
-    button, column, container, pick_list, row, rule, scrollable, slider, text, text_input,
-    toggler, Space,
+    Space, button, column, container, pick_list, row, rule, scrollable, text, text_input, toggler,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme};
 
@@ -49,10 +48,12 @@ pub enum AdminMessage {
     ToggleRegistration(bool),
 
     ModelsPage(usize),
+    ToggleAdvancedSettings(bool),
     ModelSearchChanged(String),
     SearchModels,
     DownloadModel(String),
     CancelDownload(String),
+    ClearFinishedDownloads,
     ChooseModelFile {
         id: String,
         file: String,
@@ -156,6 +157,7 @@ pub struct ModelsState {
     pub saved_adapter_url: Option<String>,
     pub saved_model: String,
     pub page: usize,
+    pub advanced_settings: bool,
     pub query: String,
     pub installed_query: String,
     pub results: Vec<chatty_protocol::ModelSearchResult>,
@@ -370,8 +372,7 @@ impl AdminState {
             .as_ref()
             .is_some_and(|url| url != &self.broker_config.adapter_url)
         {
-            self.models.notice =
-                Some("Save the inference server address in Configure before downloading.".into());
+            self.models.notice = Some("Save server changes in Settings.".into());
             return vec![];
         }
         if let AdminMessage::DownloadModel(model) = message {
@@ -429,8 +430,19 @@ impl AdminState {
                 self.models.cancel_download(&model);
                 vec![]
             }
+            AdminMessage::ClearFinishedDownloads => {
+                self.models
+                    .downloads
+                    .retain(|_, download| !download.finished);
+                vec![]
+            }
             AdminMessage::ModelsPage(page) => {
+                self.admin_tab = 2;
                 self.models.page = page;
+                vec![]
+            }
+            AdminMessage::ToggleAdvancedSettings(expanded) => {
+                self.models.advanced_settings = expanded;
                 vec![]
             }
             AdminMessage::ModelSearchChanged(query) => {
@@ -935,10 +947,8 @@ where
 
     items = items.push(rule::horizontal(1));
 
-    // 2. Adapter Section
-    items = items.push(text("Adapter").size(16));
-
-    items = items.push(inference_config_view(state));
+    items = items
+        .push(button(text("Model settings")).on_press(Message::from(AdminMessage::ModelsPage(2))));
 
     // 4. Policy Section
     items = items.push(text("Policy").size(16));
@@ -954,7 +964,7 @@ where
     items = items.push(public_chars);
     items = items.push(registration);
 
-    let save_btn = button(text("Save Broker Config").size(14))
+    let save_btn = button(text("Save policy").size(14))
         .padding(Padding::from([6, 16]))
         .on_press(Message::from(AdminMessage::SaveBrokerConfig));
 
@@ -999,7 +1009,7 @@ where
         .spacing(8)
         .align_y(Alignment::Center);
 
-    items = items.push(create_row);
+    items = items.push(create_row.wrap());
     items = items.push(rule::horizontal(1));
 
     // 2. User Cards Section
@@ -1007,7 +1017,7 @@ where
 
     if state.users.is_empty() {
         items = items.push(
-            text("No user accounts found.")
+            text("No users")
                 .size(13)
                 .color(Color::from_rgba(0.6, 0.6, 0.6, 1.0)),
         );
@@ -1023,14 +1033,14 @@ where
                 text(role_label)
                     .size(12)
                     .color(Color::from_rgba(0.5, 0.5, 0.5, 1.0)),
-                text(format!(
-                    "{} tokens ({} prompt · {} completion)",
-                    format_token_count(user.usage.total()),
-                    format_token_count(user.usage.prompt_tokens),
-                    format_token_count(user.usage.completion_tokens),
-                ))
-                .size(12)
-                .color(Color::from_rgba(0.6, 0.6, 0.6, 1.0)),
+                hint(
+                    text(format!("{} tokens", format_token_count(user.usage.total()))).size(12),
+                    format!(
+                        "{} prompt · {} completion",
+                        format_token_count(user.usage.prompt_tokens),
+                        format_token_count(user.usage.completion_tokens)
+                    )
+                ),
                 Space::new().width(Length::Fill),
             ]
             .spacing(10)
@@ -1058,7 +1068,7 @@ where
                 card_row = card_row.push(role_btn).push(del_btn);
             }
 
-            let card = ui::card(card_row, state.light_mode, state.glass_mode);
+            let card = ui::card(card_row.wrap(), state.light_mode, state.glass_mode);
             items = items.push(card);
         }
     }
@@ -1066,209 +1076,31 @@ where
     items.into()
 }
 
-/// Shared inference form; saving remains explicit and broker-authorized.
-fn inference_config_view<'a, Message>(state: &AdminViewState<'a>) -> Element<'a, Message>
-where
-    Message: 'a + Clone + From<AdminMessage>,
-{
-    let mut items = column![].spacing(14).width(Length::Fill);
-    let ctx_row = row![
-        text(format!(
-            "Context length: {} tokens",
-            state.broker_config.num_ctx
-        ))
-        .size(13)
-        .width(Length::Fixed(220.0)),
-        slider(
-            512..=131072,
-            state.broker_config.num_ctx,
-            |v| Message::from(AdminMessage::NumCtxChanged(v)),
-        )
-        .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    items = items.push(ctx_row.wrap());
-
-    let adapter_enabled = toggler(state.broker_config.adapter_enabled)
-        .label("Enabled")
-        .on_toggle(|v| Message::from(AdminMessage::ToggleAdapter(v)));
-
-    let adapter_url = row![
-        text("URL:").size(13).width(Length::Fixed(60.0)),
-        text_input("http://127.0.0.1:11434", &state.broker_config.adapter_url)
-            .on_input(|s| Message::from(AdminMessage::AdapterUrlChanged(s)))
-            .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let runtime_adapter: Element<'a, Message> = if let Some(id) = state.adapter_override {
-        column![
-            text(format!("Runtime adapter: {id}")).size(13),
-            text("CHATTY_ADAPTER_PLUGIN overrides this selection. Remove it from the broker environment and restart to choose here.")
-                .size(13).color(ui::secondary_text_color(state.light_mode)),
-        ].spacing(8).into()
-    } else {
-        column![
-            text("Runtime adapter").size(13),
-            pick_list(
-                state.adapter_plugins.to_vec(),
-                Some(state.broker_config.adapter_plugin_id().to_owned()),
-                |id| Message::from(AdminMessage::SelectRuntimeAdapter(id)),
-            ).width(Length::Fill),
-            text(if state.adapter_plugins.is_empty() {
-                "Loading installed adapters from the broker…"
-            } else {
-                "Choose an installed adapter, then save settings. Ollama uses its native API; openai-compatible supports generic servers."
-            }).size(13).color(ui::secondary_text_color(state.light_mode)),
-        ].spacing(8).into()
-    };
-
-    // Model selection
-    let mut model_options = vec!["Automatic (first available)".to_string()];
-    if let Some(ollama) = state.ollama_state {
-        for m in &ollama.models {
-            model_options.push(m.name.clone());
-        }
-    }
-    let selected_model = if state.broker_config.model.is_empty() {
-        "Automatic (first available)".to_string()
-    } else {
-        state.broker_config.model.clone()
-    };
-
-    let model_row = row![
-        text("Model:").size(13).width(Length::Fixed(60.0)),
-        pick_list(model_options, Some(selected_model), |val| {
-            if val == "Automatic (first available)" {
-                Message::from(AdminMessage::SelectAdapterModel(String::new()))
-            } else {
-                Message::from(AdminMessage::SelectAdapterModel(val))
-            }
-        })
-        .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    items = items.push(adapter_enabled);
-    items = items.push(adapter_url.wrap());
-    items = items.push(runtime_adapter);
-    items = items.push(model_row.wrap());
-    items = items.push(text("Model ID (leave empty for automatic selection)").size(13));
-    items = items.push(
-        text_input("Model ID", &state.broker_config.model)
-            .on_input(|s| Message::from(AdminMessage::SelectAdapterModel(s))),
-    );
-    items = items.push(text("For a separate inference machine, use its reachable address, e.g. http://192.168.1.50:11434. The broker sends downloads to that server; 127.0.0.1 means the broker machine.").size(13));
-
-    items = items.push(rule::horizontal(1));
-
-    // 3. Generation Defaults Section
-    items = items.push(text("Generation defaults").size(16));
-
-    let temp_row = row![
-        text(format!(
-            "Temperature: {:.2}",
-            state.broker_config.temperature
-        ))
-        .size(13)
-        .width(Length::Fixed(160.0)),
-        slider(0.0..=2.0, state.broker_config.temperature, |v| {
-            Message::from(AdminMessage::TemperatureChanged(v))
-        },)
-        .step(0.01_f32)
-        .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let topp_row = row![
-        text(format!("Top P: {:.2}", state.broker_config.top_p))
-            .size(13)
-            .width(Length::Fixed(160.0)),
-        slider(0.0..=1.0, state.broker_config.top_p, |v| Message::from(
-            AdminMessage::TopPChanged(v)
-        ),)
-        .step(0.01_f32)
-        .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let topk_row = row![
-        text(format!("Top K: {}", state.broker_config.top_k))
-            .size(13)
-            .width(Length::Fixed(160.0)),
-        slider(0..=1000, state.broker_config.top_k, |v| Message::from(
-            AdminMessage::TopKChanged(v)
-        ),)
-        .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let predict_row = row![
-        text("Max tokens (-1 = default):")
-            .size(13)
-            .width(Length::Fixed(180.0)),
-        text_input("-1", &state.broker_config.num_predict.to_string())
-            .on_input(|s| Message::from(AdminMessage::NumPredictChanged(s.parse().unwrap_or(-1))))
-            .width(Length::Fixed(120.0)),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let repeat_row = row![
-        text(format!(
-            "Repeat penalty: {:.2}",
-            state.broker_config.repeat_penalty
-        ))
-        .size(13)
-        .width(Length::Fixed(160.0)),
-        slider(0.5..=2.0, state.broker_config.repeat_penalty, |v| {
-            Message::from(AdminMessage::RepeatPenaltyChanged(v))
-        },)
-        .step(0.01_f32)
-        .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let seed_row = row![
-        text("Seed (-1 = random):")
-            .size(13)
-            .width(Length::Fixed(180.0)),
-        text_input("-1", &state.broker_config.seed.to_string())
-            .on_input(|s| Message::from(AdminMessage::SeedChanged(s.parse().unwrap_or(-1))))
-            .width(Length::Fixed(120.0)),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let keepalive_row = row![
-        text("Keep-alive:").size(13).width(Length::Fixed(180.0)),
-        text_input("5m", &state.broker_config.keep_alive)
-            .on_input(|s| Message::from(AdminMessage::KeepAliveChanged(s)))
-            .width(Length::Fixed(120.0)),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    items = items.push(temp_row.wrap());
-    items = items.push(topp_row.wrap());
-    items = items.push(topk_row.wrap());
-    items = items.push(predict_row.wrap());
-    items = items.push(repeat_row.wrap());
-    items = items.push(seed_row.wrap());
-    items = items.push(keepalive_row.wrap());
-
-    items = items.push(rule::horizontal(1));
-
-    items.into()
+fn primary_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button::primary(theme, status);
+    style.text_color = ui::COLOR_ON_PRIMARY;
+    style
 }
+
+/// Keep optional guidance out of the default layout.
+fn hint<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    help: impl Into<std::borrow::Cow<'a, str>>,
+) -> Element<'a, Message> {
+    let help: std::borrow::Cow<'a, str> = help.into();
+    iced::widget::tooltip(
+        content,
+        container(text(help).size(12))
+            .padding(8)
+            .max_width(300)
+            .style(ui::tooltip_style),
+        iced::widget::tooltip::Position::Top,
+    )
+    .into()
+}
+
+#[path = "model_settings.rs"]
+mod model_settings;
 
 #[path = "model_manager.rs"]
 mod model_manager;
@@ -1299,12 +1131,12 @@ where
 
     items = items.push(header_actions);
 
-    let notice = text(
-        "Current broker boot only. Includes full AI prompts and may contain private chat data. Restarting the broker clears this log.",
-    )
-    .size(11)
-    .color(Color::from_rgba(0.6, 0.6, 0.6, 1.0));
-    items = items.push(notice);
+    items = items.push(hint(
+        text("Private chat data · current boot")
+            .size(12)
+            .color(ui::secondary_text_color(state.light_mode)),
+        "Includes AI prompts and private chat data. Restarting the broker clears this log.",
+    ));
 
     let search_bar = text_input("Filter log lines...", state.admin_log_search)
         .on_input(|s| Message::from(AdminMessage::SearchLogsChanged(s)))
@@ -1335,9 +1167,9 @@ where
 
     let log_view: Element<'a, Message> = if matching_lines.is_empty() {
         text(if filter.is_empty() {
-            "No log entries have been written yet."
+            "No entries"
         } else {
-            "No log lines match this filter."
+            "No matches"
         })
         .size(12)
         .into()
@@ -1372,65 +1204,51 @@ pub fn data_tab_view<'a, Message>(
 where
     Message: 'a + Clone + From<AdminMessage>,
 {
-    let mut items = column![].spacing(10).width(Length::Fill);
-
-    let header_row = row![
-        text("Database Explorer").size(16),
-        Space::new().width(Length::Fill),
-        button(text("Refresh")).on_press(Message::from(AdminMessage::RefreshData)),
+    let mut items = column![
+        row![
+            text(format!("{} records", state.admin_data.len())).size(16),
+            Space::new().width(Length::Fill),
+            button(text("Refresh")).on_press(Message::from(AdminMessage::RefreshData)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
     ]
-    .align_y(Alignment::Center);
-
-    items = items.push(header_row);
-
-    // Table header
-    let th = row![
-        text("Type").size(12).width(Length::Fixed(100.0)),
-        text("Name").size(12).width(Length::Fixed(180.0)),
-        text("Details").size(12).width(Length::Fill),
-        text("Public").size(12).width(Length::Fixed(80.0)),
-    ]
-    .spacing(8);
-
-    items = items.push(th);
-    items = items.push(rule::horizontal(1));
-
-    if state.admin_data.is_empty() {
-        items = items.push(
-            text("No database rows returned.")
-                .size(13)
-                .color(Color::from_rgba(0.6, 0.6, 0.6, 1.0)),
-        );
-    } else {
-        for row in state.admin_data {
-            let mut tr = row![
-                text(&row.kind).size(12).width(Length::Fixed(100.0)),
-                text(&row.label).size(12).width(Length::Fixed(180.0)),
-                text(&row.detail).size(12).width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
-
-            if let Some(is_pub) = row.is_public {
-                let char_id = row.id.clone();
-                let toggle = toggler(is_pub)
-                    .size(16)
-                    .on_toggle(move |val| {
+    .spacing(10)
+    .width(Length::Fill);
+    for record in state.admin_data {
+        let mut title = row![
+            text(&record.label).size(15).wrapping(text::Wrapping::Glyph),
+            text(&record.kind)
+                .size(12)
+                .color(ui::secondary_text_color(state.light_mode)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        if let Some(is_public) = record.is_public {
+            let character_id = record.id.clone();
+            title = title.push(
+                toggler(is_public)
+                    .label("Public")
+                    .on_toggle(move |is_public| {
                         Message::from(AdminMessage::ToggleCharacterPublic {
-                            character_id: char_id.clone(),
-                            is_public: val,
+                            character_id: character_id.clone(),
+                            is_public,
                         })
-                    })
-                    .width(Length::Fixed(80.0));
-                tr = tr.push(toggle);
-            } else {
-                tr = tr.push(Space::new().width(Length::Fixed(80.0)));
-            }
-
-            items = items.push(tr);
+                    }),
+            );
         }
+        let card = column![
+            title.wrap(),
+            text(&record.detail)
+                .size(13)
+                .wrapping(text::Wrapping::Glyph)
+        ]
+        .spacing(6);
+        items = items.push(ui::card(card, state.light_mode, state.glass_mode));
     }
-
+    if state.admin_data.is_empty() {
+        items = items.push(text("No records").size(13));
+    }
     items.into()
 }
 
@@ -1469,6 +1287,61 @@ pub mod tests {
         state.adapter_override = Some("ollama".into());
         state.update(AdminMessage::SelectRuntimeAdapter("ollama".into()), "admin");
         assert_eq!(state.broker_config.adapter_plugin, "freetoken");
+    }
+
+    #[test]
+    fn model_settings_navigation_and_disclosure_preserve_saved_values() {
+        let mut state = AdminState::default();
+        state.broker_config.model = "custom-rp-model".into();
+        state.broker_config.num_ctx = 32768;
+        state.broker_config.top_k = 20;
+        state.broker_config.seed = 42;
+        let expected = state.broker_config.clone();
+        assert!(
+            state
+                .update(AdminMessage::ModelsPage(2), "admin")
+                .is_empty()
+        );
+        assert_eq!(state.admin_tab, 2);
+        for light in [false, true] {
+            state.light_mode = light;
+            for advanced in [false, true] {
+                assert!(
+                    state
+                        .update(AdminMessage::ToggleAdvancedSettings(advanced), "admin")
+                        .is_empty()
+                );
+                assert_eq!(state.broker_config, expected);
+                let _view: Element<'_, AdminMessage> = model_settings::view(&state.as_view_state());
+            }
+        }
+        let saved = state.update(AdminMessage::SaveBrokerConfig, "admin");
+        assert!(
+            matches!(&saved[..], [Request::AdminSetBrokerConfig { config, .. }] if config == &expected)
+        );
+        for page in 0..4 {
+            state.update(AdminMessage::ModelsPage(page), "admin");
+            let _view: Element<'_, AdminMessage> =
+                model_manager::ollama_tab_view(&state.as_view_state());
+        }
+    }
+
+    #[test]
+    fn clearing_download_history_keeps_active_and_cancelling_downloads() {
+        let mut state = AdminState::default();
+        for model in ["finished", "active", "cancelling"] {
+            state.update(AdminMessage::DownloadModel(model.into()), "admin");
+        }
+        state.models.downloads.get_mut("finished").unwrap().finished = true;
+        state.models.cancel_download("cancelling");
+        assert!(
+            state
+                .update(AdminMessage::ClearFinishedDownloads, "admin")
+                .is_empty()
+        );
+        assert_eq!(state.models.downloads.len(), 2);
+        assert!(state.models.is_downloading("active"));
+        assert!(state.models.downloads["cancelling"].cancelling);
     }
 
     #[test]

@@ -490,6 +490,18 @@ impl ChattyApp {
                             Screen::Admin
                         };
                     }
+                    "admin" => {
+                        self.screen = Screen::Admin;
+                        self.admin.admin_tab =
+                            parts.get(1).and_then(|tab| tab.parse().ok()).unwrap_or(0);
+                    }
+                    "advanced" => {
+                        self.admin.models.advanced_settings = parts.get(1) == Some(&"open");
+                    }
+                    "theme" => {
+                        self.light_mode = parts.get(1) == Some(&"light");
+                        self.admin.light_mode = self.light_mode;
+                    }
                     "models" => {
                         self.screen = Screen::Admin;
                         self.admin.admin_tab = 2;
@@ -1178,7 +1190,15 @@ impl ChattyApp {
                 .max_width(880.0)
                 .max_height((size.height - 32.0).clamp(1.0, 740.0))
                 .on_press(Message::CloseAdminDialog)
-                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .container_style(move |_| {
+                    let mut style = ui::modal_dialog_frame_style(self.light_mode, self.glass_mode);
+                    style.background = Some(Background::Color(if self.light_mode {
+                        Color::WHITE
+                    } else {
+                        ui::DARK_PALETTE.background
+                    }));
+                    style
+                })
                 .into()
         } else if self.screen == Screen::Settings {
             dialog(true, base, scrollable(self.settings_dialog_view()))
@@ -2067,13 +2087,15 @@ impl ChattyApp {
         {
             self.admin.models.busy = false;
             self.admin.models.request_id = None;
-            self.admin.models.notice = Some(if frame.message_type == MessageType::Error {
-                decode::<WireError>(&frame.payload)
-                    .map(|e| e.message)
-                    .unwrap_or_else(|_| "Model request failed. Try again.".into())
+            self.admin.models.notice = if frame.message_type == MessageType::Error {
+                Some(
+                    decode::<WireError>(&frame.payload)
+                        .map(|error| error.message)
+                        .unwrap_or_else(|_| "Model request failed.".into()),
+                )
             } else {
-                "Model request complete.".into()
-            });
+                None
+            };
         }
         match frame.message_type {
             MessageType::Response => {
