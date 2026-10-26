@@ -77,67 +77,6 @@ fn admin_log_reader_returns_the_newest_complete_bounded_lines() {
 }
 
 #[test]
-fn fragmented_sse_is_buffered_without_data_loss() {
-    let mut buffer = br#"data: {"choices":[{"delta":{"cont"#.to_vec();
-    let mut pending = String::new();
-    let mut complete = String::new();
-    let mut usage = TokenUsage::default();
-    assert!(!drain_sse(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap());
-    buffer.extend_from_slice(br#"ent":"hello"}}]}"#);
-    buffer.extend_from_slice(
-            b"\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n",
-        );
-    assert!(drain_sse(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap());
-    assert_eq!(pending, "hello");
-    assert_eq!(complete, "hello");
-    assert_eq!(usage.prompt_tokens, 21);
-    assert_eq!(usage.completion_tokens, 4);
-}
-
-#[test]
-fn sse_backend_errors_are_not_treated_as_empty_answers() {
-    let mut buffer = b"data: {\"error\":{\"message\":\"context window exceeded\"}}\n\n".to_vec();
-    let error = drain_sse(
-        &mut buffer,
-        &mut String::new(),
-        &mut String::new(),
-        &mut TokenUsage::default(),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("context window exceeded"));
-}
-
-#[test]
-fn fragmented_ollama_stream_is_buffered_without_data_loss() {
-    let mut buffer = br#"{"message":{"content":"hel"},"done":false}
-{"message":{"cont"#
-        .to_vec();
-    let mut pending = String::new();
-    let mut complete = String::new();
-    let mut usage = TokenUsage::default();
-    assert!(!drain_ollama_stream(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap());
-    buffer.extend_from_slice(br#"ent":"lo"},"done":true,"prompt_eval_count":19,"eval_count":3}"#);
-    buffer.push(b'\n');
-    assert!(drain_ollama_stream(&mut buffer, &mut pending, &mut complete, &mut usage).unwrap());
-    assert_eq!(pending, "hello");
-    assert_eq!(complete, "hello");
-    assert_eq!(usage.prompt_tokens, 19);
-    assert_eq!(usage.completion_tokens, 3);
-}
-
-#[test]
-fn ollama_native_base_is_derived_from_openai_url() {
-    assert_eq!(
-        ollama_base_url("http://127.0.0.1:11434/v1"),
-        "http://127.0.0.1:11434"
-    );
-    assert_eq!(
-        ollama_base_url("https://ollama.example.test/"),
-        "https://ollama.example.test"
-    );
-}
-
-#[test]
 fn live_delta_visibility_is_owner_and_origin_scoped() {
     let origin = new_uuid();
     let peer = new_uuid();
@@ -181,7 +120,9 @@ fn memory_extraction_instruction_supports_grounded_indirect_inference() {
     assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("combine evidence across turns"));
     assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("strongly supported indirect preference"));
     assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("do not invent"));
-    assert!(MEMORY_EXTRACTION_INSTRUCTIONS.contains("The user appreciates beautiful nighttime views."));
+    assert!(
+        MEMORY_EXTRACTION_INSTRUCTIONS.contains("The user appreciates beautiful nighttime views.")
+    );
 }
 
 async fn call(app: &App, request: Request) -> Result<(MessageType, Bytes)> {
@@ -225,9 +166,10 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
     let (deltas, _) = broadcast::channel(32);
     let app = App {
         db,
-        http: reqwest::Client::new(),
+        adapters: test_adapter_host(),
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
         deltas,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         log_path: Arc::new(PathBuf::new()),
@@ -365,9 +307,10 @@ async fn cross_tenant_character_update_is_forbidden() {
     let (deltas, _) = broadcast::channel(32);
     let app = App {
         db,
-        http: reqwest::Client::new(),
+        adapters: test_adapter_host(),
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
         deltas,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         log_path: Arc::new(PathBuf::new()),
@@ -592,9 +535,11 @@ async fn cross_tenant_character_update_is_forbidden() {
         .await
         .unwrap();
     assert!(stored_images.starts_with(b"CHIMG1"));
-    assert!(!stored_images
-        .windows(character.images[0].data.len())
-        .any(|window| window == character.images[0].data));
+    assert!(
+        !stored_images
+            .windows(character.images[0].data.len())
+            .any(|window| window == character.images[0].data)
+    );
     let mut updated = character.clone();
     updated.id = Some(character_id.clone());
     updated.is_public = true;
@@ -773,7 +718,10 @@ async fn cross_tenant_character_update_is_forbidden() {
         );
     }
     let memory_updates:i64=sqlx::query_scalar("SELECT COUNT(*) FROM deltas WHERE operation=1 AND entity_type='memory' AND owner_id=(SELECT id FROM users WHERE username='first-user')").fetch_one(&app.db).await.unwrap();
-    assert_eq!(memory_updates, 1, "preserved memory should receive an update delta");
+    assert_eq!(
+        memory_updates, 1,
+        "preserved memory should receive an update delta"
+    );
     let (snapshot_tx, mut snapshot_rx) = mpsc::channel(64);
     let snapshot_app = app.clone();
     let snapshot_token = first_token.clone();
@@ -836,6 +784,17 @@ async fn cross_tenant_character_update_is_forbidden() {
     .await
     .unwrap_err();
     assert!(forbidden_log_read.to_string().contains("forbidden"));
+    let forbidden_search = call(
+        &app,
+        Request::AdminSearchModels {
+            session_token: second_token.clone(),
+            query: "llama".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(forbidden_search.to_string().contains("forbidden"));
+
     let forbidden_message_edit = call(
         &app,
         Request::UpdateMessage {
@@ -1230,12 +1189,86 @@ fn character_images_are_authenticated_and_encrypted_at_rest() {
 
     let encrypted = encrypt_character_images(&key, "owner", "character", &images).unwrap();
     assert!(encrypted.starts_with(b"CHIMG1"));
-    assert!(!encrypted
-        .windows(images[0].data.len())
-        .any(|window| window == images[0].data));
+    assert!(
+        !encrypted
+            .windows(images[0].data.len())
+            .any(|window| window == images[0].data)
+    );
     assert_eq!(
         decrypt_character_images(&key, "owner", "character", &encrypted).unwrap(),
         images
     );
     assert!(decrypt_character_images(&key, "other-owner", "character", &encrypted).is_err());
+}
+
+#[tokio::test]
+async fn model_pull_is_sent_to_the_configured_inference_server() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = server.local_addr().unwrap();
+    let receiver = tokio::spawn(async move {
+        let (socket, _) = server.accept().await.unwrap();
+        let mut socket = tokio::io::BufReader::new(socket);
+        let mut line = String::new();
+        socket.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "POST /api/pull HTTP/1.1\r\n");
+        let mut length = 0;
+        loop {
+            line.clear();
+            socket.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["model"], "hf.co/owner/chat-GGUF:chat-Q4_K_M.gguf");
+        assert_eq!(body["stream"], false);
+        socket
+            .get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{\"status\":\"success\"}")
+            .await
+            .unwrap();
+    });
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    sqlx::query("INSERT INTO broker_settings(singleton,adapter_url,use_ollama_api) VALUES(1,?,1)")
+        .bind(format!("http://{address}/v1"))
+        .execute(&db)
+        .await
+        .unwrap();
+    let (deltas, _) = broadcast::channel(32);
+    let app = App {
+        db,
+        adapters: test_adapter_host(),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        deltas,
+        recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        run_ollama_action(
+            &app,
+            OllamaAction::Pull {
+                model: "hf.co/owner/chat-GGUF:chat-Q4_K_M.gguf".into(),
+            },
+        )
+        .await
+        .unwrap();
+        receiver.await.unwrap();
+    })
+    .await
+    .unwrap();
 }

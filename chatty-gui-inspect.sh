@@ -13,6 +13,7 @@ usage() {
         "  $0 screenshot <png-path>" \
         "  $0 sidebar <open|closed>" \
         "  $0 tools <open|closed>" \
+        "  $0 models <0|1|2>  (installed, find, configure)" \
         "  $0 screen <login|main>" \
         "  $0 quit"
 }
@@ -26,7 +27,7 @@ case "${1:-}" in
             --inspect --inspect-control "$control_fifo" \
             --width "$width" --height "$height"
         ;;
-    resize|zoom|screenshot|sidebar|tools|screen|quit)
+    resize|zoom|screenshot|sidebar|tools|models|screen|quit)
         [[ -p "$control_fifo" ]] || {
             printf 'Inspector is not running: %s\n' "$control_fifo" >&2
             exit 1

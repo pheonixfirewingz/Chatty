@@ -1,15 +1,29 @@
-use super::*;
+use crate::Args;
+use chatty_protocol::util::current_utc_timestamp;
+use chatty_protocol::util::{Context, Result, bail};
+use chatty_protocol::{
+    ErrorCode, Frame, MessageType, ProtocolCodec, Request, Response, WireError, decode, read_frame,
+};
 use rustls::{
-    DigitallySignedStruct, Error as TlsError, SignatureScheme,
+    ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    pki_types::{CertificateDer, UnixTime},
+    pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::collections::{HashMap, VecDeque};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 
-pub(super) enum Command {
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) enum Command {
     Connect(ConnectionTarget),
     TrustCertificate(PendingCertificate),
     RejectCertificate,
@@ -25,7 +39,12 @@ pub(super) enum Command {
     Stop,
 }
 
-pub(super) enum Event {
+#[allow(dead_code)]
+pub(crate) type NetworkCommand = Command;
+
+#[derive(Clone, Debug)]
+pub(crate) enum Event {
+    ModelRequestStarted(u64),
     Status(String),
     Connected { resuming_session: bool },
     ConnectionFailed(String),
@@ -35,46 +54,122 @@ pub(super) enum Event {
     SessionExpired,
 }
 
-#[derive(Clone)]
-pub(super) struct EventSender {
-    events: std::sync::mpsc::Sender<Event>,
-    repaint_context: Arc<std::sync::Mutex<Option<egui::Context>>>,
+#[allow(dead_code)]
+pub(crate) type NetworkEvent = Event;
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct EventSendError(pub Event);
+
+impl std::fmt::Display for EventSendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed to deliver network event: channel closed")
+    }
+}
+
+impl std::error::Error for EventSendError {}
+
+#[derive(Clone, Debug)]
+pub(crate) enum EventSender {
+    Std(std::sync::mpsc::Sender<Event>),
+    Tokio(mpsc::UnboundedSender<Event>),
 }
 
 impl EventSender {
-    pub(super) fn new(
-        events: std::sync::mpsc::Sender<Event>,
-        repaint_context: Arc<std::sync::Mutex<Option<egui::Context>>>,
-    ) -> Self {
-        Self {
-            events,
-            repaint_context,
-        }
+    #[allow(dead_code)]
+    pub(crate) fn new(events: std::sync::mpsc::Sender<Event>) -> Self {
+        Self::Std(events)
     }
 
-    pub(super) fn send(
-        &self,
-        event: Event,
-    ) -> std::result::Result<(), std::sync::mpsc::SendError<Event>> {
-        let result = self.events.send(event);
-        if result.is_ok()
-            && let Ok(context) = self.repaint_context.lock()
-            && let Some(context) = context.as_ref()
-        {
-            context.request_repaint();
+    #[allow(dead_code)]
+    pub(crate) fn from_tokio(events: mpsc::UnboundedSender<Event>) -> Self {
+        Self::Tokio(events)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn channel() -> (Self, mpsc::UnboundedReceiver<Event>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self::Tokio(tx), rx)
+    }
+
+    pub(crate) fn send(&self, event: Event) -> std::result::Result<(), EventSendError> {
+        match self {
+            Self::Std(tx) => tx.send(event).map_err(|e| EventSendError(e.0)),
+            Self::Tokio(tx) => tx.send(event).map_err(|e| EventSendError(e.0)),
         }
-        result
     }
 }
 
+impl From<std::sync::mpsc::Sender<Event>> for EventSender {
+    fn from(sender: std::sync::mpsc::Sender<Event>) -> Self {
+        Self::Std(sender)
+    }
+}
+
+impl From<mpsc::UnboundedSender<Event>> for EventSender {
+    fn from(sender: mpsc::UnboundedSender<Event>) -> Self {
+        Self::Tokio(sender)
+    }
+}
+
+/// Helper to allocate an unbounded command channel and event receiver for
+/// communicating with the network task.
+#[allow(dead_code)]
+pub(crate) fn network_channel() -> (
+    mpsc::UnboundedSender<Command>,
+    mpsc::UnboundedReceiver<Event>,
+    EventSender,
+    mpsc::UnboundedReceiver<Command>,
+) {
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (event_sender, event_rx) = EventSender::channel();
+    (command_tx, event_rx, event_sender, command_rx)
+}
+
+/// Spawns the network task in the current Tokio runtime and returns channels to
+/// send commands and receive events.
+#[allow(dead_code)]
+pub(crate) fn spawn_network(
+    args: Args,
+    remembered: Option<SavedSession>,
+) -> (
+    mpsc::UnboundedSender<Command>,
+    mpsc::UnboundedReceiver<Event>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (event_sender, event_rx) = EventSender::channel();
+    let handle = tokio::spawn(run(args, remembered, command_rx, event_sender));
+    (command_tx, event_rx, handle)
+}
+
+/// Returns an async stream of network events suitable for Iced Elm subscriptions.
+#[allow(dead_code)]
+pub(crate) fn network_stream(
+    args: Args,
+    remembered: Option<SavedSession>,
+    commands: mpsc::UnboundedReceiver<Command>,
+) -> impl iced::futures::Stream<Item = Event> {
+    iced::stream::channel(100, async move |mut output| {
+        use iced::futures::sink::SinkExt;
+        let (event_sender, mut event_rx) = EventSender::channel();
+        tokio::spawn(run(args, remembered, commands, event_sender));
+        while let Some(event) = event_rx.recv().await {
+            if output.send(event).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ConnectionTarget {
+pub(crate) struct ConnectionTarget {
     pub broker: String,
     pub server_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct PendingCertificate {
+pub(crate) struct PendingCertificate {
     pub target: ConnectionTarget,
     pub fingerprint: String,
     certificate: Vec<u8>,
@@ -83,7 +178,8 @@ pub(super) struct PendingCertificate {
 
 impl PendingCertificate {
     #[cfg(test)]
-    pub(super) fn from_der(target: ConnectionTarget, certificate: Vec<u8>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn from_der(target: ConnectionTarget, certificate: Vec<u8>) -> Self {
         let fingerprint = certificate_fingerprint(&certificate);
         Self {
             target,
@@ -109,18 +205,18 @@ impl PendingCertificate {
         })
     }
 
-    pub(super) fn is_ca(&self) -> bool {
+    pub(crate) fn is_ca(&self) -> bool {
         self.trust_anchor
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct SavedSession {
+pub(crate) struct SavedSession {
     pub broker: String,
     pub token: String,
 }
 
-pub(super) fn session_path(args: &Args) -> Result<PathBuf> {
+pub(crate) fn session_path(args: &Args) -> Result<PathBuf> {
     if let Some(path) = args.session_file.clone() {
         return Ok(path);
     }
@@ -175,7 +271,7 @@ fn save_session(path: &PathBuf, session: &SavedSession) {
     }
 }
 
-pub(super) fn load_session(path: &PathBuf, legacy_broker: Option<&str>) -> Option<SavedSession> {
+pub(crate) fn load_session(path: &PathBuf, legacy_broker: Option<&str>) -> Option<SavedSession> {
     let contents = fs::read_to_string(path).ok()?;
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
         let broker = value.get("broker")?.as_str()?.trim();
@@ -202,79 +298,39 @@ pub(super) fn load_session(path: &PathBuf, legacy_broker: Option<&str>) -> Optio
     })
 }
 
-pub(super) fn preferences_path(session_path: &std::path::Path) -> PathBuf {
+pub(crate) fn preferences_path(session_path: &Path) -> PathBuf {
     session_path.with_extension("preferences")
 }
 
-pub(super) fn last_server_path(session_path: &std::path::Path) -> PathBuf {
+pub(crate) fn last_server_path(session_path: &Path) -> PathBuf {
     session_path.with_file_name("last-server")
 }
 
-pub(super) fn load_last_server(path: &std::path::Path) -> Option<String> {
+pub(crate) fn load_last_server(path: &Path) -> Option<String> {
     let server = fs::read_to_string(path).ok()?;
     let server = server.trim();
     (!server.is_empty()).then(|| server.to_owned())
 }
 
-fn save_last_server(path: &std::path::Path, server: &str) {
+fn save_last_server(path: &Path, server: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(path, format!("{}\n", server.trim()));
+    let _ = fs::write(path, format!("{server}
+"));
 }
 
-pub(super) fn load_light_mode(path: &std::path::Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .is_some_and(|value| value.lines().any(|line| line.trim() == "theme=light"))
-}
-
-pub(super) fn load_glass_mode(path: &std::path::Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .is_some_and(|value| value.lines().any(|line| line.trim() == "surface=glass"))
-}
-
-pub(super) fn load_transparency(path: &std::path::Path) -> u8 {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|value| {
-            value.lines().find_map(|line| {
-                line.trim()
-                    .strip_prefix("transparency=")?
-                    .parse::<u8>()
-                    .ok()
-            })
-        })
-        .unwrap_or(20)
-        .min(80)
-}
-
-pub(super) fn load_tts_auto_speak(path: &std::path::Path) -> bool {
+pub(crate) fn load_tts_auto_speak(path: &Path) -> bool {
     fs::read_to_string(path)
         .ok()
         .is_some_and(|value| value.lines().any(|line| line.trim() == "tts_auto_speak=true"))
 }
 
-pub(super) fn save_preferences(
-    path: &std::path::Path,
-    light_mode: bool,
-    glass_mode: bool,
-    transparency: u8,
-    tts_auto_speak: bool,
-) {
+pub(crate) fn save_preferences(path: &Path, tts_auto_speak: bool) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let theme = if light_mode { "light" } else { "dark" };
-    let surface = if glass_mode { "glass" } else { "solid" };
-    let transparency = transparency.min(80);
-    let _ = fs::write(
-        path,
-        format!(
-            "theme={theme}\nsurface={surface}\ntransparency={transparency}\ntts_auto_speak={tts_auto_speak}\n"
-        ),
-    );
+    let _ = fs::write(path, format!("tts_auto_speak={tts_auto_speak}\n"));
 }
 
 #[derive(Debug)]
@@ -345,7 +401,7 @@ enum ConnectAttempt {
     TrustRequired(PendingCertificate),
 }
 
-fn ca_client_config(path: &std::path::Path) -> Result<Arc<ClientConfig>> {
+fn ca_client_config(path: &Path) -> Result<Arc<ClientConfig>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<ClientConfig>>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -369,7 +425,7 @@ fn ca_client_config(path: &std::path::Path) -> Result<Arc<ClientConfig>> {
     Ok(config)
 }
 
-fn der_ca_client_config(path: &std::path::Path) -> Result<Arc<ClientConfig>> {
+fn der_ca_client_config(path: &Path) -> Result<Arc<ClientConfig>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<ClientConfig>>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -451,7 +507,7 @@ async fn verify_chatty_handshake(mut stream: TlsStream<TcpStream>) -> Result<Tls
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
-        || value["protocol"] != 14
+        || value["protocol"] != 15
         || value["encoding"] != "bincode2"
     {
         bail!("unsupported broker handshake");
@@ -591,7 +647,7 @@ fn default_server_ca_path(
 /// link is down is lost.
 async fn next_command(
     pending: &mut VecDeque<Command>,
-    commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Option<Command> {
     if let Some(command) = pending.pop_front() {
         return Some(command);
@@ -603,7 +659,7 @@ async fn next_command(
 /// only when the app asked to stop.
 async fn park_for_command(
     pending: &mut VecDeque<Command>,
-    commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Option<()> {
     match commands.recv().await {
         Some(Command::Stop) | None => None,
@@ -614,7 +670,7 @@ async fn park_for_command(
     }
 }
 
-pub(super) async fn run(
+pub(crate) async fn run(
     args: Args,
     mut remembered: Option<SavedSession>,
     mut commands: mpsc::UnboundedReceiver<Command>,
@@ -793,6 +849,9 @@ pub(super) async fn run(
                     }
                     Some(Command::Request(request)) => {
                         next_id += 1;
+                        if matches!(&*request, Request::AdminOllamaAction { .. } | Request::AdminSearchModels { .. } | Request::AdminGetOllamaState { .. }) {
+                            let _ = events.send(Event::ModelRequestStarted(next_id));
+                        }
                         if matches!(&*request, Request::Logout { .. }) {
                             remembered = None;
                             signed_out_through_request = Some(next_id);
@@ -911,21 +970,12 @@ mod tests {
     use super::{
         CertificateVerifier, Event, EventSender, PendingCertificate, SavedSession,
         certificate_fingerprint, default_server_ca_path, default_session_path,
-        is_expected_post_logout_unauthorized, last_server_path, load_glass_mode, load_last_server,
-        load_light_mode, load_session, load_transparency, load_tts_auto_speak, save_last_server,
+        is_expected_post_logout_unauthorized, last_server_path, load_last_server,
+        load_session, load_tts_auto_speak, save_last_server,
         save_preferences, save_session, take_accepted_generation,
     };
     use chatty_protocol::{ErrorCode, Request, Response, WireError};
-    use eframe::egui;
-    use std::{
-        collections::HashMap,
-        path::PathBuf,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Duration,
-    };
+    use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
     #[test]
     fn generation_is_released_only_after_its_user_message_is_accepted() {
@@ -962,22 +1012,29 @@ mod tests {
     }
 
     #[test]
-    fn network_events_wake_the_egui_event_loop() {
-        let context = egui::Context::default();
-        let repaint_count = Arc::new(AtomicUsize::new(0));
-        let callback_count = repaint_count.clone();
-        context.set_request_repaint_callback(move |_| {
-            callback_count.fetch_add(1, Ordering::SeqCst);
-        });
-        let repaint_context = Arc::new(Mutex::new(Some(context)));
-        let (events, received) = std::sync::mpsc::channel();
-        let sender = EventSender::new(events, repaint_context);
-        let before = repaint_count.load(Ordering::SeqCst);
-
+    fn network_events_are_delivered_through_event_channel() {
+        let (sender, mut receiver) = EventSender::channel();
         sender.send(Event::Status("Online".into())).unwrap();
+        assert!(matches!(
+            receiver.blocking_recv(),
+            Some(Event::Status(status)) if status == "Online"
+        ));
 
-        assert!(matches!(received.recv().unwrap(), Event::Status(status) if status == "Online"));
-        assert!(repaint_count.load(Ordering::SeqCst) > before);
+        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tokio_sender = EventSender::from_tokio(tokio_tx);
+        tokio_sender.send(Event::Status("FromTokio".into())).unwrap();
+        assert!(matches!(
+            tokio_rx.blocking_recv(),
+            Some(Event::Status(status)) if status == "FromTokio"
+        ));
+
+        let (std_tx, std_rx) = std::sync::mpsc::channel();
+        let std_sender = EventSender::new(std_tx);
+        std_sender.send(Event::Status("Connected".into())).unwrap();
+        assert!(matches!(
+            std_rx.recv().unwrap(),
+            Event::Status(status) if status == "Connected"
+        ));
     }
 
     #[test]
@@ -1058,7 +1115,7 @@ mod tests {
     fn session_uses_linux_home_fallback() {
         assert_eq!(
             default_session_path(None, Some(PathBuf::from("/home/tester"))),
-            Some(PathBuf::from("/home/tester/.local/state/chatty/session",)),
+            Some(PathBuf::from("/home/tester/.local/state/chatty/session")),
         );
     }
 
@@ -1069,7 +1126,7 @@ mod tests {
                 Some(PathBuf::from("relative/state")),
                 Some(PathBuf::from("/home/tester")),
             ),
-            Some(PathBuf::from("/home/tester/.local/state/chatty/session",)),
+            Some(PathBuf::from("/home/tester/.local/state/chatty/session")),
         );
     }
 
@@ -1112,23 +1169,32 @@ mod tests {
     }
 
     #[test]
-    fn appearance_preferences_round_trip_together() {
+    fn speech_preferences_round_trip() {
         let path = std::env::temp_dir().join(format!(
-            "chatty-appearance-preferences-{}",
+            "chatty-speech-preferences-{}",
             std::process::id()
         ));
-
-        save_preferences(&path, true, true, 80, true);
-        assert!(load_light_mode(&path));
-        assert!(load_glass_mode(&path));
-        assert_eq!(load_transparency(&path), 80);
+        save_preferences(&path, true);
         assert!(load_tts_auto_speak(&path));
-
-        save_preferences(&path, false, false, 25, false);
-        assert!(!load_light_mode(&path));
-        assert!(!load_glass_mode(&path));
-        assert_eq!(load_transparency(&path), 25);
+        save_preferences(&path, false);
         assert!(!load_tts_auto_speak(&path));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_appearance_preferences_preserve_speech_setting() {
+        let path = std::env::temp_dir().join(format!(
+            "chatty-legacy-appearance-{}",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "theme=light\nsurface=solid\ntransparency=80\ntts_auto_speak=true\n",
+        ).unwrap();
+        let speech = load_tts_auto_speak(&path);
+        assert!(speech);
+        save_preferences(&path, speech);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tts_auto_speak=true\n");
         let _ = std::fs::remove_file(path);
     }
 

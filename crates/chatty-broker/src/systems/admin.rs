@@ -107,27 +107,22 @@ pub(super) async fn adapter_health(app: &App) -> (AdapterStatus, u32, Option<u64
         return (AdapterStatus::Disabled, 0, None);
     }
     let started = std::time::Instant::now();
-    let response = app
-        .http
-        .get(format!("{}/models", config.adapter_url))
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await;
-    let Ok(response) = response.and_then(|response| response.error_for_status()) else {
+    let result = async {
+        app.adapters
+            .inference(&config)?
+            .models(Duration::from_secs(2))
+            .await
+            .map_err(Error::from)
+    }
+    .await;
+    let Ok(models) = result else {
         return (
             AdapterStatus::Offline,
             0,
             Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
         );
     };
-    let Ok(body) = response.json::<Value>().await else {
-        return (
-            AdapterStatus::Offline,
-            0,
-            Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
-        );
-    };
-    let models = body["data"].as_array().map_or(0, |models| models.len()) as u32;
+    let models = models.len() as u32;
     let status = if models > 0 {
         AdapterStatus::Online
     } else {
@@ -190,138 +185,68 @@ pub(super) fn validate_broker_config(config: &BrokerConfig) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn ollama_base_url(adapter_url: &str) -> String {
-    adapter_url
-        .trim_end_matches('/')
-        .strip_suffix("/v1")
-        .unwrap_or(adapter_url.trim_end_matches('/'))
-        .to_owned()
-}
-
-pub(super) async fn ollama_url(app: &App) -> Result<String> {
-    let config = load_broker_config(&app.db).await?;
-    Ok(ollama_base_url(&config.adapter_url))
-}
-
-pub(super) fn required_model_name(model: String) -> Result<String> {
-    let model = model.trim();
-    if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
-        bail!("model name is invalid")
-    }
-    Ok(model.to_owned())
-}
-
 pub(super) async fn load_ollama_state(app: &App) -> Result<OllamaState> {
-    let base = ollama_url(app).await?;
-    let (version, tags, running) = tokio::try_join!(
-        app.http.get(format!("{base}/api/version")).send(),
-        app.http.get(format!("{base}/api/tags")).send(),
-        app.http.get(format!("{base}/api/ps")).send(),
-    )?;
-    let version: Value = version.error_for_status()?.json().await?;
-    let tags: Value = tags.error_for_status()?.json().await?;
-    let running: Value = running.error_for_status()?.json().await?;
-    let models = tags["models"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|model| {
-            Some(OllamaModel {
-                name: model.get("name")?.as_str()?.to_owned(),
-                size: model.get("size").and_then(Value::as_u64).unwrap_or(0),
-                modified_at: model
-                    .get("modified_at")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                family: model["details"]["family"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                parameter_size: model["details"]["parameter_size"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                quantization_level: model["details"]["quantization_level"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-            })
-        })
-        .collect();
-    let running_models = running["models"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|model| {
-            Some(OllamaRunningModel {
-                name: model.get("name")?.as_str()?.to_owned(),
-                size: model.get("size").and_then(Value::as_u64).unwrap_or(0),
-                size_vram: model.get("size_vram").and_then(Value::as_u64).unwrap_or(0),
-                expires_at: model
-                    .get("expires_at")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            })
-        })
-        .collect();
+    let config = load_broker_config(&app.db).await?;
+    let state = app.adapters.management(&config)?.model_state().await?;
     Ok(OllamaState {
-        version: version["version"].as_str().unwrap_or("unknown").to_owned(),
-        models,
-        running_models,
+        version: state.version,
+        models: state
+            .models
+            .into_iter()
+            .map(|model| OllamaModel {
+                name: model.name,
+                size: model.size,
+                modified_at: model.modified_at,
+                family: model.family,
+                parameter_size: model.parameter_size,
+                quantization_level: model.quantization_level,
+            })
+            .collect(),
+        running_models: state
+            .running_models
+            .into_iter()
+            .map(|model| OllamaRunningModel {
+                name: model.name,
+                size: model.size,
+                size_vram: model.size_vram,
+                expires_at: model.expires_at,
+            })
+            .collect(),
     })
 }
 
 pub(super) async fn run_ollama_action(app: &App, action: OllamaAction) -> Result<()> {
-    let base = ollama_url(app).await?;
-    let response = match action {
-        OllamaAction::Pull { model } => {
-            app.http
-                .post(format!("{base}/api/pull"))
-                .json(&json!({"model": required_model_name(model)?, "stream": false}))
-                .send()
-                .await?
-        }
-        OllamaAction::Delete { model } => {
-            app.http
-                .delete(format!("{base}/api/delete"))
-                .json(&json!({"model": required_model_name(model)?}))
-                .send()
-                .await?
-        }
-        OllamaAction::Load { model } => {
-            let config = load_broker_config(&app.db).await?;
-            app.http
-                .post(format!("{base}/api/generate"))
-                .json(&json!({
-                    "model": required_model_name(model)?,
-                    "keep_alive": config.keep_alive,
-                    "stream": false
-                }))
-                .send()
-                .await?
-        }
-        OllamaAction::Unload { model } => {
-            app.http
-                .post(format!("{base}/api/generate"))
-                .json(&json!({
-                    "model": required_model_name(model)?,
-                    "keep_alive": 0,
-                    "stream": false
-                }))
-                .send()
-                .await?
-        }
+    let config = load_broker_config(&app.db).await?;
+    let action = match action {
+        OllamaAction::Pull { model } => crate::adapter_api::ModelAction::Pull { model },
+        OllamaAction::Delete { model } => crate::adapter_api::ModelAction::Delete { model },
+        OllamaAction::Load { model } => crate::adapter_api::ModelAction::Load {
+            model,
+            keep_alive: config.keep_alive.clone(),
+        },
+        OllamaAction::Unload { model } => crate::adapter_api::ModelAction::Unload { model },
     };
-    response.error_for_status()?;
-    Ok(())
+    Ok(app
+        .adapters
+        .management(&config)?
+        .model_action(action)
+        .await?)
 }
 
-pub(super) async fn adapter_url(app: &App) -> Result<String> {
-    let config = load_broker_config(&app.db).await?;
-    if !config.adapter_enabled {
-        bail!("inference adapter is disabled")
-    }
-    Ok(config.adapter_url)
+pub(super) async fn search_hugging_face_models(
+    app: &App,
+    query: &str,
+) -> Result<Vec<ModelSearchResult>> {
+    Ok(app
+        .adapters
+        .catalogue()?
+        .search(query)
+        .await?
+        .into_iter()
+        .map(|result| ModelSearchResult {
+            id: result.id,
+            downloads: result.downloads,
+            files: result.files,
+        })
+        .collect())
 }

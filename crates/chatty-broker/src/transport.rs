@@ -41,7 +41,7 @@ pub(super) async fn serve(
         MessageType::Handshake,
         0,
         serde_json::to_vec(
-            &json!({"protocol":14,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
+            &json!({"protocol":15,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
         )?
         .into(),
     ))
@@ -99,8 +99,8 @@ pub(super) async fn serve(
                 let recent = unix_ms().saturating_sub(last_activity.load(Ordering::Relaxed))
                     < IDLE_CLOSE.as_millis() as u64;
                 if recent || busy.load(Ordering::Relaxed) > 0 {
-                    // Outbound traffic or an in-flight generation (a slow
-                    // model load can silence the wire for minutes) keeps the
+                    // Outbound traffic or an in-flight generation/model action
+                    // (model loads and downloads can stay silent) keeps the
                     // connection warm; wait out the remaining quiet period.
                     idle.as_mut().reset(tokio::time::Instant::now() + IDLE_CLOSE);
                     continue;

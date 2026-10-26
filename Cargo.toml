@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/chatty-protocol", "crates/chatty-broker", "crates/chatty-gui"]
+members = [
+    "crates/chatty-protocol", "crates/chatty-broker", "crates/chatty-gui",
+    "crates/chatty-adapters/openai-compatible", "crates/chatty-adapters/ollama", "crates/chatty-adapters/hugging-face", "crates/chatty-adapters/freetoken",
+]
+default-members = ["crates/chatty-protocol", "crates/chatty-broker", "crates/chatty-gui"]
 resolver = "2"
 
 [workspace.package]
@@ -27,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webpki-roots = "1"
 zstd = "0.13"
-eframe = { version = "0.35", default-features = false, features = ["default_fonts", "wgpu", "wayland"] }
+iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "wayland", "image", "svg", "canvas", "markdown", "tokio"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]

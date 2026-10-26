@@ -9,6 +9,10 @@ use crate::memory::MemoryInput;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Request {
+    AdminSearchModels {
+        session_token: String,
+        query: String,
+    },
     Register {
         username: String,
         password: String,

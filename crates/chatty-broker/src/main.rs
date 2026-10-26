@@ -1,10 +1,11 @@
+use adapter_api::{ChatMessage as AdapterMessage, ChatRequest, Completion, GenerationOptions};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use bytes::Bytes;
 use chatty_protocol::util::{
     Context, Error, Result, args::ParsedArgs, bail, format_err, new_uuid, pemfile,
 };
 use chatty_protocol::*;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -30,6 +31,9 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
+#[path = "../../chatty-adapters/shared/api.rs"]
+pub mod adapter_api;
+mod adapters;
 #[path = "systems/admin.rs"]
 mod admin;
 mod auth;
@@ -42,6 +46,7 @@ mod memory;
 mod transport;
 mod utils;
 
+use adapters::*;
 use admin::*;
 use auth::*;
 use conversations::*;
@@ -67,14 +72,20 @@ Options:\n\
   --log <path>        Boot log file [env: CHATTY_LOG]\n\
   --cert <path>       TLS certificate PEM [default: certs/server.pem]\n\
   --key <path>        TLS private key PEM [default: certs/server.key]\n\
-  --llama-url <url>   Inference adapter base URL [env: CHATTY_LLAMA_URL]\n";
+  --llama-url <url>   Inference adapter base URL [env: CHATTY_LLAMA_URL]\n\
+\nAdapter plugins:\n\
+  CHATTY_ADAPTER_DIR       Optional directory of WASM plugin subdirectories\n\
+  CHATTY_ADAPTER_PLUGIN    Optional inference/management plugin ID override\n";
+
+type MemoryJobs = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
 
 #[derive(Clone)]
 struct App {
     db: SqlitePool,
-    http: reqwest::Client,
+    adapters: AdapterHost,
     cancellations: CancellationRegistry,
     snapshot_gate: Arc<RwLock<()>>,
+    memory_jobs: MemoryJobs,
     deltas: broadcast::Sender<PublishedDelta>,
     recent_errors: Arc<Mutex<Vec<String>>>,
     log_path: Arc<PathBuf>,
@@ -146,7 +157,10 @@ impl Write for BootLogWriter {
 }
 
 fn open_boot_log(path: &Path) -> Result<File> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)
             .with_context(|| format!("create broker log directory {}", parent.display()))?;
     }
@@ -261,17 +275,18 @@ async fn main() -> Result<()> {
     let (delta_tx, _) = broadcast::channel(256);
     let app = App {
         db,
-        http: reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .build()?,
+        adapters: AdapterHost::from_environment()?,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
         deltas: delta_tx,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         log_path: Arc::new(args.log),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         image_key,
     };
+    app.adapters
+        .configuration_changed(&load_broker_config(&app.db).await?)?;
     let probe_app = app.clone();
     tokio::spawn(async move {
         match probe_backend(&probe_app).await {
@@ -675,7 +690,18 @@ async fn dispatch(
                 .bind(config.allow_self_registration)
                 .execute(&app.db)
                 .await?;
+            app.adapters.configuration_changed(&config)?;
             send!(MessageType::Response, Response::BrokerConfig(config));
+        }
+        Request::AdminSearchModels {
+            session_token,
+            query,
+        } => {
+            require_admin(&app.db, &session_token).await?;
+            send!(
+                MessageType::Response,
+                Response::ModelSearchResults(search_hugging_face_models(&app, &query).await?)
+            );
         }
         Request::AdminGetOllamaState { session_token } => {
             require_admin(&app.db, &session_token).await?;
@@ -689,6 +715,9 @@ async fn dispatch(
             action,
         } => {
             require_admin(&app.db, &session_token).await?;
+            // Model pulls can stay silent longer than the connection idle limit.
+            busy.fetch_add(1, Ordering::Relaxed);
+            let _busy_guard = BusyGuard(busy.clone());
             run_ollama_action(&app, action).await?;
             send!(
                 MessageType::Response,
@@ -1027,8 +1056,7 @@ async fn dispatch(
             let uid = auth(&app.db, &session_token).await?;
             busy.fetch_add(1, Ordering::Relaxed);
             let _busy_guard = BusyGuard(busy.clone());
-            let character =
-                import_character_from_text(&app, &uid, &source_name, &text).await?;
+            let character = import_character_from_text(&app, &uid, &source_name, &text).await?;
             send!(
                 MessageType::Response,
                 Response::CharacterImportPreview(Box::new(character))
@@ -1212,14 +1240,15 @@ async fn dispatch(
             for image in &mut visible_character.images {
                 image.data.clear();
             }
-            let changed = encode(&DeltaPayload::Character(Box::new(visible_character.clone())))?;
+            let changed = encode(&DeltaPayload::Character(Box::new(
+                visible_character.clone(),
+            )))?;
             // Delta history is stored in SQLite, so keep licensed image bytes
             // exclusively in the authenticated ciphertext column.
             visible_character.avatar = None;
             visible_character.images.clear();
             visible_character.default_image_id = None;
-            let stored_changed =
-                encode(&DeltaPayload::Character(Box::new(visible_character)))?;
+            let stored_changed = encode(&DeltaPayload::Character(Box::new(visible_character)))?;
             let eid = character.id.unwrap_or_else(new_uuid);
             let fields = encode(&character.tags)?;
             let images = encrypt_character_images(&app.image_key, &uid, &eid, &character.images)?;
@@ -1803,15 +1832,8 @@ async fn dispatch(
             memory,
         } => {
             let uid = auth(&app.db, &session_token).await?;
-            let (entry, operation, changed) = persist_memory(
-                &app,
-                &uid,
-                memory,
-                MemorySource::Manual,
-                1.0,
-                Vec::new(),
-            )
-            .await?;
+            let (entry, operation, changed) =
+                persist_memory(&app, &uid, memory, MemorySource::Manual, 1.0, Vec::new()).await?;
             let eid = entry.id;
             let rev = entry.revision;
             send_delta!(&uid, rev, "memory", eid, operation, changed);

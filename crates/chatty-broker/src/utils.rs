@@ -67,7 +67,8 @@ pub(super) fn encrypt_character_images(
             },
         )
         .map_err(|_| format_err!("encrypt character images"))?;
-    let mut stored = Vec::with_capacity(IMAGE_CIPHERTEXT_MAGIC.len() + nonce.len() + ciphertext.len());
+    let mut stored =
+        Vec::with_capacity(IMAGE_CIPHERTEXT_MAGIC.len() + nonce.len() + ciphertext.len());
     stored.extend_from_slice(IMAGE_CIPHERTEXT_MAGIC);
     stored.extend_from_slice(&nonce);
     stored.extend_from_slice(&ciphertext);
@@ -298,13 +299,6 @@ pub(super) fn clip(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-pub(super) fn token_usage_from_openai(value: &Value) -> TokenUsage {
-    TokenUsage {
-        prompt_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
-        completion_tokens: value["usage"]["completion_tokens"].as_u64().unwrap_or(0),
-    }
-}
-
 pub(super) async fn record_token_usage(app: &App, user_id: &str, usage: TokenUsage) -> Result<()> {
     if usage.total() == 0 {
         return Ok(());
@@ -316,88 +310,4 @@ pub(super) async fn record_token_usage(app: &App, user_id: &str, usage: TokenUsa
         .execute(&app.db)
         .await?;
     Ok(())
-}
-
-pub(super) fn drain_sse(
-    buffer: &mut Vec<u8>,
-    pending: &mut String,
-    complete: &mut String,
-    usage: &mut TokenUsage,
-) -> Result<bool> {
-    let mut consumed = 0;
-    let mut done = false;
-    while let Some(relative_end) = buffer[consumed..].iter().position(|b| *b == b'\n') {
-        let end = consumed + relative_end;
-        let line = std::str::from_utf8(&buffer[consumed..end])?.trim_end_matches('\r');
-        consumed = end + 1;
-        let Some(data) = line.strip_prefix("data:").map(str::trim_start) else {
-            continue;
-        };
-        if data == "[DONE]" {
-            done = true;
-            break;
-        }
-        let value: Value =
-            serde_json::from_str(data).context("malformed llama-server SSE event")?;
-        if let Some(error) = value.get("error") {
-            let message = error["message"]
-                .as_str()
-                .or_else(|| error.as_str())
-                .unwrap_or("unknown backend error");
-            bail!("model generation failed: {message}")
-        }
-        if let Some(value_usage) = value.get("usage") {
-            usage.prompt_tokens = value_usage["prompt_tokens"]
-                .as_u64()
-                .unwrap_or(usage.prompt_tokens);
-            usage.completion_tokens = value_usage["completion_tokens"]
-                .as_u64()
-                .unwrap_or(usage.completion_tokens);
-        }
-        if let Some(text) = value["choices"][0]["delta"]["content"].as_str() {
-            pending.push_str(text);
-            complete.push_str(text);
-        }
-    }
-    buffer.drain(..consumed);
-    Ok(done)
-}
-
-pub(super) fn drain_ollama_stream(
-    buffer: &mut Vec<u8>,
-    pending: &mut String,
-    complete: &mut String,
-    usage: &mut TokenUsage,
-) -> Result<bool> {
-    let mut consumed = 0;
-    let mut done = false;
-    while let Some(relative_end) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
-        let end = consumed + relative_end;
-        let line = std::str::from_utf8(&buffer[consumed..end])?.trim();
-        consumed = end + 1;
-        if line.is_empty() {
-            continue;
-        }
-        let value: Value =
-            serde_json::from_str(line).context("malformed Ollama NDJSON stream event")?;
-        if let Some(error) = value["error"].as_str() {
-            bail!("Ollama generation failed: {error}")
-        }
-        if let Some(text) = value["message"]["content"].as_str() {
-            pending.push_str(text);
-            complete.push_str(text);
-        }
-        usage.prompt_tokens = value["prompt_eval_count"]
-            .as_u64()
-            .unwrap_or(usage.prompt_tokens);
-        usage.completion_tokens = value["eval_count"]
-            .as_u64()
-            .unwrap_or(usage.completion_tokens);
-        done |= value["done"].as_bool().unwrap_or(false);
-        if done {
-            break;
-        }
-    }
-    buffer.drain(..consumed);
-    Ok(done)
 }

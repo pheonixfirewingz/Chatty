@@ -95,3 +95,11 @@ pub struct AdminDataRow {
     pub detail: String,
     pub is_public: Option<bool>,
 }
+
+/// Public GGUF repository and bounded downloadable file choices from Hugging Face.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelSearchResult {
+    pub id: String,
+    pub downloads: u64,
+    pub files: Vec<String>,
+}

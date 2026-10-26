@@ -4,16 +4,22 @@ Chatty has not yet completed its first packaged release. Treat the following as 
 
 ## Code gate
 
-From a clean checkout with the locked dependency set available:
+From a clean checkout, run every command in
+[Build and verification](../AGENTS.md#build-and-verification) with the locked
+dependency set available. All commands must pass, including strict Clippy. Record
+results, the source revision, Rust version, and target architecture used for artifacts.
+
+## Adapter artifacts
+
+The broker embeds the checked-in WASM modules from `crates/chatty-adapters/`; native builds do not need a WASM Rust target. When changing guest code or the shared adapter API module, rebuild and include the resulting modules:
 
 ```sh
-cargo fmt --all -- --check
-cargo test --workspace --offline
-cargo clippy --workspace --all-targets --offline -- -D warnings
-cargo build --release --workspace --locked --offline
+rustup target add wasm32-unknown-unknown
+./scripts/build-adapters.sh
+./scripts/build-adapters.sh --check
 ```
 
-All commands must pass without warnings promoted to errors. Record the Rust version and target architecture used to produce artifacts.
+Record the Rust toolchain used to build the modules. Run workspace tests and strict Clippy after rebuilding: host tests exercise the actual embedded WASM, including dynamic loading, request translation, fragmented streaming, remote downloads, fuel/memory limits, and cancellation. Check that an operator-installed plugin can be selected without rebuilding the broker. Never publish guest source changes with stale embedded modules. The script builds and checks OpenAI, Ollama, Hugging Face, and FreeToken artifacts. FreeToken host tests cover its remote serving API, fragmented UTF-8 SSE, reasoning exclusion, finish/usage metadata, unsupported lifecycle operations, cancellation, and credential origin isolation.
 
 ## Functional gate
 
@@ -42,10 +48,15 @@ The result is written to `dist/chatty-<version>-<arch>.flatpak`. Install and tes
 
 ```sh
 flatpak install --user ./dist/chatty-*.flatpak
-flatpak run io.github.pheonixfirewingz.Chatty
+flatpak run io.github.pheonixfirewingz.Chatty//25.08
+flatpak run io.github.pheonixfirewingz.Chatty//25.08 --test-speech
 ```
 
-The sandbox has network, Wayland, and DRI permissions. It does not package or start the broker. Install a trusted broker CA in the app-private configuration directory:
+The sandbox has network, Wayland, audio server, and DRI permissions. ONNX Runtime is
+bundled; speech model files download once into the app-private cache at
+`~/.var/app/io.github.pheonixfirewingz.Chatty/cache/huggingface/`. Test both first-use
+download and subsequent cached playback with `--test-speech`. It does not package or
+start the broker. Install a trusted broker CA in the app-private configuration directory:
 
 ```sh
 mkdir -p ~/.var/app/io.github.pheonixfirewingz.Chatty/config/chatty/server-cas
@@ -76,3 +87,8 @@ Publish together:
 - Protocol version and minimum compatible broker/GUI version
 
 Do not publish development CA keys, server private keys, databases, logs, or GUI session files.
+
+## Deployment
+
+Follow [Operations: Upgrade](OPERATIONS.md#upgrade) for service deployment, database
+backups, migration checks, and rollback limits. Deploy compatible broker and GUI builds.

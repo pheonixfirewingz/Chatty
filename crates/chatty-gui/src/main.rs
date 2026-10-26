@@ -1,464 +1,258 @@
 #![allow(clippy::collapsible_if)]
 
-use chatty_protocol::util::args::ParsedArgs;
-use chatty_protocol::util::{Context, Error, Result, bail, format_err};
-use chatty_protocol::*;
-use eframe::egui;
-use image::ImageEncoder;
-use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
-use std::{
-    collections::{HashMap, HashSet},
-    fs::File,
-    io::BufReader,
-    net::{IpAddr, SocketAddr},
-    path::PathBuf,
-    sync::Arc,
-    thread,
-    time::{Duration, Instant},
-};
-use tokio::{net::TcpStream, sync::mpsc};
-use tokio_rustls::{TlsConnector, client::TlsStream};
-
 mod admin_monitor;
-mod characters;
+pub mod characters;
 mod conversation;
-mod memories;
+pub mod memories;
 mod network;
 mod tts;
 mod ui;
-mod worlds;
-use network::{Command, ConnectionTarget, Event, EventSender, PendingCertificate};
-use ui::FooterIcon;
+pub mod worlds;
 
-const COLOR_PRIMARY: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);
-const COLOR_PRIMARY_STRONG: egui::Color32 = egui::Color32::from_rgb(79, 70, 229);
-const COLOR_ON_PRIMARY: egui::Color32 = egui::Color32::WHITE;
+use chatty_protocol::util::args::ParsedArgs;
+use chatty_protocol::util::current_utc_timestamp;
+use chatty_protocol::util::{format_err, Error, Result};
+use chatty_protocol::*;
+use iced::futures::stream::BoxStream;
+use iced::futures::StreamExt;
+use iced::widget::{
+    Id, Space, button, column, container, mouse_area, responsive, row, scrollable, stack, text,
+    text_input, toggler, tooltip,
+};
+use iced::{
+    Alignment, Background, Border, Color, Element, Length, Padding, Point, Size,
+    Subscription, Task, Theme, font, window,
+};
+use iced_dialog::dialog;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
-fn color_surface_raised(ui: &egui::Ui) -> egui::Color32 {
-    ui.visuals().faint_bg_color
-}
-
-fn color_border(ui: &egui::Ui) -> egui::Color32 {
-    ui.visuals().widgets.noninteractive.bg_stroke.color
-}
-
-fn color_primary_text(ui: &egui::Ui) -> egui::Color32 {
-    if ui.visuals().dark_mode {
-        egui::Color32::from_rgb(199, 210, 254)
-    } else {
-        egui::Color32::from_rgb(49, 46, 129)
-    }
-}
-
-fn paint_glass_background(ui: &egui::Ui, light_mode: bool) {
-    ui.painter().rect_filled(
-        ui.max_rect(),
-        0.0,
-        if light_mode {
-            egui::Color32::from_rgba_unmultiplied(226, 232, 248, 175)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(4, 8, 18, 205)
-        },
-    );
-}
-
-fn paint_glass_modal_scrim(ui: &egui::Ui, light_mode: bool) {
-    ui.painter().rect_filled(
-        ui.max_rect(),
-        0.0,
-        if light_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 205)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 210)
-        },
-    );
-}
-
-fn modal_frame(ctx: &egui::Context, light_mode: bool, glass_mode: bool) -> egui::Frame {
-    let theme = if light_mode {
-        egui::Theme::Light
-    } else {
-        egui::Theme::Dark
-    };
-    let frame = egui::Frame::window(&ctx.style_of(theme));
-    if glass_mode {
-        frame.fill(if light_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(20, 29, 48, 180)
-        })
-    } else {
-        frame
-    }
-}
-
-struct Args {
-    broker: String,
-    ca: Option<PathBuf>,
-    inspect: bool,
-    width: f32,
-    height: f32,
-    session_file: Option<PathBuf>,
-}
+use admin_monitor::{
+    admin_dialog_view, admin_subscription, AdminMessage, AdminState,
+};
+use characters::{character_dialog_view, CharacterMessage, DraftCharacter};
+use conversation::{
+    conversation_view, new_chat_dialog_view, ConversationMessage, ConversationViewState,
+    NewChatViewState,
+};
+use memories::{
+    memory_dialog_view, MemoryAction, MemoryDialogState, MemoryMessage, MemoryViewState,
+};
+use network::{
+    save_preferences, session_path, Command, ConnectionTarget, Event, PendingCertificate,
+};
+use tts::{test_speech, tts_channel, LocalTts, TtsEvent};
+use ui::{
+    icon_button,
+    sidebar_panel, sidebar_toggle_button, FooterIcon,
+};
+use worlds::{world_dialog_view, WorldAction, WorldDialogState, WorldMessage, WorldViewState};
 
 const USAGE: &str = "chatty-gui -- Chatty client\n\n\
 Options:\n\
   --broker <addr>         Broker address [env: CHATTY_BROKER]\n\
   --ca <path>             Pinned CA certificate PEM [env: CHATTY_CA]\n\
   --inspect               Open the inspection harness instead of the app\n\
+  --inspect-control <fifo> FIFO for inspection control commands [env: CHATTY_INSPECT_CONTROL]\n\
   --width <px>            Initial window width [default: 1100]\n\
   --height <px>           Initial window height [default: 720]\n\
-  --session-file <path>   Session storage path [env: CHATTY_SESSION_FILE]\n";
+  --session-file <path>   Session storage path [env: CHATTY_SESSION_FILE]\n\
+  --test-speech           Play a short test phrase and exit\n";
 
-fn main() -> Result<()> {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .map_err(|_| format_err!("failed to install TLS provider"))?;
-    let parsed = ParsedArgs::parse(USAGE)?;
-    let mut args = Args {
-        broker: parsed.string("broker", "CHATTY_BROKER", ""),
-        ca: parsed.optional("ca", "CHATTY_CA").map(PathBuf::from),
-        inspect: parsed.flag("inspect"),
-        width: parsed.number("width", 1100.0),
-        height: parsed.number("height", 720.0),
-        session_file: parsed
-            .optional("session-file", "CHATTY_SESSION_FILE")
-            .map(PathBuf::from),
-    };
-    let inspect = args.inspect;
-    let mut initial_server = broker_host(&args.broker).unwrap_or_default();
-    let mut initial_broker = connection_target(&initial_server).map(|target| target.broker);
-    let mut remembered_session = None;
-    if !inspect {
-        // Resolve this before starting eframe so debug and release launches use
-        // the same absolute XDG state path and never fall back to the cwd.
-        args.session_file = Some(network::session_path(&args)?);
-        if initial_server.is_empty() {
-            initial_server = args
-                .session_file
-                .as_deref()
-                .map(network::last_server_path)
-                .and_then(|path| network::load_last_server(&path))
-                .and_then(|server| broker_host(&server))
-                .unwrap_or_default();
-            initial_broker = connection_target(&initial_server).map(|target| target.broker);
-        }
-        remembered_session = args
-            .session_file
-            .as_ref()
-            .and_then(|path| network::load_session(path, initial_broker.as_deref()));
-    }
-    let preferences_path = args.session_file.as_deref().map(network::preferences_path);
-    let light_mode = preferences_path
-        .as_deref()
-        .is_some_and(network::load_light_mode);
-    let glass_mode = preferences_path
-        .as_deref()
-        .is_some_and(network::load_glass_mode);
-    let transparency = preferences_path
-        .as_deref()
-        .map_or(20, network::load_transparency);
-    let tts_auto_speak = preferences_path
-        .as_deref()
-        .is_some_and(network::load_tts_auto_speak);
-    let size = [args.width, args.height];
-    let (command_tx, command_rx) = mpsc::unbounded_channel();
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let repaint_context = Arc::new(std::sync::Mutex::new(None));
-    if !inspect {
-        let network_events = EventSender::new(event_tx, repaint_context.clone());
-        thread::Builder::new()
-            .name("chatty-network".into())
-            .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(network::run(
-                        args,
-                        remembered_session,
-                        command_rx,
-                        network_events,
-                    ))
-            })?;
-    }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(size)
-            .with_min_inner_size([640.0, 480.0])
-            .with_transparent(true),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Chatty",
-        options,
-        Box::new(move |cc| {
-            enable_screen_capture_protection(&cc.egui_ctx);
-            configure_style_with_surface(&cc.egui_ctx, light_mode, glass_mode, transparency);
-            if let Ok(mut context) = repaint_context.lock() {
-                *context = Some(cc.egui_ctx.clone());
-            }
-            let mut app = ChattyApp::new(command_tx, event_rx);
-            app.server_address = initial_server;
-            app.light_mode = light_mode;
-            app.glass_mode = glass_mode;
-            app.transparency = transparency;
-            app.tts_auto_speak = tts_auto_speak;
-            app.preferences_path = preferences_path;
-            if inspect {
-                app.load_inspection_demo();
-            }
-            Ok(Box::new(app))
-        }),
-    )
-    .map_err(|e| Error::msg(e.to_string()))
+#[derive(Clone, Debug)]
+pub struct UiNotice {
+    pub timestamp: String,
+    pub message: String,
 }
 
-fn enable_screen_capture_protection(ctx: &egui::Context) {
-    // Ask the native windowing backend to keep Chatty out of OS-managed
-    // screenshots and screen capture. This maps to WDA_EXCLUDEFROMCAPTURE on
-    // supported Windows versions and to the best-effort NSWindow sharing
-    // restriction on macOS. Winit currently treats the request as a no-op on
-    // Linux/X11 and Linux/Wayland.
-    ctx.send_viewport_cmd(egui::ViewportCommand::ContentProtected(true));
-}
-
-fn broker_host(value: &str) -> Option<String> {
-    let value = value.trim();
-    value
-        .parse::<IpAddr>()
-        .map(|ip| ip.to_string())
-        .ok()
-        .or_else(|| {
-            value
-                .parse::<SocketAddr>()
-                .map(|address| address.ip().to_string())
-                .ok()
-        })
-        .or_else(|| {
-            let host = match value.rsplit_once(':') {
-                Some((host, "7443")) if !host.contains(':') => host,
-                Some(_) => return None,
-                None => value,
-            };
-            let valid = !host.is_empty()
-                && host.len() <= 253
-                && host.split('.').all(|label| {
-                    !label.is_empty()
-                        && label.len() <= 63
-                        && label
-                            .as_bytes()
-                            .first()
-                            .is_some_and(u8::is_ascii_alphanumeric)
-                        && label
-                            .as_bytes()
-                            .last()
-                            .is_some_and(u8::is_ascii_alphanumeric)
-                        && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                });
-            valid.then(|| host.to_ascii_lowercase())
-        })
-}
-
-fn connection_target(value: &str) -> Option<ConnectionTarget> {
-    let host = broker_host(value)?;
-    let broker = host.parse::<IpAddr>().map_or_else(
-        |_| format!("{host}:7443"),
-        |ip| SocketAddr::new(ip, 7443).to_string(),
-    );
-    Some(ConnectionTarget {
-        broker,
-        server_name: host,
-    })
-}
-
-fn configure_style_with_surface(
-    ctx: &egui::Context,
-    light_mode: bool,
-    glass_mode: bool,
-    transparency: u8,
-) {
-    let transparency = transparency.min(80);
-    let surface_alpha = 255_u8.saturating_sub(((u16::from(transparency) * 255) / 100) as u8);
-    let raised_alpha = surface_alpha.saturating_add(18);
-    let hover_alpha = surface_alpha.saturating_add(36);
-    let mut visuals = if light_mode {
-        let mut visuals = egui::Visuals::light();
-        visuals.panel_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(246, 248, 255, surface_alpha)
-        } else {
-            egui::Color32::from_rgb(246, 247, 251)
-        };
-        visuals.window_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, raised_alpha)
-        } else {
-            egui::Color32::WHITE
-        };
-        visuals.extreme_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(230, 235, 247, surface_alpha)
-        } else {
-            egui::Color32::from_rgb(238, 240, 246)
-        };
-        visuals.faint_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, surface_alpha)
-        } else {
-            egui::Color32::from_rgb(235, 237, 245)
-        };
-        visuals.code_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(238, 242, 252, raised_alpha)
-        } else {
-            egui::Color32::from_rgb(236, 238, 244)
-        };
-        visuals
-    } else {
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(10, 16, 29, surface_alpha)
-        } else {
-            egui::Color32::from_rgb(11, 15, 23)
-        };
-        visuals.window_fill = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(20, 29, 48, raised_alpha)
-        } else {
-            egui::Color32::from_rgb(17, 23, 34)
-        };
-        visuals.extreme_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(7, 12, 23, surface_alpha)
-        } else {
-            egui::Color32::from_rgb(8, 12, 19)
-        };
-        visuals.faint_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(65, 82, 122, surface_alpha)
-        } else {
-            egui::Color32::from_rgb(24, 32, 46)
-        };
-        visuals.code_bg_color = if glass_mode {
-            egui::Color32::from_rgba_unmultiplied(28, 40, 65, raised_alpha)
-        } else {
-            egui::Color32::from_rgb(20, 28, 41)
-        };
-        visuals
-    };
-    if glass_mode {
-        let subtle_fill = if light_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, surface_alpha)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(52, 66, 98, surface_alpha)
-        };
-        let border = if light_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 210)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(176, 196, 235, 105)
-        };
-        visuals.widgets.noninteractive.bg_fill = subtle_fill;
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
-        visuals.widgets.inactive.bg_fill = subtle_fill;
-        visuals.widgets.inactive.weak_bg_fill = subtle_fill;
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
-        visuals.widgets.hovered.bg_fill = if light_mode {
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, hover_alpha)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(83, 103, 150, hover_alpha)
-        };
-        visuals.widgets.hovered.weak_bg_fill = visuals.widgets.hovered.bg_fill;
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border);
-    }
-    visuals.selection.bg_fill = egui::Color32::from_rgb(37, 99, 235);
-    visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(191, 219, 254));
-    visuals.hyperlink_color = if light_mode {
-        egui::Color32::from_rgb(29, 78, 216)
-    } else {
-        egui::Color32::from_rgb(96, 165, 250)
-    };
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(37, 99, 235);
-    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(30, 64, 175);
-    visuals.widgets.active.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(96, 165, 250));
-    visuals.window_stroke = if glass_mode && light_mode {
-        egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220),
-        )
-    } else if glass_mode {
-        egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(176, 196, 235, 115),
-        )
-    } else if light_mode {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(203, 208, 220))
-    } else {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 66, 86))
-    };
-    visuals.window_corner_radius = egui::CornerRadius::same(14);
-    visuals.weak_text_alpha = 0.74;
-    ctx.set_visuals(visuals);
-    let theme = if light_mode {
-        egui::Theme::Light
-    } else {
-        egui::Theme::Dark
-    };
-    let mut style = (*ctx.style_of(theme)).clone();
-    style.spacing.item_spacing = egui::vec2(10.0, 9.0);
-    style.spacing.button_padding = egui::vec2(14.0, 8.0);
-    style.spacing.interact_size.y = 36.0;
-    // Egui uses this margin on both sides of popup title text. Eight pixels
-    // trims the title bar from roughly 60 px to 44 px (about one quarter).
-    style.spacing.window_margin = egui::Margin::same(8);
-    style.visuals.menu_corner_radius = egui::CornerRadius::same(10);
-    style.text_styles.insert(
-        egui::TextStyle::Heading,
-        egui::FontId::new(24.0, egui::FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Body,
-        egui::FontId::new(15.0, egui::FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Button,
-        egui::FontId::new(14.0, egui::FontFamily::Proportional),
-    );
-    ctx.set_style_of(theme, style);
-}
-
-#[derive(Default, Clone)]
-struct DraftCharacter {
-    id: Option<String>,
-    name: String,
-    description: String,
-    personality: String,
-    scenario: String,
-    system_prompt: String,
-    example_dialogue: String,
-    appearance: String,
-    age: String,
-    gender: String,
-    race: String,
-    misc: String,
-    tags: String,
-    avatar: Option<Vec<u8>>,
-    images: Vec<CharacterImage>,
-    default_image_id: Option<String>,
-    is_public: bool,
-    owned_by_user: bool,
-}
-
-#[derive(Clone)]
-struct UiNotice {
-    timestamp: String,
-    message: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Screen {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Login,
     Chat,
-    Characters,
     Admin,
     Settings,
 }
 
-struct ChattyApp {
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) enum Message {
+    Network(Event),
+    Tts(TtsEvent),
+    Admin(AdminMessage),
+    Character(CharacterMessage),
+    World(WorldMessage),
+    Memory(MemoryMessage),
+    Conversation(ConversationMessage),
+    InspectControl(String),
+    ScreenshotCaptured(iced::window::Screenshot),
+    ServerAddressChanged(String),
+    TryConnect,
+    LoginUsernameChanged(String),
+    LoginPasswordChanged(String),
+    SubmitLogin,
+    SubmitRegister,
+    ChangeServer,
+    SelectConversation(String),
+    DeleteConversation(String),
+    HoverConversation(Option<String>),
+    OpenNewChat,
+    OpenCharactersDialog,
+    CloseCharactersDialog,
+    OpenWorldsDialog,
+    CloseWorldsDialog,
+    OpenMemoriesDialog(Option<String>, Option<String>),
+    CloseMemoriesDialog,
+    OpenAdminDialog,
+    CloseAdminDialog,
+    OpenSettingsDialog,
+    CloseSettingsDialog,
+    SetTtsAutoSpeak(bool),
+    SignOut,
+    ToggleSidebar,
+    ToggleCompactSidebar,
+    TrustCertificate(bool),
+    DismissError,
+    DismissMemoryNotice,
+    WindowResized(Size),
+    WindowClosed,
+}
+
+impl From<AdminMessage> for Message {
+    fn from(msg: AdminMessage) -> Self {
+        Message::Admin(msg)
+    }
+}
+
+impl From<WorldMessage> for Message {
+    fn from(msg: WorldMessage) -> Self {
+        Message::World(msg)
+    }
+}
+
+impl From<MemoryMessage> for Message {
+    fn from(msg: MemoryMessage) -> Self {
+        Message::Memory(msg)
+    }
+}
+
+impl From<CharacterMessage> for Message {
+    fn from(msg: CharacterMessage) -> Self {
+        Message::Character(msg)
+    }
+}
+
+impl From<ConversationMessage> for Message {
+    fn from(msg: ConversationMessage) -> Self {
+        Message::Conversation(msg)
+    }
+}
+
+#[derive(Clone)]
+struct ChannelHolder<T>(Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<T>>>>, usize);
+
+impl<T> std::hash::Hash for ChannelHolder<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.1.hash(state);
+    }
+}
+
+impl<T> PartialEq for ChannelHolder<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.1 == other.1
+    }
+}
+
+impl<T> Eq for ChannelHolder<T> {}
+
+fn run_channel_stream<T: Send + 'static>(
+    holder: &ChannelHolder<T>,
+) -> BoxStream<'static, T> {
+    let mutex = holder.0.clone();
+    iced::stream::channel(
+        100,
+        move |mut output: iced::futures::channel::mpsc::Sender<T>| async move {
+            use iced::futures::sink::SinkExt;
+            let rx = {
+                let mut guard = mutex.lock().await;
+                guard.take()
+            };
+            if let Some(mut rx) = rx {
+                while let Some(item) = rx.recv().await {
+                    if output.send(item).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
+fn run_network_stream(holder: &ChannelHolder<Event>) -> BoxStream<'static, Event> {
+    run_channel_stream(holder)
+}
+
+fn run_tts_stream(holder: &ChannelHolder<TtsEvent>) -> BoxStream<'static, TtsEvent> {
+    run_channel_stream(holder)
+}
+
+#[allow(clippy::ptr_arg)]
+fn run_fifo_stream(path: &PathBuf) -> BoxStream<'static, String> {
+    let path = path.clone();
+    iced::stream::channel(
+        16,
+        move |mut output: iced::futures::channel::mpsc::Sender<String>| async move {
+            use iced::futures::sink::SinkExt;
+            if !path.exists() {
+                let _ = std::process::Command::new("mkfifo").arg(&path).status();
+            }
+            loop {
+                let path_clone = path.clone();
+                let line = tokio::task::spawn_blocking(move || {
+                    use std::io::BufRead;
+                    let Ok(file) = std::fs::File::open(&path_clone) else {
+                        return None;
+                    };
+                    let mut reader = std::io::BufReader::new(file);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                        Some(line)
+                    } else {
+                        None
+                    }
+                })
+                .await
+                .ok()
+                .flatten();
+
+                if let Some(line) = line {
+                    let trimmed = line.trim().to_string();
+                    if !trimmed.is_empty() {
+                        if output.send(trimmed).await.is_err() {
+                            break;
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
+pub struct ChattyApp {
     commands: mpsc::UnboundedSender<Command>,
-    events: std::sync::mpsc::Receiver<Event>,
+    events_holder: ChannelHolder<Event>,
+    tts_holder: ChannelHolder<TtsEvent>,
+    fifo_path: Option<PathBuf>,
+    pending_screenshot_path: Option<PathBuf>,
+    zoom: f32,
+
     status: String,
     status_tooltip: Option<String>,
     server_address: String,
@@ -477,23 +271,13 @@ struct ChattyApp {
     characters: Vec<Character>,
     character_image_requests: HashSet<(String, String)>,
     received_character_images: Vec<(String, Vec<u8>)>,
+    character_search: String,
     worlds: Vec<World>,
-    world_draft: World,
-    world_import_pending: bool,
-    world_import_started: Option<Instant>,
-    world_import_notice: Option<String>,
-    world_entry_search: String,
+    world_state: WorldDialogState,
     worlds_open: bool,
     memories: Vec<MemoryEntry>,
+    memory_state: MemoryDialogState,
     memory_dialog_open: bool,
-    memory_search: String,
-    memory_character_filter: Option<String>,
-    memory_conversation_filter: Option<String>,
-    memory_kind_filter: Option<MemoryKind>,
-    memory_draft: MemoryInput,
-    memory_editor_open: bool,
-    memory_delete_confirmation: Option<String>,
-    memory_notice: Option<String>,
     conversations: Vec<Conversation>,
     messages: Vec<ChatMessage>,
     selected_conversation: Option<String>,
@@ -502,12 +286,15 @@ struct ChattyApp {
     input: String,
     editing_message_id: Option<String>,
     editing_message_content: String,
+    hovered_message_id: Option<String>,
+    hovered_conversation_id: Option<String>,
     stream_text: String,
     typing_character: Option<String>,
     generation_status: Option<GenerationStatus>,
     active_request: Option<u64>,
     screen: Screen,
     sidebar_visible: bool,
+    compact_sidebar_open: bool,
     error: Option<UiNotice>,
     draft: DraftCharacter,
     draft_world_ids: HashSet<String>,
@@ -516,38 +303,44 @@ struct ChattyApp {
     char_import_started: Option<Instant>,
     new_chat_open: bool,
     new_conversation_title: String,
-    users: Vec<UserAccount>,
-    broker_config: BrokerConfig,
-    broker_monitor: Option<BrokerMonitor>,
-    admin_log: BrokerLog,
-    admin_log_search: String,
-    ollama_state: Option<OllamaState>,
-    ollama_pull_model: String,
-    admin_data: Vec<AdminDataRow>,
-    admin_tab: usize,
-    admin_new_username: String,
-    admin_new_password: String,
-    admin_new_role: Role,
+    admin: AdminState,
     last_monitor_refresh: Option<Instant>,
     account_usage: TokenUsage,
     light_mode: bool,
     glass_mode: bool,
-    transparency: u8,
     preferences_path: Option<PathBuf>,
-    tts: tts::LocalTts,
+    tts: LocalTts,
     tts_auto_speak: bool,
     pending_tts_message_id: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct Args {
+    pub broker: String,
+    pub ca: Option<PathBuf>,
+    pub inspect: bool,
+    pub inspect_control: Option<PathBuf>,
+    pub width: f32,
+    pub height: f32,
+    pub session_file: Option<PathBuf>,
+    pub test_speech: bool,
+}
+
 impl ChattyApp {
-    fn new(
+    pub(crate) fn new(
         commands: mpsc::UnboundedSender<Command>,
-        events: std::sync::mpsc::Receiver<Event>,
+        events_rx: mpsc::UnboundedReceiver<Event>,
     ) -> Self {
+        let (tts, tts_rx) = tts_channel();
         Self {
             commands,
-            events,
-            status: "Enter the server address to begin.".into(),
+            events_holder: ChannelHolder(Arc::new(tokio::sync::Mutex::new(Some(events_rx))), 1),
+            tts_holder: ChannelHolder(Arc::new(tokio::sync::Mutex::new(Some(tts_rx))), 2),
+            fifo_path: None,
+            pending_screenshot_path: None,
+            zoom: 1.0,
+
+            status: "Enter the server IP to begin.".into(),
             status_tooltip: None,
             server_address: String::new(),
             pending_certificate: None,
@@ -562,107 +355,1533 @@ impl ChattyApp {
             role: None,
             registration_enabled: true,
             state: HashMap::new(),
-            characters: vec![],
+            characters: Vec::new(),
             character_image_requests: HashSet::new(),
-            received_character_images: vec![],
-            worlds: vec![],
-            world_draft: World::default(),
-            world_import_pending: false,
-            world_import_started: None,
-            world_import_notice: None,
-            world_entry_search: String::new(),
+            received_character_images: Vec::new(),
+            character_search: String::new(),
+            worlds: Vec::new(),
+            world_state: WorldDialogState::default(),
             worlds_open: false,
-            memories: vec![],
+            memories: Vec::new(),
+            memory_state: MemoryDialogState::default(),
             memory_dialog_open: false,
-            memory_search: String::new(),
-            memory_character_filter: None,
-            memory_conversation_filter: None,
-            memory_kind_filter: None,
-            memory_draft: MemoryInput {
-                id: None,
-                conversation_id: None,
-                character_id: None,
-                kind: MemoryKind::Fact,
-                content: String::new(),
-                importance: 50,
-                pinned: false,
-            },
-            memory_editor_open: false,
-            memory_delete_confirmation: None,
-            memory_notice: None,
-            conversations: vec![],
-            messages: vec![],
+            conversations: Vec::new(),
+            messages: Vec::new(),
             selected_conversation: None,
             auto_select_conversation: true,
             selected_characters: HashSet::new(),
             input: String::new(),
             editing_message_id: None,
             editing_message_content: String::new(),
+            hovered_message_id: None,
+            hovered_conversation_id: None,
             stream_text: String::new(),
             typing_character: None,
             generation_status: None,
             active_request: None,
-            screen: Screen::Chat,
+            screen: Screen::Login,
             sidebar_visible: true,
+            compact_sidebar_open: false,
             error: None,
-            draft: DraftCharacter {
-                owned_by_user: true,
-                ..Default::default()
-            },
+            draft: DraftCharacter::default(),
             draft_world_ids: HashSet::new(),
             draft_character_open: false,
             char_import_pending: false,
             char_import_started: None,
             new_chat_open: false,
             new_conversation_title: String::new(),
-            users: vec![],
-            broker_config: BrokerConfig {
-                adapter_enabled: false,
-                adapter_url: String::new(),
-                use_ollama_api: false,
-                model: String::new(),
-                temperature: 0.8,
-                top_p: 0.9,
-                top_k: 40,
-                num_ctx: 4096,
-                num_predict: -1,
-                repeat_penalty: 1.1,
-                seed: -1,
-                keep_alive: "5m".into(),
-                allow_public_characters: false,
-                allow_self_registration: true,
-            },
-            broker_monitor: None,
-            admin_log: BrokerLog::default(),
-            admin_log_search: String::new(),
-            ollama_state: None,
-            ollama_pull_model: String::new(),
-            admin_data: vec![],
-            admin_tab: 0,
-            admin_new_username: String::new(),
-            admin_new_password: String::new(),
-            admin_new_role: Role::User,
+            admin: AdminState::default(),
             last_monitor_refresh: None,
             account_usage: TokenUsage::default(),
             light_mode: false,
-            glass_mode: false,
-            transparency: 20,
+            glass_mode: true,
             preferences_path: None,
-            tts: tts::LocalTts::new(),
+            tts,
             tts_auto_speak: false,
             pending_tts_message_id: None,
         }
     }
-    fn send(&self, request: Request) {
+
+    pub(crate) fn boot(args: Args) -> (Self, Task<Message>) {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (event_sender, event_rx) = network::EventSender::channel();
+
+        let session_path = session_path(&args).unwrap_or_else(|_| PathBuf::from("session"));
+        let remembered = network::load_session(&session_path, Some(&args.broker));
+        let preferences_path = network::preferences_path(&session_path);
+        let last_server_path = network::last_server_path(&session_path);
+
+        let tts_auto_speak = network::load_tts_auto_speak(&preferences_path);
+
+        let initial_server = if !args.broker.trim().is_empty() {
+            args.broker.clone()
+        } else {
+            network::load_last_server(&last_server_path).unwrap_or_default()
+        };
+
+        let net_args = args.clone();
+        if !args.inspect {
+            tokio::spawn(network::run(net_args, remembered, command_rx, event_sender));
+        }
+
+        let mut app = Self::new(command_tx, event_rx);
+        app.fifo_path = args.inspect_control;
+        app.preferences_path = Some(preferences_path);
+        app.server_address = initial_server;
+        app.tts_auto_speak = tts_auto_speak;
+        app.admin.light_mode = false;
+        app.admin.glass_mode = true;
+
+        if args.inspect {
+            app.load_inspection_demo();
+            app.screen = Screen::Chat;
+            app.connected = true;
+        }
+
+        (app, Task::none())
+    }
+
+    pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::InspectControl(cmd) => {
+                let parts: Vec<&str> = cmd.split_whitespace().collect();
+                if parts.is_empty() {
+                    return Task::none();
+                }
+                match parts[0] {
+                    "resize" => {
+                        if parts.len() >= 3 {
+                            if let (Ok(w), Ok(h)) = (parts[1].parse::<f32>(), parts[2].parse::<f32>()) {
+                                return window::latest().and_then(move |id| window::resize(id, Size::new(w, h)));
+                            }
+                        }
+                    }
+                    "navigation" => {
+                        self.compact_sidebar_open = parts.get(1) == Some(&"open");
+                    }
+                    "zoom" => {
+                        if parts.len() >= 2 {
+                            if let Ok(factor) = parts[1].parse::<f32>() {
+                                self.zoom = factor.clamp(0.5, 3.0);
+                            }
+                        }
+                    }
+                    "screenshot" => {
+                        if parts.len() >= 2 {
+                            self.pending_screenshot_path = Some(PathBuf::from(parts[1]));
+                            return window::latest().and_then(window::screenshot).map(Message::ScreenshotCaptured);
+                        }
+                    }
+                    "sidebar" => {
+                        if parts.len() >= 2 {
+                            self.sidebar_visible = match parts[1] {
+                                "open" => true,
+                                "closed" => false,
+                                _ => !self.sidebar_visible,
+                            };
+                        } else {
+                            self.sidebar_visible = !self.sidebar_visible;
+                        }
+                    }
+                    "tools" => {
+                        self.screen = if self.screen == Screen::Admin {
+                            Screen::Chat
+                        } else {
+                            Screen::Admin
+                        };
+                    }
+                    "models" => {
+                        self.screen = Screen::Admin;
+                        self.admin.admin_tab = 2;
+                        self.admin.models.page = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+                    }
+                    "settings" => {
+                        self.screen = Screen::Settings;
+                    }
+                    "new_chat" => {
+                        self.new_chat_open = true;
+                    }
+                    "worlds" => {
+                        self.worlds_open = true;
+                    }
+                    "characters" => {
+                        self.draft_character_open = true;
+                    }
+                    "memories" => {
+                        self.memory_dialog_open = true;
+                    }
+                    "close_dialogs" => {
+                        self.new_chat_open = false;
+                        self.worlds_open = false;
+                        self.draft_character_open = false;
+                        self.memory_dialog_open = false;
+                        if self.screen == Screen::Settings || self.screen == Screen::Admin {
+                            self.screen = Screen::Chat;
+                        }
+                    }
+                    "hover" => {
+                        if parts.len() >= 2 {
+                            if parts[1] == "none" {
+                                self.hovered_message_id = None;
+                                self.hovered_conversation_id = None;
+                            } else if parts[1] == "conv" {
+                                self.hovered_conversation_id = parts.get(2).map(|s| s.to_string());
+                            } else if self.conversations.iter().any(|c| c.id == parts[1]) {
+                                self.hovered_conversation_id = Some(parts[1].to_string());
+                            } else {
+                                self.hovered_message_id = Some(parts[1].to_string());
+                            }
+                        } else if let Some(m) = self.messages.last() {
+                            self.hovered_message_id = Some(m.id.clone());
+                        }
+                    }
+                    "screen" => {
+                        if parts.len() >= 2 {
+                            match parts[1] {
+                                "login" => {
+                                    self.token.clear();
+                                    self.screen = Screen::Login;
+                                }
+                                "main" => {
+                                    self.screen = Screen::Chat;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "quit" => {
+                        return window::latest().and_then(window::close);
+                    }
+                    _ => {}
+                }
+                Task::none()
+            }
+            Message::ScreenshotCaptured(screenshot) => {
+                if let Some(path) = self.pending_screenshot_path.take() {
+                    let _ = image::save_buffer(
+                        &path,
+                        &screenshot.rgba,
+                        screenshot.size.width,
+                        screenshot.size.height,
+                        image::ExtendedColorType::Rgba8,
+                    );
+                }
+                Task::none()
+            }
+            Message::ServerAddressChanged(addr) => {
+                self.server_address = addr;
+                Task::none()
+            }
+            Message::TryConnect => {
+                if !self.connecting {
+                    if let Some(target) = connection_target(&self.server_address) {
+                        self.server_address = target.server_name.clone();
+                        self.connecting = true;
+                        self.status = format!("Connecting to {}:\u{202f}7443\u{2026}", self.server_address);
+                        self.error = None;
+                        let _ = self.commands.send(Command::Connect(target));
+                    } else {
+                        self.set_error("Enter a valid IP address or domain.");
+                    }
+                }
+                Task::none()
+            }
+            Message::LoginUsernameChanged(u) => {
+                self.username = u;
+                Task::none()
+            }
+            Message::LoginPasswordChanged(p) => {
+                self.password = p;
+                Task::none()
+            }
+            Message::SubmitLogin => {
+                self.send(Request::Login {
+                    username: self.username.clone(),
+                    password: self.password.clone(),
+                });
+                self.status = "Signing in\u{2026}".into();
+                Task::none()
+            }
+            Message::SubmitRegister => {
+                self.send(Request::Register {
+                    username: self.username.clone(),
+                    password: self.password.clone(),
+                });
+                self.status = "Creating account\u{2026}".into();
+                Task::none()
+            }
+            Message::ChangeServer => {
+                let _ = self.commands.send(Command::Disconnect);
+                self.connected = false;
+                self.restoring_session = false;
+                self.status = "Enter the server IP to begin.".into();
+                Task::none()
+            }
+            Message::SelectConversation(id) => {
+                self.compact_sidebar_open = false;
+                self.open_conversation(&id);
+                Task::none()
+            }
+            Message::DeleteConversation(id) => {
+                self.send(Request::DeleteEntity {
+                    session_token: self.token.clone(),
+                    kind: EntityKind::Conversation,
+                    entity_id: id,
+                });
+                Task::none()
+            }
+            Message::HoverConversation(id) => {
+                self.hovered_conversation_id = id;
+                Task::none()
+            }
+            Message::OpenNewChat => {
+                self.new_chat_open = true;
+                Task::none()
+            }
+            Message::OpenCharactersDialog => {
+                self.draft_character_open = true;
+                self.draft = DraftCharacter::default();
+                Task::none()
+            }
+            Message::CloseCharactersDialog => {
+                self.draft_character_open = false;
+                Task::none()
+            }
+            Message::OpenWorldsDialog => {
+                self.worlds_open = true;
+                Task::none()
+            }
+            Message::CloseWorldsDialog => {
+                self.worlds_open = false;
+                Task::none()
+            }
+            Message::OpenMemoriesDialog(char_id, conv_id) => {
+                self.open_memory_manager(char_id, conv_id);
+                Task::none()
+            }
+            Message::CloseMemoriesDialog => {
+                self.memory_dialog_open = false;
+                Task::none()
+            }
+            Message::OpenAdminDialog => {
+                self.screen = Screen::Admin;
+                self.admin.admin_tab = 0;
+                self.load_admin_tab();
+                Task::none()
+            }
+            Message::CloseAdminDialog => {
+                self.screen = Screen::Chat;
+                Task::none()
+            }
+            Message::OpenSettingsDialog => {
+                self.screen = Screen::Settings;
+                self.send(Request::GetAccountUsage {
+                    session_token: self.token.clone(),
+                });
+                Task::none()
+            }
+            Message::CloseSettingsDialog => {
+                self.screen = Screen::Chat;
+                Task::none()
+            }
+            Message::SetTtsAutoSpeak(speak) => {
+                self.tts_auto_speak = speak;
+                self.save_preferences();
+                Task::none()
+            }
+            Message::SignOut => {
+                self.send(Request::Logout {
+                    session_token: self.token.clone(),
+                });
+                let _ = self.commands.send(Command::ClearSession);
+                self.worlds.clear();
+                self.world_state = WorldDialogState::default();
+                self.worlds_open = false;
+                self.memories.clear();
+                self.memory_state = MemoryDialogState::default();
+                self.memory_dialog_open = false;
+                self.admin.admin_log = BrokerLog::default();
+                self.admin.admin_log_search.clear();
+                self.token.clear();
+                self.role = None;
+                self.screen = Screen::Login;
+                Task::none()
+            }
+            Message::ToggleCompactSidebar => {
+                self.compact_sidebar_open = !self.compact_sidebar_open;
+                Task::none()
+            }
+            Message::ToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
+                Task::none()
+            }
+            Message::TrustCertificate(trust) => {
+                if let Some(cert) = self.pending_certificate.take() {
+                    if trust {
+                        let _ = self.commands.send(Command::TrustCertificate(cert));
+                        self.connecting = true;
+                        self.status = format!("Connecting to {}:\u{202f}7443\u{2026}", self.server_address);
+                    } else {
+                        let _ = self.commands.send(Command::RejectCertificate);
+                        self.connected = false;
+                        self.status = "Certificate rejected. Enter the server IP to begin.".into();
+                    }
+                }
+                Task::none()
+            }
+            Message::DismissError => {
+                self.error = None;
+                Task::none()
+            }
+            Message::DismissMemoryNotice => {
+                self.memory_state.status_message = None;
+                Task::none()
+            }
+            Message::WindowResized(_) | Message::WindowClosed => Task::none(),
+            Message::Network(event) => {
+                self.handle_event(event);
+                Task::none()
+            }
+            Message::Tts(event) => {
+                match event {
+                    TtsEvent::Speaking(busy) => {
+                        if busy {
+                            self.status = "Playing speech…".into();
+                        }
+                    }
+                    TtsEvent::Status(status) => {
+                        self.status = status;
+                    }
+                    TtsEvent::Error(err) => {
+                        self.set_error(err);
+                    }
+                    TtsEvent::Finished => {}
+                }
+                Task::none()
+            }
+            Message::Admin(msg) => {
+                if matches!(msg, AdminMessage::CloseDialog) {
+                    self.screen = Screen::Chat;
+                } else if matches!(msg, AdminMessage::RefreshMonitor) {
+                    self.refresh_admin_monitor_if_due();
+                } else {
+                    let reqs = self.admin.update(msg, &self.token);
+                    for req in reqs {
+                        self.send(req);
+                    }
+                }
+                Task::none()
+            }
+            Message::Character(msg) => {
+                match msg {
+                    CharacterMessage::CloseDialog => {
+                        self.draft_character_open = false;
+                    }
+                    CharacterMessage::Select(id) => {
+                        if let Some(c) = self.characters.iter().find(|c| c.id == id) {
+                            self.draft = DraftCharacter::from(c);
+                            self.draft_world_ids = self
+                                .worlds
+                                .iter()
+                                .filter(|w| w.character_ids.contains(&id))
+                                .map(|w| w.id.clone())
+                                .collect();
+                        }
+                    }
+                    CharacterMessage::New => {
+                        self.draft = DraftCharacter::default();
+                        self.draft_world_ids.clear();
+                    }
+                    CharacterMessage::Save => {
+                        let input = CharacterInput::from(&self.draft);
+                        self.send(Request::UpsertCharacter {
+                            session_token: self.token.clone(),
+                            character: Box::new(input),
+                            world_ids: self.draft_world_ids.iter().cloned().collect(),
+                        });
+                        self.draft_character_open = false;
+                    }
+                    CharacterMessage::Delete => {
+                        if let Some(id) = self.draft.id.clone() {
+                            self.send(Request::DeleteEntity {
+                                session_token: self.token.clone(),
+                                kind: EntityKind::Character,
+                                entity_id: id,
+                            });
+                            self.draft_character_open = false;
+                        }
+                    }
+                    CharacterMessage::ToggleWorldLink { world_id, linked } => {
+                        if linked {
+                            self.draft_world_ids.insert(world_id);
+                        } else {
+                            self.draft_world_ids.remove(&world_id);
+                        }
+                    }
+                    CharacterMessage::SearchChanged(query) => {
+                        self.character_search = query;
+                    }
+                    CharacterMessage::Chat(id) => {
+                        self.draft_character_open = false;
+                        self.selected_characters.clear();
+                        self.selected_characters.insert(id);
+                        self.new_chat_open = true;
+                    }
+                    CharacterMessage::OpenMemories(id) => {
+                        self.draft_character_open = false;
+                        self.open_memory_manager(Some(id), None);
+                    }
+                    other => {
+                        self.draft.update(&other);
+                    }
+                }
+                Task::none()
+            }
+            Message::World(msg) => {
+                let action = self.world_state.update(&self.worlds, msg);
+                match action {
+                    WorldAction::Save(world) => {
+                        self.send(Request::SaveWorld {
+                            session_token: self.token.clone(),
+                            world,
+                        });
+                        self.worlds_open = false;
+                    }
+                    WorldAction::Delete(world_id) => {
+                        self.send(Request::DeleteWorld {
+                            session_token: self.token.clone(),
+                            world_id,
+                        });
+                        self.worlds_open = false;
+                    }
+                    WorldAction::Import {
+                        source_name,
+                        lorebook_json,
+                    } => {
+                        self.send(Request::ImportSillyTavernWorld {
+                            session_token: self.token.clone(),
+                            source_name,
+                            lorebook_json,
+                        });
+                    }
+                    WorldAction::Close => {
+                        self.worlds_open = false;
+                    }
+                    WorldAction::Error(err) => {
+                        self.set_error(err);
+                    }
+                    WorldAction::None => {}
+                }
+                Task::none()
+            }
+            Message::Memory(msg) => {
+                let action = self.memory_state.update(&self.memories, msg);
+                match action {
+                    MemoryAction::Save(input) => {
+                        self.send(Request::UpsertMemory {
+                            session_token: self.token.clone(),
+                            memory: input,
+                        });
+                        self.memory_state.status_message = Some("Saving memory…".into());
+                    }
+                    MemoryAction::Delete(id) => {
+                        self.send(Request::DeleteEntity {
+                            session_token: self.token.clone(),
+                            kind: EntityKind::Memory,
+                            entity_id: id,
+                        });
+                        self.memory_state.status_message = Some("Removing memory…".into());
+                    }
+                    MemoryAction::ExtractFromChat => {
+                        let cid = self.selected_conversation.clone();
+                        let char_id = self.selected_speaker().map(str::to_owned);
+                        if let Some(cid) = cid {
+                            self.send(Request::ExtractMemory {
+                                session_token: self.token.clone(),
+                                conversation_id: cid,
+                                character_id: char_id,
+                            });
+                            self.memory_state.status_message = Some("Learning from chat…".into());
+                        }
+                    }
+                    MemoryAction::Refresh { .. } => {
+                        self.request_filtered_memories();
+                    }
+                    MemoryAction::Close => {
+                        self.memory_dialog_open = false;
+                    }
+                    MemoryAction::Error(err) => {
+                        self.set_error(err);
+                    }
+                    MemoryAction::None => {}
+                }
+                Task::none()
+            }
+            Message::Conversation(msg) => {
+                match msg {
+                    ConversationMessage::InputChanged(val) => {
+                        self.input = val;
+                    }
+                    ConversationMessage::SubmitMessage => {
+                        self.submit_message();
+                    }
+                    ConversationMessage::CancelRequest(id) => {
+                        let _ = self.commands.send(Command::Cancel(id));
+                    }
+                    ConversationMessage::StartEditMessage { id, content } => {
+                        self.editing_message_id = Some(id);
+                        self.editing_message_content = content;
+                    }
+                    ConversationMessage::EditContentChanged(val) => {
+                        self.editing_message_content = val;
+                    }
+                    ConversationMessage::SaveMessageEdit => {
+                        if let Some(id) = self.editing_message_id.take() {
+                            let content = std::mem::take(&mut self.editing_message_content);
+                            self.send(Request::UpdateMessage {
+                                session_token: self.token.clone(),
+                                message_id: id,
+                                content,
+                            });
+                        }
+                    }
+                    ConversationMessage::CancelMessageEdit => {
+                        self.editing_message_id = None;
+                        self.editing_message_content.clear();
+                    }
+                    ConversationMessage::DeleteMessage(id) => {
+                        self.send(Request::DeleteEntity {
+                            session_token: self.token.clone(),
+                            kind: EntityKind::Message,
+                            entity_id: id,
+                        });
+                    }
+                    ConversationMessage::RegenerateMessage(id) => {
+                        if let Some(message) = self.messages.iter().find(|m| m.id == id).cloned() {
+                            self.regenerate(&message);
+                        }
+                    }
+                    ConversationMessage::SpeakMessage { text, author_id } => {
+                        if let Err(e) = self.tts.speak(&text, author_id.as_deref()) {
+                            self.set_error(e);
+                        }
+                    }
+                    ConversationMessage::SelectVariant {
+                        message_id,
+                        variant_id,
+                    } => {
+                        self.send(Request::SelectVariant {
+                            session_token: self.token.clone(),
+                            message_id,
+                            variant_id,
+                        });
+                    }
+                    ConversationMessage::OpenNewChatDialog => {
+                        self.new_chat_open = true;
+                    }
+                    ConversationMessage::CloseNewChatDialog => {
+                        self.new_chat_open = false;
+                    }
+                    ConversationMessage::NewChatTitleChanged(title) => {
+                        self.new_conversation_title = title;
+                    }
+                    ConversationMessage::SelectNewChatCharacter(id) => {
+                        self.selected_characters.clear();
+                        self.selected_characters.insert(id);
+                    }
+                    ConversationMessage::CreateNewChat => {
+                        let participant_ids: Vec<String> = self.selected_characters.iter().cloned().collect();
+                        let title = if self.new_conversation_title.trim().is_empty() {
+                            "New Conversation".to_string()
+                        } else {
+                            self.new_conversation_title.trim().to_string()
+                        };
+                        self.send(Request::CreateConversation {
+                            session_token: self.token.clone(),
+                            title,
+                            kind: ConversationKind::Direct,
+                            participant_ids,
+                        });
+                        self.new_chat_open = false;
+                        self.compact_sidebar_open = false;
+                        self.new_conversation_title.clear();
+                    }
+                    ConversationMessage::ToggleSidebar => {
+                        self.sidebar_visible = !self.sidebar_visible;
+                    }
+                    ConversationMessage::OpenLink(_) => {}
+                    ConversationMessage::HoverMessage(id) => {
+                        self.hovered_message_id = id;
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
+    pub(crate) fn view<'a>(&'a self) -> Element<'a, Message> {
+        responsive(move |size| self.view_at_size(size)).into()
+    }
+
+    fn view_at_size<'a>(&'a self, size: Size) -> Element<'a, Message> {
+        let base: Element<Message> = if !self.connected {
+            self.server_connection_view()
+        } else if self.restoring_session {
+            self.session_restore_view()
+        } else if self.token.is_empty() {
+            self.login_view()
+        } else {
+            self.shell_view(size)
+        };
+
+        let scrim_color = if self.glass_mode {
+            if self.light_mode {
+                Color::from_rgba(0.0, 0.0, 0.0, 0.32)
+            } else {
+                Color::from_rgba(0.0, 0.0, 0.0, 130.0 / 255.0)
+            }
+        } else {
+            Color::from_rgba(0.0, 0.0, 0.0, 0.35)
+        };
+
+        let root: Element<Message> = if let Some(cert) = &self.pending_certificate {
+            dialog(
+                true,
+                base,
+                scrollable(self.certificate_trust_dialog_view(cert)),
+            )
+            .backdrop(scrim_color)
+            .padding_inner(12)
+            .padding_outer(8)
+            .max_height((size.height - 16.0).max(1.0))
+            .max_width(460.0)
+            .on_press(Message::TrustCertificate(false))
+            .container_style(move |_| {
+                ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
+            })
+            .into()
+        } else if let Some(err) = &self.error {
+            dialog(true, base, scrollable(self.error_modal_view(err)))
+                .backdrop(scrim_color)
+                .padding_inner(12)
+                .padding_outer(8)
+                .max_height((size.height - 16.0).max(1.0))
+                .max_width(400.0)
+                .on_press(Message::DismissError)
+                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .into()
+        } else if self.worlds_open {
+            let world_state = WorldViewState {
+                worlds: &self.worlds,
+                world_draft: &self.world_state.world_draft,
+                characters: &self.characters,
+                entry_search: &self.world_state.entry_search,
+                import_pending: self.world_state.import_pending,
+                import_elapsed_secs: self
+                    .world_state
+                    .import_started
+                    .map(|s| s.elapsed().as_secs())
+                    .unwrap_or(0),
+                import_notice: self.world_state.import_notice.as_deref(),
+                light_mode: self.light_mode,
+                glass_mode: self.glass_mode,
+            };
+            dialog(true, base, world_dialog_view(&world_state))
+                .backdrop(scrim_color)
+                .padding_inner(12)
+                .padding_outer(8)
+                .max_width(740.0)
+                .max_height((size.height - 32.0).clamp(1.0, 780.0))
+                .on_press(Message::CloseWorldsDialog)
+                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .into()
+        } else if self.memory_dialog_open {
+            let can_extract = self.selected_conversation.is_some() && self.selected_speaker().is_some();
+            let memory_view_state = MemoryViewState::new(
+                &self.memories,
+                &self.characters,
+                &self.conversations,
+                &self.memory_state,
+                can_extract,
+                self.light_mode,
+                self.glass_mode,
+            );
+            dialog(true, base, memory_dialog_view(&memory_view_state))
+                .backdrop(scrim_color)
+                .padding_inner(12)
+                .padding_outer(8)
+                .max_width(780.0)
+                .max_height((size.height - 32.0).clamp(1.0, 780.0))
+                .on_press(Message::CloseMemoriesDialog)
+                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .into()
+        } else if self.draft_character_open {
+            let char_view = character_dialog_view(
+                &self.characters,
+                &self.draft,
+                &self.draft_world_ids,
+                &self.worlds,
+                &self.character_search,
+                self.char_import_pending,
+                self.light_mode,
+                self.glass_mode,
+                size.width < 800.0,
+            )
+            .map(Message::Character);
+            dialog(true, base, char_view)
+                .backdrop(scrim_color)
+                .padding_inner(12)
+                .padding_outer(8)
+                .max_width(940.0)
+                .max_height((size.height - 32.0).clamp(1.0, 740.0))
+                .on_press(Message::CloseCharactersDialog)
+                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .into()
+        } else if self.new_chat_open {
+            let new_chat_state = NewChatViewState {
+                is_open: self.new_chat_open,
+                characters: &self.characters,
+                selected_character_id: self.selected_characters.iter().next().map(|s| s.as_str()),
+                title: &self.new_conversation_title,
+                light_mode: self.light_mode,
+                glass_mode: self.glass_mode,
+            };
+            if let Some(content) = new_chat_dialog_view(&new_chat_state, Message::Conversation) {
+                dialog(true, base, content)
+                    .backdrop(scrim_color)
+                    .padding_inner(12)
+                    .padding_outer(8)
+                    .max_width(460.0)
+                    .max_height((size.height - 32.0).clamp(1.0, 580.0))
+                    .on_press(Message::Conversation(ConversationMessage::CloseNewChatDialog))
+                    .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                    .into()
+            } else {
+                base
+            }
+        } else if self.screen == Screen::Admin {
+            let admin_view_state = self.admin.as_view_state();
+            dialog(true, base, admin_dialog_view(&admin_view_state))
+                .backdrop(scrim_color)
+                .padding_inner(12)
+                .padding_outer(8)
+                .max_width(880.0)
+                .max_height((size.height - 32.0).clamp(1.0, 740.0))
+                .on_press(Message::CloseAdminDialog)
+                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .into()
+        } else if self.screen == Screen::Settings {
+            dialog(true, base, scrollable(self.settings_dialog_view()))
+                .backdrop(scrim_color)
+                .padding_inner(12)
+                .padding_outer(8)
+                .max_width(440.0)
+                .max_height((size.height - 32.0).clamp(1.0, 600.0))
+                .on_press(Message::CloseSettingsDialog)
+                .container_style(move |_| ui::modal_dialog_frame_style(self.light_mode, self.glass_mode))
+                .into()
+        } else {
+            base
+        };
+
+        let light_mode = self.light_mode;
+        let glass_mode = self.glass_mode;
+
+        container(root)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| ui::window_backdrop_style(light_mode, glass_mode))
+            .into()
+    }
+
+    pub(crate) fn subscription(&self) -> Subscription<Message> {
+        let net_sub = Subscription::run_with(self.events_holder.clone(), run_network_stream)
+            .map(Message::Network);
+        let tts_sub =
+            Subscription::run_with(self.tts_holder.clone(), run_tts_stream).map(Message::Tts);
+        let admin_sub = admin_subscription(self.screen == Screen::Admin && self.admin.admin_tab == 0)
+            .map(Message::Admin);
+
+        let fifo_sub = if let Some(path) = &self.fifo_path {
+            Subscription::run_with(path.clone(), run_fifo_stream).map(Message::InspectControl)
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch(vec![net_sub, tts_sub, admin_sub, fifo_sub])
+    }
+
+    pub(crate) fn theme(&self) -> Theme {
+        ui::theme(self.light_mode)
+    }
+
+    pub(crate) fn scale_factor(&self) -> f32 {
+        self.zoom
+    }
+
+    fn server_connection_view<'a>(&'a self) -> Element<'a, Message> {
+        let title = text("Connect to Chatty")
+            .size(28)
+            .font(font::Font {
+                weight: font::Weight::Bold,
+                ..Default::default()
+            });
+        let subtitle = text("Enter the IP address or domain of your Chatty server.")
+            .size(14)
+            .color(ui::secondary_text_color(self.light_mode));
+
+        let addr_input = text_input("192.168.0.98 or chatty.example.com", &self.server_address)
+            .on_input(Message::ServerAddressChanged)
+            .on_submit(Message::TryConnect)
+            .padding(10)
+            .width(Length::Fill);
+
+        let connect_btn = button(
+            text(if self.connecting {
+                "Trying connection…"
+            } else {
+                "Try connection"
+            })
+            .size(15)
+            .font(font::Font {
+                weight: font::Weight::Bold,
+                ..Default::default()
+            }),
+        )
+        .on_press(Message::TryConnect)
+        .padding(10)
+        .width(Length::Fill)
+        .style(ui::primary_button_style());
+
+        let status_txt = text(&self.status)
+            .size(13)
+            .color(ui::secondary_text_color(self.light_mode));
+
+        let card_content = column![
+            title,
+            subtitle,
+            Space::new().height(16),
+            text("Server address").size(13),
+            addr_input,
+            Space::new().height(8),
+            connect_btn,
+            Space::new().height(6),
+            status_txt,
+        ]
+        .spacing(6)
+        .max_width(420)
+        .align_x(Alignment::Center);
+
+        container(scrollable(
+            container(ui::card(card_content, self.light_mode, self.glass_mode).max_width(460))
+                .padding(16)
+                .center_x(Length::Fill),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
+
+    fn session_restore_view<'a>(&'a self) -> Element<'a, Message> {
+        let title = text("Signing you in").size(28).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        });
+        let status_txt = text(&self.status).size(14);
+
+        let card_content = column![title, Space::new().height(12), status_txt]
+            .spacing(8)
+            .align_x(Alignment::Center);
+
+        container(scrollable(
+            container(ui::card(card_content, self.light_mode, self.glass_mode).max_width(460))
+                .padding(16)
+                .center_x(Length::Fill),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
+
+    fn login_view<'a>(&'a self) -> Element<'a, Message> {
+        let title = text("Welcome back").size(28).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        });
+        let status_txt = text(&self.status)
+            .size(13)
+            .color(ui::secondary_text_color(self.light_mode));
+
+        let username_input = text_input("Username", &self.username)
+            .on_input(Message::LoginUsernameChanged)
+            .on_submit(Message::SubmitLogin)
+            .padding(10)
+            .width(Length::Fill);
+
+        let password_input = text_input("Password", &self.password)
+            .on_input(Message::LoginPasswordChanged)
+            .on_submit(Message::SubmitLogin)
+            .secure(true)
+            .padding(10)
+            .width(Length::Fill);
+
+        let sign_in_btn = button(text("Sign in").size(15).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        }))
+        .on_press(Message::SubmitLogin)
+        .padding(10)
+        .width(Length::Fill)
+        .style(ui::primary_button_style());
+
+        let mut card_col = column![
+            title,
+            status_txt,
+            Space::new().height(14),
+            text("Username").size(13),
+            username_input,
+            text("Password").size(13),
+            password_input,
+            Space::new().height(6),
+            sign_in_btn,
+        ]
+        .spacing(6)
+        .max_width(420)
+        .align_x(Alignment::Center);
+
+        if self.registration_enabled {
+            let register_btn = button(text("Register").size(14))
+                .on_press(Message::SubmitRegister)
+                .padding(8)
+                .width(Length::Fill)
+                .style(ui::secondary_button_style(self.light_mode));
+            card_col = card_col.push(register_btn);
+        }
+
+        let change_server_btn = button(text("Change server").size(13))
+            .on_press(Message::ChangeServer)
+            .padding(6)
+            .style(ui::secondary_button_style(self.light_mode));
+        card_col = card_col
+            .push(Space::new().height(6))
+            .push(change_server_btn);
+
+        container(scrollable(
+            container(ui::card(card_col, self.light_mode, self.glass_mode).max_width(460))
+                .padding(16)
+                .center_x(Length::Fill),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
+
+    fn sidebar_view<'a>(&'a self, compact: bool, short: bool) -> Element<'a, Message> {
+        let header = row![
+            text("Chatty").size(22).font(font::Font {
+                weight: font::Weight::Bold,
+                ..Default::default()
+            }),
+            Space::new().width(Length::Fill),
+            sidebar_toggle_button(
+                true,
+                if compact {
+                    Message::ToggleCompactSidebar
+                } else {
+                    Message::ToggleSidebar
+                }
+            ),
+        ]
+        .align_y(Alignment::Center);
+
+        let new_chat_btn = button(
+            row![text("+").size(18), text("New chat").size(15).font(font::Font {
+                weight: font::Weight::Bold,
+                ..Default::default()
+            })]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::OpenNewChat)
+        .padding(10)
+        .width(Length::Fill)
+        .style(ui::primary_button_style());
+
+        let recent_label = text("RECENT CHATS")
+            .size(11)
+            .color(ui::secondary_text_color(self.light_mode));
+
+        let mut conv_col = column![].spacing(4).width(Length::Fill);
+        for conv in &self.conversations {
+            let is_selected = self.selected_conversation.as_deref() == Some(&conv.id);
+            let is_hovered = self.hovered_conversation_id.as_deref() == Some(&conv.id);
+            let conv_id = conv.id.clone();
+            let conv_del_id = conv.id.clone();
+            let conv_hover_id = conv.id.clone();
+
+            let title_btn = button(
+                container(text(&conv.title).size(14).wrapping(text::Wrapping::None))
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::SelectConversation(conv_id))
+            .height(Length::Fixed(38.0))
+            .padding(Padding::from([0, 10]))
+            .width(Length::Fill)
+            .style(move |theme: &Theme, status: button::Status| {
+                if is_selected {
+                    button::Style {
+                        background: Some(Background::Color(ui::COLOR_PRIMARY_STRONG)),
+                        text_color: Color::WHITE,
+                        border: Border {
+                            color: Color::TRANSPARENT,
+                            width: 0.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    let bg = match status {
+                        button::Status::Hovered => {
+                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.08)
+                        }
+                        button::Status::Pressed => {
+                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.14)
+                        }
+                        _ => Color::TRANSPARENT,
+                    };
+                    button::Style {
+                        background: if bg == Color::TRANSPARENT {
+                            None
+                        } else {
+                            Some(Background::Color(bg))
+                        },
+                        text_color: theme.palette().text,
+                        border: Border {
+                            color: Color::TRANSPARENT,
+                            width: 0.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }
+            });
+
+            let tile_item: Element<'_, Message> = if is_hovered {
+                let tile_bg = if is_selected {
+                    ui::COLOR_PRIMARY_STRONG
+                } else {
+                    let base = ui::surface_color(self.light_mode, self.glass_mode);
+                    let overlay = if self.light_mode { Color::BLACK } else { Color::WHITE };
+                    Color::from_rgb(
+                        base.r * 0.92 + overlay.r * 0.08,
+                        base.g * 0.92 + overlay.g * 0.08,
+                        base.b * 0.92 + overlay.b * 0.08,
+                    )
+                };
+
+                let delete_btn = button(
+                    container(text("×").size(16))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                .on_press(Message::DeleteConversation(conv_del_id))
+                .width(26)
+                .height(26)
+                .padding(0)
+                .style(move |_theme: &Theme, status: button::Status| {
+                    let (bg, border_color, text_color) = match status {
+                        button::Status::Hovered => (
+                            Color::from_rgba(0.95, 0.2, 0.2, 0.25),
+                            Color::from_rgba(0.95, 0.2, 0.2, 0.50),
+                            Color::from_rgb(1.0, 0.35, 0.35),
+                        ),
+                        button::Status::Pressed => (
+                            Color::from_rgba(0.95, 0.2, 0.2, 0.40),
+                            Color::from_rgba(0.95, 0.2, 0.2, 0.70),
+                            Color::from_rgb(1.0, 0.45, 0.45),
+                        ),
+                        _ => (
+                            Color::TRANSPARENT,
+                            Color::TRANSPARENT,
+                            if is_selected {
+                                Color::from_rgba(1.0, 1.0, 1.0, 0.85)
+                            } else {
+                                Color::from_rgba(0.95, 0.35, 0.35, 0.85)
+                            },
+                        ),
+                    };
+                    button::Style {
+                        background: if bg == Color::TRANSPARENT {
+                            None
+                        } else {
+                            Some(Background::Color(bg))
+                        },
+                        text_color,
+                        border: Border {
+                            color: border_color,
+                            width: 0.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                });
+
+                let delete_tooltip = tooltip(
+                    delete_btn,
+                    container(text("Delete chat").size(12))
+                        .padding(Padding::from([4, 8]))
+                        .style(ui::tooltip_style),
+                    tooltip::Position::Top,
+                );
+
+                let fade_box = container(
+                    row![
+                        Space::new().width(Length::Fill),
+                        delete_tooltip,
+                        Space::new().width(6),
+                    ]
+                    .align_y(Alignment::Center)
+                    .height(Length::Fill),
+                )
+                .width(68)
+                .height(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(tile_bg)),
+                    border: Border {
+                        radius: iced::border::Radius { top_left: 0.0, top_right: 8.0, bottom_right: 8.0, bottom_left: 0.0 },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+
+                let overlay = row![
+                    Space::new().width(Length::Fill),
+                    fade_box,
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill);
+
+                let tile_stack = stack![
+                    title_btn,
+                    overlay,
+                ];
+
+                mouse_area(tile_stack)
+                    .on_enter(Message::HoverConversation(Some(conv_hover_id)))
+                    .on_exit(Message::HoverConversation(None))
+                    .into()
+            } else {
+                let tile_stack = stack![
+                    title_btn,
+                ];
+
+                mouse_area(tile_stack)
+                    .on_enter(Message::HoverConversation(Some(conv_hover_id)))
+                    .on_exit(Message::HoverConversation(None))
+                    .into()
+            };
+
+            conv_col = conv_col.push(tile_item);
+        }
+
+        let conv_list = scrollable(conv_col)
+            .id(Id::new("conversation-list"))
+            .height(if short { Length::Shrink } else { Length::Fill })
+            .width(Length::Fill);
+
+        let status_row = row![
+            text(&self.status)
+                .size(12)
+                .color(ui::secondary_text_color(self.light_mode))
+        ];
+
+        let mut icons_row = row![
+            icon_button(
+                FooterIcon::Characters,
+                Some("Manage characters"),
+                Message::OpenCharactersDialog,
+            ),
+            icon_button(
+                FooterIcon::World,
+                Some("Manage world lore"),
+                Message::OpenWorldsDialog,
+            ),
+            icon_button(
+                FooterIcon::Memory,
+                Some("Manage character memories"),
+                Message::OpenMemoriesDialog(None, None),
+            ),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+
+        if self.role == Some(Role::Admin) {
+            icons_row = icons_row.push(icon_button(
+                FooterIcon::Admin,
+                Some("Open admin portal"),
+                Message::OpenAdminDialog,
+            ));
+        }
+
+        icons_row = icons_row
+            .push(icon_button(
+                FooterIcon::Settings,
+                Some("Open settings"),
+                Message::OpenSettingsDialog,
+            ))
+            .push(icon_button(
+                FooterIcon::SignOut,
+                Some("Sign out"),
+                Message::SignOut,
+            ));
+
+        let sidebar_content = column![
+            header,
+            Space::new().height(8),
+            new_chat_btn,
+            Space::new().height(10),
+            recent_label,
+            Space::new().height(4),
+            conv_list,
+            Space::new().height(8),
+            status_row,
+            Space::new().height(6),
+            icons_row.wrap(),
+        ]
+        .spacing(4)
+        .padding(12)
+        .width(if compact {
+            Length::Fill
+        } else {
+            Length::Fixed(248.0)
+        })
+        .height(Length::Fill);
+
+        let sidebar_content: Element<'a, Message> = if short {
+            scrollable(sidebar_content.height(Length::Shrink)).into()
+        } else {
+            sidebar_content.into()
+        };
+        sidebar_panel(sidebar_content, self.light_mode, self.glass_mode)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn shell_view<'a>(&'a self, size: Size) -> Element<'a, Message> {
+        let compact = size.width < 800.0 || size.height < 360.0;
+        if compact && self.compact_sidebar_open {
+            return self.sidebar_view(true, size.height < 400.0);
+        }
+        let sidebar_visible = !compact && self.sidebar_visible;
+        let mut shell_row = row![].width(Length::Fill).height(Length::Fill);
+
+        if sidebar_visible {
+            shell_row = shell_row.push(self.sidebar_view(false, false));
+        }
+
+        let conv_state = ConversationViewState {
+            characters: &self.characters,
+            conversations: &self.conversations,
+            messages: &self.messages,
+            selected_conversation: self.selected_conversation.as_deref(),
+            selected_speaker: self.selected_speaker(),
+            input: &self.input,
+            active_request: self.active_request,
+            stream_text: &self.stream_text,
+            typing_character: self.typing_character.as_deref(),
+            generation_status: self.generation_status,
+            editing_message_id: self.editing_message_id.as_deref(),
+            editing_message_content: &self.editing_message_content,
+            hovered_message_id: self.hovered_message_id.as_deref(),
+            sidebar_visible,
+            available_size: Size::new(
+                size.width - if sidebar_visible { 272.0 } else { 0.0 },
+                size.height,
+            ),
+            light_mode: self.light_mode,
+            glass_mode: self.glass_mode,
+        };
+
+        let chat_area = conversation_view(&conv_state, move |message| {
+            if compact && matches!(message, ConversationMessage::ToggleSidebar) {
+                Message::ToggleCompactSidebar
+            } else {
+                Message::Conversation(message)
+            }
+        });
+
+        shell_row = shell_row.push(chat_area);
+
+        container(shell_row)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn settings_dialog_view<'a>(&'a self) -> Element<'a, Message> {
+        let title = text("Settings").size(22).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        });
+
+        let speech_header = text("Local Speech (TTS)").size(14).font(font::Font {
+            weight: font::Weight::Semibold,
+            ..Default::default()
+        });
+        let auto_speak_toggle = toggler(self.tts_auto_speak)
+            .label("Automatically read new replies")
+            .on_toggle(Message::SetTtsAutoSpeak);
+
+        let test_voice_btn = button(text("Test voice").size(13))
+            .on_press(Message::Conversation(ConversationMessage::SpeakMessage {
+                text: "Chatty local speech synthesis is working properly.".into(),
+                author_id: None,
+            }))
+            .padding([6, 12])
+            .style(ui::secondary_button_style(self.light_mode));
+
+        let usage_header = text("Account Token Usage").size(14).font(font::Font {
+            weight: font::Weight::Semibold,
+            ..Default::default()
+        });
+        let usage_txt = text(format!(
+            "Prompt: {} · Completion: {} · Total: {}",
+            self.account_usage.prompt_tokens,
+            self.account_usage.completion_tokens,
+            self.account_usage.prompt_tokens + self.account_usage.completion_tokens
+        ))
+        .size(13);
+
+        let close_btn = button(text("Close").size(14).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        }))
+        .on_press(Message::CloseSettingsDialog)
+        .padding([8, 16])
+        .style(ui::primary_button_style());
+
+        let content = column![
+            title,
+            Space::new().height(10),
+            speech_header,
+            auto_speak_toggle,
+            test_voice_btn,
+            Space::new().height(12),
+            usage_header,
+            usage_txt,
+            Space::new().height(16),
+            close_btn,
+        ]
+        .spacing(6)
+        .padding(20)
+        .max_width(400);
+
+        container(content).width(Length::Fill).into()
+    }
+
+    fn certificate_trust_dialog_view<'a>(&'a self, cert: &'a PendingCertificate) -> Element<'a, Message> {
+        let title = text("Trust this Chatty server?").size(20).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        });
+
+        let desc = text(format!(
+            "{} does not have a certificate trusted by the public internet.",
+            cert.target.server_name
+        ))
+        .size(13);
+
+        let subject = if cert.is_ca() {
+            "private CA"
+        } else {
+            "server certificate"
+        };
+
+        let fp_desc = text(format!(
+            "Confirm this {subject} SHA-256 fingerprint with the server administrator before continuing:"
+        ))
+        .size(12);
+
+        let fp_text = text(&cert.fingerprint).size(11).font(font::Font::MONOSPACE);
+
+        let trust_btn = button(text("Trust and connect").size(14).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        }))
+        .on_press(Message::TrustCertificate(true))
+        .padding(10)
+        .style(ui::primary_button_style());
+
+        let cancel_btn = button(text("Cancel").size(14))
+            .on_press(Message::TrustCertificate(false))
+            .padding(10)
+            .style(ui::secondary_button_style(self.light_mode));
+
+        let btn_row = row![trust_btn, cancel_btn].spacing(12);
+
+        let content = column![
+            title,
+            desc,
+            Space::new().height(6),
+            fp_desc,
+            fp_text,
+            Space::new().height(12),
+            btn_row,
+        ]
+        .spacing(6)
+        .padding(20)
+        .max_width(460);
+
+        container(content).width(Length::Fill).into()
+    }
+
+    fn error_modal_view<'a>(&'a self, err: &'a UiNotice) -> Element<'a, Message> {
+        let title = text("Notice").size(18).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        });
+        let time_txt = text(&err.timestamp)
+            .size(11)
+            .color(ui::secondary_text_color(self.light_mode));
+        let msg_txt = text(&err.message).size(13);
+
+        let close_btn = button(text("Close").size(13))
+            .on_press(Message::DismissError)
+            .padding([6, 14])
+            .style(ui::secondary_button_style(self.light_mode));
+
+        let content = column![
+            title,
+            time_txt,
+            Space::new().height(4),
+            msg_txt,
+            Space::new().height(10),
+            close_btn,
+        ]
+        .spacing(4)
+        .padding(16)
+        .max_width(400);
+
+        container(content).padding(16).width(Length::Fill).into()
+    }
+
+    pub(crate) fn send(&self, request: Request) {
         let _ = self.commands.send(Command::Request(Box::new(request)));
     }
-    fn set_error(&mut self, message: impl Into<String>) {
+
+    pub(crate) fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(UiNotice {
             timestamp: current_utc_timestamp(),
             message: message.into(),
         });
     }
-    fn set_network_status(&mut self, status: String) {
+
+    pub(crate) fn set_network_status(&mut self, status: String) {
         if status.contains(" · Offline:") {
             self.status = "Offline".into();
             self.status_tooltip = Some(status);
@@ -674,7 +1893,8 @@ impl ChattyApp {
             self.status_tooltip = None;
         }
     }
-    fn refresh(&self) {
+
+    pub(crate) fn refresh(&self) {
         self.send(Request::ListCharacters {
             session_token: self.token.clone(),
         });
@@ -690,12 +1910,14 @@ impl ChattyApp {
             character_id: None,
         });
     }
-    fn authenticated(&mut self, token: String, user_id: String, role: Role, revision: i64) {
+
+    pub(crate) fn authenticated(&mut self, token: String, user_id: String, role: Role, revision: i64) {
         self.connected = true;
         self.connecting = false;
         self.restoring_session = false;
         self.token = token;
-        self.user_id = user_id;
+        self.user_id = user_id.clone();
+        self.admin.current_user_id = user_id;
         self.role = Some(role);
         self.revision = revision;
         self.auto_select_conversation = true;
@@ -707,97 +1929,119 @@ impl ChattyApp {
             session_token: self.token.clone(),
         });
     }
-    fn drain(&mut self, ctx: &egui::Context) {
-        let mut received_event = false;
-        while let Ok(event) = self.events.try_recv() {
-            received_event = true;
-            match event {
-                Event::Status(status) => self.set_network_status(status),
-                Event::Connected { resuming_session } => {
-                    self.connected = true;
-                    self.connecting = false;
-                    self.restoring_session = resuming_session;
-                }
-                Event::ConnectionFailed(message) => {
-                    self.pending_certificate = None;
-                    self.connected = false;
-                    self.connecting = false;
-                    self.restoring_session = false;
-                    self.active_request = None;
-                    self.typing_character = None;
-                    self.generation_status = None;
-                    self.status = "Not connected".into();
-                    self.status_tooltip = None;
-                    self.set_error(message);
-                }
-                Event::CertificateTrustRequired(certificate) => {
-                    self.connecting = false;
-                    self.status = "Waiting for certificate confirmation".into();
-                    self.pending_certificate = Some(certificate);
-                }
-                Event::Disconnected => {
-                    self.pending_certificate = None;
-                    self.connected = false;
-                    self.connecting = false;
-                    self.restoring_session = false;
-                    self.worlds.clear();
-                    self.world_draft = World::default();
-                    self.world_import_pending = false;
-                    self.world_import_started = None;
-                    self.world_import_notice = None;
-                    self.worlds_open = false;
-                    self.memories.clear();
-                    self.memory_dialog_open = false;
-                    self.memory_editor_open = false;
-                    self.memory_delete_confirmation = None;
-                    self.admin_log = BrokerLog::default();
-                    self.admin_log_search.clear();
-                    self.char_import_pending = false;
-                    self.char_import_started = None;
-                    self.active_request = None;
-                    self.typing_character = None;
-                    self.token.clear();
-                    self.character_image_requests.clear();
-                    self.received_character_images.clear();
-                    self.generation_status = None;
-                    self.role = None;
-                    self.status = "Enter the server IP to begin.".into();
-                    self.status_tooltip = None;
-                }
-                Event::SessionExpired => {
-                    self.restoring_session = false;
-                    self.worlds.clear();
-                    self.world_draft = World::default();
-                    self.world_import_pending = false;
-                    self.world_import_started = None;
-                    self.world_import_notice = None;
-                    self.worlds_open = false;
-                    self.memories.clear();
-                    self.memory_dialog_open = false;
-                    self.memory_editor_open = false;
-                    self.memory_delete_confirmation = None;
-                    self.admin_log = BrokerLog::default();
-                    self.admin_log_search.clear();
-                    self.char_import_pending = false;
-                    self.char_import_started = None;
-                    self.active_request = None;
-                    self.typing_character = None;
-                    self.token.clear();
-                    self.character_image_requests.clear();
-                    self.received_character_images.clear();
-                    self.generation_status = None;
-                    self.role = None;
-                    self.set_error("Saved session expired. Sign in again.");
-                }
-                Event::Frame(frame) => self.handle_frame(frame),
+
+    pub(crate) fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::ModelRequestStarted(id) => {
+                self.admin.models.request_id = Some(id);
+                self.admin.models.busy = true;
             }
-            ctx.request_repaint();
-        }
-        if received_event {
-            self.cache_character_portraits(ctx);
+            Event::Status(status) => {
+                if status.contains("Offline:") || status.contains("Idle · offline:") {
+                    self.admin.models.busy = false;
+                    self.admin.models.request_id = None;
+                    self.admin.models.notice = Some("Connection interrupted. Refresh to check whether the operation finished on the server.".into());
+                }
+                self.set_network_status(status);
+            }
+            Event::Connected { resuming_session } => {
+                self.connected = true;
+                self.connecting = false;
+                self.restoring_session = resuming_session;
+            }
+            Event::ConnectionFailed(message) => {
+                self.admin.models.busy = false;
+                self.admin.models.request_id = None;
+                self.admin.models.notice =
+                    Some("Connection failed. Try again after reconnecting.".into());
+                self.pending_certificate = None;
+                self.connected = false;
+                self.connecting = false;
+                self.restoring_session = false;
+                self.active_request = None;
+                self.typing_character = None;
+                self.generation_status = None;
+                self.status = "Not connected".into();
+                self.status_tooltip = None;
+                self.set_error(message);
+            }
+            Event::CertificateTrustRequired(certificate) => {
+                self.connecting = false;
+                self.status = "Waiting for certificate confirmation".into();
+                self.pending_certificate = Some(certificate);
+            }
+            Event::Disconnected => {
+                self.admin.models.busy = false;
+                self.admin.models.request_id = None;
+                self.admin.models.notice =
+                    Some("Disconnected. Refresh models after reconnecting.".into());
+                self.pending_certificate = None;
+                self.connected = false;
+                self.connecting = false;
+                self.restoring_session = false;
+                self.worlds.clear();
+                self.world_state = WorldDialogState::default();
+                self.worlds_open = false;
+                self.memories.clear();
+                self.memory_state = MemoryDialogState::default();
+                self.memory_dialog_open = false;
+                self.admin.admin_log = BrokerLog::default();
+                self.admin.admin_log_search.clear();
+                self.char_import_pending = false;
+                self.char_import_started = None;
+                self.active_request = None;
+                self.typing_character = None;
+                self.token.clear();
+                self.character_image_requests.clear();
+                self.received_character_images.clear();
+                self.generation_status = None;
+                self.role = None;
+                self.status = "Enter the server IP to begin.".into();
+                self.status_tooltip = None;
+            }
+            Event::SessionExpired => {
+                self.admin.models = admin_monitor::ModelsState::default();
+                self.restoring_session = false;
+                self.worlds.clear();
+                self.world_state = WorldDialogState::default();
+                self.worlds_open = false;
+                self.memories.clear();
+                self.memory_state = MemoryDialogState::default();
+                self.memory_dialog_open = false;
+                self.admin.admin_log = BrokerLog::default();
+                self.admin.admin_log_search.clear();
+                self.char_import_pending = false;
+                self.char_import_started = None;
+                self.active_request = None;
+                self.typing_character = None;
+                self.token.clear();
+                self.character_image_requests.clear();
+                self.received_character_images.clear();
+                self.generation_status = None;
+                self.role = None;
+                self.set_error("Saved session expired. Sign in again.");
+            }
+            Event::Frame(frame) => self.handle_frame(frame),
         }
     }
-    fn handle_frame(&mut self, frame: Frame) {
+
+    pub(crate) fn handle_frame(&mut self, frame: Frame) {
+        if self.admin.models.request_id == Some(frame.request_id)
+            && matches!(
+                frame.message_type,
+                MessageType::Response | MessageType::Error
+            )
+        {
+            self.admin.models.busy = false;
+            self.admin.models.request_id = None;
+            self.admin.models.notice = Some(if frame.message_type == MessageType::Error {
+                decode::<WireError>(&frame.payload)
+                    .map(|e| e.message)
+                    .unwrap_or_else(|_| "Model request failed. Try again.".into())
+            } else {
+                "Model request complete.".into()
+            });
+        }
         match frame.message_type {
             MessageType::Response => {
                 if let Ok(response) = decode::<Response>(&frame.payload) {
@@ -817,10 +2061,10 @@ impl ChattyApp {
                             self.worlds = v;
                         }
                         Response::WorldImportPreview(world) => {
-                            self.world_draft = world;
-                            self.world_import_pending = false;
-                            self.world_import_started = None;
-                            self.world_import_notice = Some(
+                            self.world_state.world_draft = world;
+                            self.world_state.import_pending = false;
+                            self.world_state.import_started = None;
+                            self.world_state.import_notice = Some(
                                 "AI import preview — review the entries, link characters, then save."
                                     .into(),
                             );
@@ -911,13 +2155,21 @@ impl ChattyApp {
                                 self.refresh();
                             }
                         }
-                        Response::Users(v) => self.users = v,
+                        Response::Users(v) => self.admin.users = v,
                         Response::AccountUsage(v) => self.account_usage = v,
-                        Response::BrokerConfig(v) => self.broker_config = v,
-                        Response::BrokerMonitor(v) => self.broker_monitor = Some(v),
-                        Response::BrokerLog(v) => self.admin_log = v,
-                        Response::OllamaState(v) => self.ollama_state = Some(v),
-                        Response::AdminDatabase(v) => self.admin_data = v,
+                        Response::BrokerConfig(v) => {
+                            self.admin.models.saved_adapter_url = Some(v.adapter_url.clone());
+                            self.admin.models.saved_model = v.model.clone();
+                            self.admin.broker_config = v;
+                        }
+                        Response::BrokerMonitor(v) => self.admin.broker_monitor = Some(v),
+                        Response::BrokerLog(v) => self.admin.admin_log = v,
+                        Response::ModelSearchResults(v) => {
+                            self.admin.models.results = v;
+                            self.admin.models.selected_files.clear();
+                        }
+                        Response::OllamaState(v) => self.admin.ollama_state = Some(v),
+                        Response::AdminDatabase(v) => self.admin.admin_data = v,
                         Response::GenerationStarted { character_id, .. } => {
                             self.active_request = Some(frame.request_id);
                             self.typing_character = Some(character_id);
@@ -939,12 +2191,18 @@ impl ChattyApp {
                         }
                         Response::Accepted { revision, .. } => {
                             self.revision = self.revision.max(revision);
-                            if self.memory_notice.as_deref() == Some("Saving memory…") {
-                                self.memory_notice = Some("Memory saved.".into());
-                            } else if self.memory_notice.as_deref() == Some("Removing memory…") {
-                                self.memory_notice = Some("Memory removed.".into());
-                            } else if self.memory_notice.as_deref() == Some("Learning from chat…") {
-                                self.memory_notice = Some("New memory learned from the chat.".into());
+                            if self.memory_state.status_message.as_deref() == Some("Saving memory…")
+                            {
+                                self.memory_state.status_message = Some("Memory saved.".into());
+                            } else if self.memory_state.status_message.as_deref()
+                                == Some("Removing memory…")
+                            {
+                                self.memory_state.status_message = Some("Memory removed.".into());
+                            } else if self.memory_state.status_message.as_deref()
+                                == Some("Learning from chat…")
+                            {
+                                self.memory_state.status_message =
+                                    Some("New memory learned from the chat.".into());
                             }
                             if !self.token.is_empty() {
                                 self.refresh();
@@ -952,7 +2210,7 @@ impl ChattyApp {
                                     self.request_filtered_memories();
                                 }
                                 if let Some(id) = self.selected_conversation.clone() {
-                                    self.open_conversation(&id)
+                                    self.open_conversation(&id);
                                 }
                             }
                         }
@@ -960,7 +2218,7 @@ impl ChattyApp {
                             self.revision = self.revision.max(revision);
                             self.refresh();
                             if let Some(id) = self.selected_conversation.clone() {
-                                self.open_conversation(&id)
+                                self.open_conversation(&id);
                             }
                         }
                         _ => {}
@@ -969,7 +2227,7 @@ impl ChattyApp {
             }
             MessageType::StreamChunk => {
                 if let Ok(c) = decode::<StreamChunk>(&frame.payload) {
-                    self.stream_text.push_str(&c.text)
+                    self.stream_text.push_str(&c.text);
                 }
             }
             MessageType::StreamEnd => {
@@ -977,8 +2235,7 @@ impl ChattyApp {
                     message_id,
                     revision,
                     cancelled,
-                }) =
-                    decode::<Response>(&frame.payload)
+                }) = decode::<Response>(&frame.payload)
                 {
                     self.pending_tts_message_id = (!cancelled).then_some(message_id);
                     self.finish_generation(revision);
@@ -990,16 +2247,21 @@ impl ChattyApp {
             }
             MessageType::Delta => {
                 if let Ok(d) = decode::<StateDelta>(&frame.payload) {
-                    self.apply_delta(d)
+                    self.apply_delta(d);
                 }
             }
             MessageType::Error => {
-                self.world_import_pending = false;
-                self.world_import_started = None;
+                self.world_state.import_pending = false;
+                self.world_state.import_started = None;
                 self.char_import_pending = false;
                 self.char_import_started = None;
-                if self.memory_notice.as_deref().is_some_and(|notice| notice.ends_with('…')) {
-                    self.memory_notice = None;
+                if self
+                    .memory_state
+                    .status_message
+                    .as_deref()
+                    .is_some_and(|notice| notice.ends_with('…'))
+                {
+                    self.memory_state.status_message = None;
                 }
                 if let Ok(e) = decode::<WireError>(&frame.payload) {
                     let message = match e.code {
@@ -1017,7 +2279,8 @@ impl ChattyApp {
             _ => {}
         }
     }
-    fn apply_delta(&mut self, d: StateDelta) {
+
+    pub(crate) fn apply_delta(&mut self, d: StateDelta) {
         let payload = if matches!(d.operation, DeltaOperation::Delete) {
             None
         } else {
@@ -1125,7 +2388,8 @@ impl ChattyApp {
             self.state.insert(key, p);
         }
     }
-    fn finish_generation(&mut self, revision: i64) {
+
+    pub(crate) fn finish_generation(&mut self, revision: i64) {
         self.revision = self.revision.max(revision);
         self.active_request = None;
         self.typing_character = None;
@@ -1137,7 +2401,8 @@ impl ChattyApp {
             self.open_conversation(&id);
         }
     }
-    fn open_conversation(&mut self, id: &str) {
+
+    pub(crate) fn open_conversation(&mut self, id: &str) {
         self.auto_select_conversation = true;
         self.selected_conversation = Some(id.into());
         self.send(Request::GetConversation {
@@ -1145,83 +2410,188 @@ impl ChattyApp {
             conversation_id: id.into(),
         });
     }
-    fn load_inspection_demo(&mut self) {
-        self.connected = true;
-        self.connecting = false;
-        self.restoring_session = false;
-        self.status = "Online · inspection".into();
-        self.token = "inspection".into();
-        self.user_id = "admin".into();
-        self.username = "admin".into();
-        self.role = Some(Role::Admin);
-        self.account_usage = TokenUsage {
-            prompt_tokens: 128_450,
-            completion_tokens: 34_921,
+
+    pub(crate) fn submit_message(&mut self) {
+        let Some(cid) = self.selected_conversation.clone() else {
+            self.new_chat_open = true;
+            return;
         };
-        self.users = vec![
-            UserAccount {
-                id: "admin".into(),
-                username: "admin".into(),
-                role: Role::Admin,
-                created_at: "2026-08-20 09:00:00 UTC".into(),
-                usage: self.account_usage,
-            },
-            UserAccount {
-                id: "reader".into(),
-                username: "reader".into(),
-                role: Role::User,
-                created_at: "2026-08-22 11:30:00 UTC".into(),
-                usage: TokenUsage {
-                    prompt_tokens: 8_412,
-                    completion_tokens: 2_301,
-                },
-            },
-        ];
-        let mut demo_portrait = Vec::new();
-        let mut pixels = Vec::with_capacity(128 * 128 * 4);
-        for y in 0..128u8 {
-            for x in 0..128u8 {
-                pixels.extend_from_slice(&[38 + x / 2, 48 + y / 4, 110 + x / 4, 255]);
-            }
+        let speaker = self.selected_speaker().map(str::to_owned);
+        if self.input.trim().is_empty() {
+            self.send(Request::Generate {
+                session_token: self.token.clone(),
+                conversation_id: cid,
+                speaker_id: speaker,
+                parent_id: None,
+            });
+            return;
         }
-        image::codecs::png::PngEncoder::new(&mut demo_portrait)
-            .write_image(&pixels, 128, 128, image::ExtendedColorType::Rgba8)
-            .expect("encode deterministic inspection portrait");
-        self.characters.push(Character {
+        let content = std::mem::take(&mut self.input);
+        let message = Request::SendMessage {
+            session_token: self.token.clone(),
+            conversation_id: cid.clone(),
+            content,
+            speaker_id: None,
+        };
+        let generate = Request::Generate {
+            session_token: self.token.clone(),
+            conversation_id: cid,
+            speaker_id: speaker,
+            parent_id: None,
+        };
+        let _ = self.commands.send(Command::SendThenGenerate {
+            message: Box::new(message),
+            generate: Box::new(generate),
+        });
+    }
+
+    pub(crate) fn regenerate(&self, message: &ChatMessage) {
+        if let Some(cid) = self.selected_conversation.clone() {
+            self.send(Request::Generate {
+                session_token: self.token.clone(),
+                conversation_id: cid,
+                speaker_id: message.author_id.clone(),
+                parent_id: Some(message.id.clone()),
+            });
+        }
+    }
+
+    fn selected_speaker(&self) -> Option<&str> {
+        self.selected_conversation
+            .as_deref()
+            .and_then(|id| self.conversations.iter().find(|c| c.id == id))
+            .and_then(|c| c.participant_ids.first().map(String::as_str))
+    }
+
+    pub(crate) fn displayed_message_content(message: &ChatMessage) -> &str {
+        conversation::displayed_message_content(message)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn current_emotion_portrait(&self) -> Option<(String, String, String, Vec<u8>)> {
+        conversation::current_emotion_portrait(
+            &self.characters,
+            &self.messages,
+            self.selected_conversation.as_deref(),
+            self.selected_speaker(),
+        )
+    }
+
+    pub(crate) fn open_memory_manager(
+        &mut self,
+        character_id: Option<String>,
+        conversation_id: Option<String>,
+    ) {
+        self.memory_state = MemoryDialogState::with_filters(character_id, conversation_id);
+        self.memory_dialog_open = true;
+        self.request_filtered_memories();
+    }
+
+    pub(crate) fn request_filtered_memories(&self) {
+        self.send(Request::ListMemories {
+            session_token: self.token.clone(),
+            conversation_id: self.memory_state.filter_conversation_id.clone(),
+            character_id: self.memory_state.filter_character_id.clone(),
+        });
+    }
+
+    pub(crate) fn load_admin_tab(&mut self) {
+        if self.admin.admin_tab == 2 && self.admin.models.busy {
+            return;
+        }
+        for req in admin_monitor::requests_for_tab(self.admin.admin_tab, &self.token) {
+            self.send(req);
+        }
+        if self.admin.admin_tab == 0 {
+            self.last_monitor_refresh = Some(Instant::now());
+        }
+    }
+
+    pub(crate) fn refresh_admin_monitor_if_due(&mut self) {
+        if self.screen != Screen::Admin || self.admin.admin_tab != 0 || self.token.is_empty() {
+            self.last_monitor_refresh = None;
+            return;
+        }
+        let interval = Duration::from_secs(2);
+        if self
+            .last_monitor_refresh
+            .is_none_or(|last| last.elapsed() >= interval)
+        {
+            self.send(Request::AdminGetBrokerMonitor {
+                session_token: self.token.clone(),
+            });
+            self.last_monitor_refresh = Some(Instant::now());
+        }
+    }
+
+    pub(crate) fn save_preferences(&self) {
+        if let Some(path) = &self.preferences_path {
+            save_preferences(path, self.tts_auto_speak);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn top_center_square_uv(width: f32, height: f32) -> (Point, Point) {
+        if width > height {
+            let margin = (1.0 - height / width) / 2.0;
+            (Point::new(margin, 0.0), Point::new(1.0 - margin, 1.0))
+        } else {
+            (Point::new(0.0, 0.0), Point::new(1.0, width / height))
+        }
+    }
+
+    pub(crate) fn load_inspection_demo(&mut self) {
+        self.role = Some(Role::Admin);
+        self.token = "demo-session".into();
+        let pixels = image::RgbaImage::from_fn(128, 128, |x, y| {
+            let dx = (x as f32) - 64.0;
+            let dy = (y as f32) - 64.0;
+            if dx * dx + dy * dy <= 54.0 * 54.0 {
+                image::Rgba([79, 70, 229, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+
+        self.characters = vec![Character {
             id: "assistant".into(),
             name: "Mara".into(),
-            description: "A silver-haired traveller with a knack for noticing what others miss."
+            description: "A thoughtful research assistant stationed at an alpine observatory."
                 .into(),
-            personality: "Warm and observant".into(),
-            scenario: String::new(),
-            system_prompt: String::new(),
+            personality: "Curious, warm, precise, and observant.".into(),
+            scenario: "Midnight review in the high library.".into(),
+            system_prompt: "Adopt a grounded, literate, direct tone.".into(),
             example_dialogue: String::new(),
-            appearance: "Silver-haired traveller".into(),
-            age: "29".into(),
+            appearance: "Dark braided hair, knitted wool sweater, silver wire spectacles.".into(),
+            age: "28".into(),
             gender: "female".into(),
             race: "human".into(),
             misc: String::new(),
-            tags: vec!["demo".into()],
-            avatar: Some(demo_portrait.clone()),
+            tags: vec!["astronomy".into(), "companion".into(), "ambient".into()],
+            avatar: None,
             images: vec![CharacterImage {
                 id: "demo-neutral".into(),
                 label: "neutral".into(),
-                data: demo_portrait,
+                data: encoded.into_inner(),
             }],
             default_image_id: Some("demo-neutral".into()),
             is_public: true,
             owned_by_user: true,
             revision: 1,
-        });
-        self.conversations.push(Conversation {
+        }];
+        self.conversations = vec![Conversation {
             id: "demo".into(),
-            title: "A quiet evening".into(),
-            kind: ConversationKind::Direct,
+            title: "Night watch at the observatory".into(),
             participant_ids: vec!["assistant".into()],
+            kind: ConversationKind::Direct,
             state: String::new(),
             summary: String::new(),
             revision: 1,
-        });
+        }];
         self.selected_conversation = Some("demo".into());
         self.messages.push(ChatMessage {
             id: "m1".into(),
@@ -1273,9 +2643,8 @@ impl ChattyApp {
             id: "m2".into(),
             author_type: "character".into(),
             author_id: Some("assistant".into()),
-            content:
-                "# The old observatory\n\nIt has watched the valley for **two hundred years**."
-                    .into(),
+            content: "# The old observatory\n\nIt has watched the valley for **two hundred years**."
+                .into(),
             parent_id: Some("m1".into()),
             selected_variant_id: None,
             character_image_id: Some("demo-neutral".into()),
@@ -1283,7 +2652,7 @@ impl ChattyApp {
             revision: 1,
             variants: vec![],
         });
-        self.broker_monitor = Some(BrokerMonitor {
+        self.admin.broker_monitor = Some(BrokerMonitor {
             uptime_seconds: 3725,
             cpu_percent: 1.8,
             memory_used_mb: 42,
@@ -1294,7 +2663,7 @@ impl ChattyApp {
             adapter_latency_ms: Some(18),
             recent_errors: vec!["2026-08-24 14:32:07 UTC · Adapter request timed out".into()],
         });
-        self.admin_log = BrokerLog {
+        self.admin.admin_log = BrokerLog {
             content: concat!(
                 "2026-08-24T14:30:00Z  INFO chatty_broker: boot log initialized\n",
                 "2026-08-24T14:30:01Z  INFO chatty_broker: TLS 1.3 broker listening address=0.0.0.0:7443\n",
@@ -1305,7 +2674,14 @@ impl ChattyApp {
             truncated: false,
             file_size_bytes: 412,
         };
-        self.ollama_state = Some(OllamaState {
+        self.admin.broker_config.adapter_url = "http://192.0.2.50:11434".into();
+        self.admin.models.saved_adapter_url = Some(self.admin.broker_config.adapter_url.clone());
+        self.admin.models.results = vec![ModelSearchResult {
+            id: "bartowski/Llama-3.2-1B-Instruct-GGUF".into(),
+            downloads: 12345,
+            files: vec!["Llama-3.2-1B-Instruct-Q4_K_M.gguf".into(), "Llama-3.2-1B-Instruct-Q8_0.gguf".into()],
+        }];
+        self.admin.ollama_state = Some(OllamaState {
             version: "0.12.6".into(),
             models: vec![
                 OllamaModel {
@@ -1335,73 +2711,158 @@ impl ChattyApp {
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod visual_tests {
-    use super::*;
+pub(crate) fn broker_host(value: &str) -> Option<String> {
+    let value = value.trim();
+    value
+        .parse::<IpAddr>()
+        .map(|ip| ip.to_string())
+        .ok()
+        .or_else(|| {
+            value
+                .parse::<SocketAddr>()
+                .map(|address| address.ip().to_string())
+                .ok()
+        })
+        .or_else(|| {
+            let host = match value.rsplit_once(':') {
+                Some((host, "7443")) if !host.contains(':') => host,
+                Some(_) => return None,
+                None => value,
+            };
+            let valid = !host.is_empty()
+                && host.len() <= 253
+                && host.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && label
+                            .as_bytes()
+                            .last()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                });
+            valid.then(|| host.to_ascii_lowercase())
+        })
+}
 
-    #[test]
-    fn official_client_requests_screen_capture_protection() {
-        let ctx = egui::Context::default();
-        ctx.begin_pass(egui::RawInput::default());
-        enable_screen_capture_protection(&ctx);
-        let output = ctx.end_pass();
-        let root = output
-            .viewport_output
-            .get(&egui::ViewportId::ROOT)
-            .expect("root viewport output");
-        assert!(root.commands.iter().any(|command| {
-            matches!(command, egui::ViewportCommand::ContentProtected(true))
-        }));
+pub(crate) fn connection_target(value: &str) -> Option<ConnectionTarget> {
+    let host = broker_host(value)?;
+    let broker = host.parse::<IpAddr>().map_or_else(
+        |_| format!("{host}:7443"),
+        |ip| SocketAddr::new(ip, 7443).to_string(),
+    );
+    Some(ConnectionTarget {
+        broker,
+        server_name: host,
+    })
+}
+
+fn main() -> Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| format_err!("failed to install TLS provider"))?;
+
+    let parsed = ParsedArgs::parse(USAGE)?;
+    if parsed.flag("test-speech") {
+        test_speech().map_err(|e| format_err!("{e}"))?;
+        return Ok(());
     }
-    use egui_kittest::kittest::{NodeT, Queryable};
+
+    let args = Args {
+        broker: parsed.string("broker", "CHATTY_BROKER", ""),
+        ca: parsed.optional("ca", "CHATTY_CA").map(PathBuf::from),
+        inspect: parsed.flag("inspect"),
+        inspect_control: parsed
+            .optional("inspect-control", "CHATTY_INSPECT_CONTROL")
+            .map(PathBuf::from),
+        width: parsed.number("width", 1100.0),
+        height: parsed.number("height", 720.0),
+        session_file: parsed
+            .optional("session-file", "CHATTY_SESSION_FILE")
+            .map(PathBuf::from),
+        test_speech: false,
+    };
+
+    let width = args.width;
+    let height = args.height;
+    let args_arc = Arc::new(args);
+    let boot_args = args_arc.clone();
+
+    iced::application(
+        move || ChattyApp::boot((*boot_args).clone()),
+        ChattyApp::update,
+        ChattyApp::view,
+    )
+    .subscription(ChattyApp::subscription)
+    .theme(ChattyApp::theme)
+    .style(|_, theme| iced::theme::Style {
+        background_color: Color::TRANSPARENT,
+        text_color: theme.palette().text,
+    })
+    .scale_factor(ChattyApp::scale_factor)
+    .window(window::Settings {
+        size: Size::new(width, height),
+        min_size: None,
+        transparent: true,
+        ..Default::default()
+    })
+    .run()
+    .map_err(|e| Error::msg(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn broker_host_accepts_ips_and_domains() {
         assert_eq!(broker_host("192.168.0.98"), Some("192.168.0.98".into()));
         assert_eq!(
+            broker_host("chatty.example.com"),
+            Some("chatty.example.com".into())
+        );
+        assert_eq!(
             broker_host("192.168.0.98:7443"),
             Some("192.168.0.98".into())
         );
-        assert_eq!(broker_host("Chatty.Example"), Some("chatty.example".into()));
-        assert_eq!(broker_host("bad_name.example"), None);
-        assert_eq!(broker_host("chatty.example:1234"), None);
+        assert_eq!(
+            broker_host("chatty.example.com:7443"),
+            Some("chatty.example.com".into())
+        );
+        assert_eq!(broker_host("https://chatty.example.com"), None);
+        assert_eq!(broker_host("chatty.example.com:8080"), None);
+        assert_eq!(broker_host("-bad.domain"), None);
     }
 
     #[test]
     fn connection_target_uses_tls_host_and_default_port() {
-        assert_eq!(
-            connection_target("chatty.example"),
-            Some(ConnectionTarget {
-                broker: "chatty.example:7443".into(),
-                server_name: "chatty.example".into(),
-            })
-        );
+        let ipv4 = connection_target("192.168.0.98").unwrap();
+        assert_eq!(ipv4.broker, "192.168.0.98:7443");
+        assert_eq!(ipv4.server_name, "192.168.0.98");
+
+        let domain = connection_target("chatty.example.com").unwrap();
+        assert_eq!(domain.broker, "chatty.example.com:7443");
+        assert_eq!(domain.server_name, "chatty.example.com");
     }
 
     #[test]
     fn portrait_crop_is_top_aligned_and_horizontally_centered() {
-        let tall = ChattyApp::top_center_square_uv(egui::vec2(256.0, 512.0));
-        assert_eq!(tall.min, egui::pos2(0.0, 0.0));
-        assert_eq!(tall.max, egui::pos2(1.0, 0.5));
+        let (min, max) = ChattyApp::top_center_square_uv(256.0, 512.0);
+        assert_eq!(min, Point::new(0.0, 0.0));
+        assert_eq!(max, Point::new(1.0, 0.5));
 
-        let wide = ChattyApp::top_center_square_uv(egui::vec2(512.0, 256.0));
-        assert_eq!(wide.min, egui::pos2(0.25, 0.0));
-        assert_eq!(wide.max, egui::pos2(0.75, 1.0));
-    }
-
-    #[test]
-    fn emotion_is_exposed_as_a_visible_label() {
-        let mut chat = harness(egui::vec2(430.0, 760.0));
-        chat.state_mut().sidebar_visible = false;
-        chat.run_ok();
-        chat.get_by_label("Emotion: neutral");
+        let (min, max) = ChattyApp::top_center_square_uv(512.0, 256.0);
+        assert_eq!(min, Point::new(0.25, 0.0));
+        assert_eq!(max, Point::new(0.75, 1.0));
     }
 
     #[test]
     fn continue_creates_a_message_and_retry_creates_a_variant() {
         let (commands, mut command_rx) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
+        let (_, events) = mpsc::unbounded_channel();
         let mut app = ChattyApp::new(commands, events);
         app.load_inspection_demo();
 
@@ -1449,20 +2910,22 @@ mod visual_tests {
 
     #[test]
     fn latest_persisted_reply_changes_the_visible_emotion() {
-        let mut chat = harness(egui::vec2(430.0, 760.0));
-        chat.state_mut().sidebar_visible = false;
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
 
         let pixels = image::RgbaImage::from_pixel(128, 128, image::Rgba([40, 180, 90, 255]));
         let mut encoded = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(pixels)
             .write_to(&mut encoded, image::ImageFormat::Png)
             .unwrap();
-        chat.state_mut().characters[0].images.push(CharacterImage {
+        app.characters[0].images.push(CharacterImage {
             id: "demo-happy".into(),
             label: "happy".into(),
             data: encoded.into_inner(),
         });
-        chat.state_mut().messages.push(ChatMessage {
+        app.messages.push(ChatMessage {
             id: "m3".into(),
             author_type: "character".into(),
             author_id: Some("assistant".into()),
@@ -1475,12 +2938,9 @@ mod visual_tests {
             variants: vec![],
         });
 
-        chat.run_ok();
-        chat.get_by_label("Emotion: happy");
-        chat.render()
-            .expect("render changed emotion portrait")
-            .save("/tmp/chatty-emotion-changed.png")
-            .expect("save changed emotion portrait");
+        let portrait = app.current_emotion_portrait().unwrap();
+        assert_eq!(portrait.1, "happy");
+        assert_eq!(portrait.2, "demo-happy");
     }
 
     #[test]
@@ -1511,102 +2971,59 @@ mod visual_tests {
             }
         }
 
-        for (size, output) in [
-            (
-                egui::vec2(430.0, 760.0),
-                "/tmp/chatty-emotion-live-compact.png",
-            ),
-            (
-                egui::vec2(1440.0, 900.0),
-                "/tmp/chatty-emotion-live-desktop.png",
-            ),
-        ] {
-            let mut chat = harness(size);
-            chat.state_mut().sidebar_visible = false;
-            let pixels =
-                image::RgbaImage::from_pixel(128, 128, image::Rgba([40, 180, 90, 255]));
-            let mut encoded = std::io::Cursor::new(Vec::new());
-            image::DynamicImage::ImageRgba8(pixels)
-                .write_to(&mut encoded, image::ImageFormat::Png)
-                .unwrap();
-            chat.state_mut().characters[0].images.push(CharacterImage {
-                id: "demo-happy".into(),
-                label: "happy".into(),
-                data: encoded.into_inner(),
-            });
-            chat.state_mut().handle_frame(emotion_delta());
-
-            assert_eq!(
-                chat.state()
-                    .messages
-                    .last()
-                    .map(|message| message.content.as_str()),
-                Some("The generated reply remains visible")
-            );
-            let portrait = chat.state().current_emotion_portrait().unwrap();
-            assert_eq!(portrait.1, "happy");
-            assert_eq!(portrait.2, "demo-happy");
-            chat.run_ok();
-            chat.get_by_label("Emotion: happy");
-            chat.render()
-                .expect("render live emotion delta")
-                .save(output)
-                .expect("save live emotion delta");
-        }
-    }
-
-    #[test]
-    fn imported_portraits_are_normalized_to_a_top_centered_square() {
-        let source = image::RgbaImage::from_fn(256, 512, |_x, y| {
-            if y < 256 {
-                image::Rgba([220, 20, 60, 255])
-            } else {
-                image::Rgba([30, 80, 220, 255])
-            }
-        });
-        let mut encoded = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(source)
-            .write_to(&mut encoded, image::ImageFormat::Png)
-            .unwrap();
-
-        let normalized = ChattyApp::normalize_character_image_png(encoded.get_ref()).unwrap();
-        let pixels = image::load_from_memory_with_format(&normalized, image::ImageFormat::Png)
-            .unwrap()
-            .to_rgba8();
-        assert_eq!(pixels.dimensions(), (256, 256));
-        assert_eq!(pixels.get_pixel(128, 255).0, [220, 20, 60, 255]);
-    }
-
-    #[test]
-    fn portrait_bytes_are_requested_only_for_a_missing_gpu_texture() {
-        let (commands, mut command_rx) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
         let mut app = ChattyApp::new(commands, events);
         app.load_inspection_demo();
+
+        let pixels = image::RgbaImage::from_pixel(128, 128, image::Rgba([40, 180, 90, 255]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        app.characters[0].images.push(CharacterImage {
+            id: "demo-happy".into(),
+            label: "happy".into(),
+            data: encoded.into_inner(),
+        });
+
+        app.handle_frame(emotion_delta());
+
+        assert_eq!(
+            app.messages.last().map(|m| m.content.as_str()),
+            Some("The generated reply remains visible")
+        );
+        let portrait = app.current_emotion_portrait().unwrap();
+        assert_eq!(portrait.1, "happy");
+        assert_eq!(portrait.2, "demo-happy");
+    }
+
+    #[test]
+    fn admin_monitor_refreshes_only_while_open() {
+        let (commands, mut command_rx) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
         app.token = "session".into();
-        let character_id = app.characters[0].id.clone();
-        let image_id = app.characters[0].images[0].id.clone();
-        app.characters[0].images[0].data.clear();
-
-        app.cache_character_portraits(&egui::Context::default());
-
+        app.screen = Screen::Admin;
+        app.admin.admin_tab = 0;
+        app.last_monitor_refresh = Some(Instant::now() - Duration::from_secs(3));
+        app.refresh_admin_monitor_if_due();
         assert!(matches!(
-            command_rx.try_recv().unwrap(),
-            Command::Request(request)
-                if matches!(&*request, Request::GetCharacterImage {
-                    session_token,
-                    character_id: requested_character,
-                    image_id: requested_image,
-                } if session_token == "session"
-                    && requested_character == &character_id
-                    && requested_image == &image_id)
+            command_rx.try_recv(),
+            Ok(Command::Request(request))
+                if matches!(*request, Request::AdminGetBrokerMonitor { .. })
         ));
+
+        app.screen = Screen::Chat;
+        app.last_monitor_refresh = Some(Instant::now() - Duration::from_secs(3));
+        app.refresh_admin_monitor_if_due();
+        assert!(command_rx.try_recv().is_err());
     }
 
     #[test]
     fn long_network_errors_move_to_the_status_tooltip() {
         let (commands, _) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
+        let (_, events) = mpsc::unbounded_channel();
         let mut app = ChattyApp::new(commands, events);
         let detail = "2026-09-14 15:43:39 UTC · Offline: connection timed out";
         app.set_network_status(detail.into());
@@ -1617,2187 +3034,78 @@ mod visual_tests {
         assert!(app.status_tooltip.is_none());
     }
 
-    fn harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app
-            })
-    }
-
-    fn memory_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.memory_dialog_open = true;
-                app
-            })
-    }
-
     #[test]
-    fn visual_desktop_memory_manager() {
-        let mut harness = memory_harness(egui::vec2(1440.0, 900.0));
-        harness.run_ok();
-        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Add memory");
-        harness
-            .render()
-            .expect("render desktop memory manager")
-            .save("/tmp/chatty-memory-manager-desktop.png")
-            .expect("save desktop memory manager");
-    }
-
-    #[test]
-    fn visual_compact_memory_manager() {
-        let mut harness = memory_harness(egui::vec2(430.0, 760.0));
-        harness.run_ok();
-        let add = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Add memory");
-        assert!(add.rect().left() >= 0.0 && add.rect().right() <= 430.0);
-        harness
-            .render()
-            .expect("render compact memory manager")
-            .save("/tmp/chatty-memory-manager-compact.png")
-            .expect("save compact memory manager");
-    }
-
-    fn certificate_trust_harness(
-        size: egui::Vec2,
-        light_mode: bool,
-    ) -> egui_kittest::Harness<'static, ChattyApp> {
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, light_mode, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.light_mode = light_mode;
-                app.pending_certificate = Some(PendingCertificate::from_der(
-                    ConnectionTarget {
-                        broker: "192.168.0.98:7443".into(),
-                        server_name: "192.168.0.98".into(),
-                    },
-                    b"test certificate".to_vec(),
-                ));
-                app
-            })
-    }
-
-    #[test]
-    fn visual_compact_certificate_trust_dialog() {
-        let mut harness = certificate_trust_harness(egui::vec2(430.0, 760.0), false);
-        harness.run_ok();
-        let trust = harness.get_by_role_and_label(
-            egui::accesskit::Role::Button,
-            "Trust and connect",
-        );
-        let cancel = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel");
-        assert!(
-            trust.rect().right() <= 430.0,
-            "trust button rect: {:?}",
-            trust.rect()
-        );
-        assert!(
-            cancel.rect().left() >= 0.0,
-            "cancel button rect: {:?}",
-            cancel.rect()
-        );
-        harness
-            .render()
-            .expect("render compact certificate trust dialog")
-            .save("/tmp/chatty-certificate-trust-compact.png")
-            .expect("save compact certificate trust dialog");
-    }
-
-    #[test]
-    fn visual_desktop_certificate_trust_dialog() {
-        let mut harness = certificate_trust_harness(egui::vec2(1440.0, 900.0), false);
-        harness.run_ok();
-        harness.get_by_role_and_label(
-            egui::accesskit::Role::Button,
-            "Trust and connect",
-        );
-        harness
-            .render()
-            .expect("render desktop certificate trust dialog")
-            .save("/tmp/chatty-certificate-trust-desktop.png")
-            .expect("save desktop certificate trust dialog");
-    }
-
-    #[test]
-    fn visual_compact_light_certificate_trust_dialog() {
-        let mut harness = certificate_trust_harness(egui::vec2(430.0, 760.0), true);
-        harness.run_ok();
-        harness
-            .render()
-            .expect("render compact light certificate trust dialog")
-            .save("/tmp/chatty-certificate-trust-compact-light.png")
-            .expect("save compact light certificate trust dialog");
-    }
-
-    const LONG_USER_MESSAGE: &str = "Please write a detailed description of the observatory, including the weathered stone walls, the old brass telescope, the valley below, and every small detail that makes this place feel lived in and memorable.";
-
-    fn long_user_message_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                if size.x < 760.0 {
-                    app.sidebar_visible = false;
-                }
-                app.messages[0].content = LONG_USER_MESSAGE.into();
-                app
-            })
-    }
-
-    #[test]
-    fn visual_desktop_long_user_message() {
-        let mut harness = long_user_message_harness(egui::vec2(1440.0, 900.0));
-        harness.run_ok();
-        let message = harness.get_by_label(LONG_USER_MESSAGE).rect();
-        assert!(message.left() >= 0.0 && message.right() <= 1440.0);
-        assert!(message.height() > 30.0);
-        harness
-            .render()
-            .expect("render desktop long user message")
-            .save("/tmp/chatty-desktop-long-user-message.png")
-            .expect("save desktop long user message");
-    }
-
-    #[test]
-    fn visual_compact_long_user_message() {
-        let mut harness = long_user_message_harness(egui::vec2(430.0, 760.0));
-        harness.run_ok();
-        let message = harness.get_by_label(LONG_USER_MESSAGE).rect();
-        assert!(message.left() >= 0.0 && message.right() <= 430.0);
-        assert!(message.height() > 60.0);
-        harness
-            .render()
-            .expect("render compact long user message")
-            .save("/tmp/chatty-compact-long-user-message.png")
-            .expect("save compact long user message");
-    }
-
-    fn notice_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.error = Some(UiNotice {
-                    timestamp: "2026-08-24 14:32:07 UTC".into(),
-                    message: "The broker could not complete that request.".into(),
-                });
-                app
-            })
-    }
-
-    fn restoring_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.connected = true;
-                app.restoring_session = true;
-                app.status = "Restoring saved session…".into();
-                app
-            })
-    }
-
-    fn public_character_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, ChattyApp> {
-        egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.characters[0].owned_by_user = false;
-                app.draft = DraftCharacter::from(&app.characters[0]);
-                app.draft_character_open = true;
-                app
-            })
-    }
-
-    fn add_overflowing_conversations(app: &mut ChattyApp) {
-        for index in 1..=30 {
-            app.conversations.push(Conversation {
-                id: format!("overflow-{index}"),
-                title: format!("Conversation {index:02}"),
-                kind: ConversationKind::Direct,
-                participant_ids: vec!["assistant".into()],
-                state: String::new(),
-                summary: String::new(),
-                revision: index,
-            });
-        }
-    }
-
-    #[test]
-    fn missing_conversation_is_reconciled_without_an_error_notice() {
-        let (commands, mut requests) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
-        let mut app = ChattyApp::new(commands, events);
-        app.load_inspection_demo();
-        let available_conversations = app.conversations.clone();
-
-        app.handle_frame(Frame {
-            compressed: false,
-            message_type: MessageType::Response,
-            request_id: 7,
-            payload: encode(&Response::ConversationNotFound {
-                conversation_id: "demo".into(),
-            })
-            .unwrap(),
-        });
-
-        assert!(app.error.is_none());
-        assert!(app.selected_conversation.is_none());
-        assert!(app.messages.is_empty());
-        app.handle_frame(Frame {
-            compressed: false,
-            message_type: MessageType::Response,
-            request_id: 8,
-            payload: encode(&Response::Conversations(available_conversations)).unwrap(),
-        });
-        assert!(app.selected_conversation.is_none());
-        assert!(matches!(
-            requests.try_recv().unwrap(),
-            Command::Request(request) if matches!(*request, Request::ListCharacters { .. })
-        ));
-        assert!(matches!(
-            requests.try_recv().unwrap(),
-            Command::Request(request) if matches!(*request, Request::ListConversations { .. })
-        ));
-    }
-
-    #[test]
-    fn group_conversations_are_hidden_from_the_gui() {
-        let (commands, mut requests) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
-        let mut app = ChattyApp::new(commands, events);
-        app.token = "session".into();
-        app.selected_conversation = Some("group".into());
-        let conversation = |id: &str, kind| Conversation {
-            id: id.into(),
-            title: id.into(),
-            kind,
-            participant_ids: vec!["assistant".into()],
-            state: String::new(),
-            summary: String::new(),
-            revision: 1,
-        };
-
-        app.handle_frame(Frame {
-            compressed: false,
-            message_type: MessageType::Response,
-            request_id: 10,
-            payload: encode(&Response::Conversations(vec![
-                conversation("group", ConversationKind::GroupManual),
-                conversation("direct", ConversationKind::Direct),
-            ]))
-            .unwrap(),
-        });
-
-        assert_eq!(app.conversations.len(), 1);
-        assert_eq!(app.conversations[0].id, "direct");
-        assert_eq!(app.selected_conversation.as_deref(), Some("direct"));
-        assert!(matches!(
-            requests.try_recv().unwrap(),
-            Command::Request(request)
-                if matches!(
-                    *request,
-                    Request::GetConversation { ref conversation_id, .. }
-                        if conversation_id == "direct"
-                )
-        ));
-    }
-
-    #[test]
-    fn expired_saved_session_returns_to_login() {
+    fn view_builds_without_panics_for_all_states() {
         let (commands, _) = mpsc::unbounded_channel();
-        let (event_tx, events) = std::sync::mpsc::channel();
-        let mut app = ChattyApp::new(commands, events);
-        app.restoring_session = true;
-        event_tx.send(Event::SessionExpired).unwrap();
-
-        app.drain(&egui::Context::default());
-
-        assert!(!app.restoring_session);
-        assert!(app.token.is_empty());
-        assert!(app.error.is_some());
-    }
-
-    #[test]
-    fn logout_acknowledgement_does_not_refresh_with_an_empty_token() {
-        let (commands, mut requests) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
+        let (_, events) = mpsc::unbounded_channel();
         let mut app = ChattyApp::new(commands, events);
 
-        app.handle_frame(Frame {
-            compressed: false,
-            message_type: MessageType::Response,
-            request_id: 9,
-            payload: encode(&Response::Accepted {
-                entity_id: None,
-                revision: 0,
-            })
-            .unwrap(),
-        });
+        // Login screen
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
 
-        assert!(requests.try_recv().is_err());
-        assert!(app.error.is_none());
-    }
-
-    #[test]
-    fn stream_end_reloads_the_finished_generation_instead_of_reusing_stream_text() {
-        let (commands, mut requests) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
-        let mut app = ChattyApp::new(commands, events);
+        // Connected demo chat screen
         app.load_inspection_demo();
-        app.stream_text = "the first streamed reply".into();
-        app.active_request = Some(42);
-        app.typing_character = Some("assistant".into());
-
-        app.handle_frame(Frame {
-            compressed: false,
-            message_type: MessageType::StreamEnd,
-            request_id: 42,
-            payload: encode(&Response::GenerationFinished {
-                message_id: "second-reply".into(),
-                revision: 9,
-                cancelled: false,
-            })
-            .unwrap(),
-        });
-
-        assert_eq!(app.revision, 9);
-        assert!(app.active_request.is_none());
-        assert!(app.typing_character.is_none());
-        assert!(matches!(
-            requests.try_recv().unwrap(),
-            Command::Request(request) if matches!(*request, Request::GetAccountUsage { .. })
-        ));
-        assert!(matches!(
-            requests.try_recv().unwrap(),
-            Command::Request(request)
-                if matches!(
-                    *request,
-                    Request::GetConversation { ref conversation_id, .. }
-                        if conversation_id == "demo"
-                )
-        ));
-
-        let mut messages = app.messages.clone();
-        messages.push(ChatMessage {
-            id: "second-reply".into(),
-            author_type: "character".into(),
-            author_id: Some("assistant".into()),
-            content: "a newly generated reply".into(),
-            parent_id: None,
-            selected_variant_id: None,
-            character_image_id: None,
-            created_at: String::new(),
-            revision: 9,
-            variants: vec![],
-        });
-        app.handle_frame(Frame {
-            compressed: false,
-            message_type: MessageType::Response,
-            request_id: 43,
-            payload: encode(&Response::ConversationView(ConversationView {
-                conversation: app.conversations[0].clone(),
-                messages,
-            }))
-            .unwrap(),
-        });
-
-        assert!(app.stream_text.is_empty());
-        assert_eq!(
-            app.messages.last().map(|message| message.content.as_str()),
-            Some("a newly generated reply")
-        );
-    }
-
-    #[test]
-    fn emotion_selection_status_is_visible_for_the_active_generation() {
-        let mut chat = harness(egui::vec2(430.0, 760.0));
-        chat.state_mut().sidebar_visible = false;
-        chat.state_mut().active_request = Some(42);
-        chat.state_mut().typing_character = Some("assistant".into());
-        chat.state_mut().stream_text = "the streamed reply".into();
-        chat.state_mut().handle_frame(Frame {
-            compressed: false,
-            message_type: MessageType::Response,
-            request_id: 42,
-            payload: encode(&Response::GenerationStatus {
-                message_id: "reply".into(),
-                status: GenerationStatus::SelectingEmotion,
-            })
-            .unwrap(),
-        });
-
-        chat.run_ok();
-        assert_eq!(
-            chat.state().generation_status,
-            Some(GenerationStatus::SelectingEmotion)
-        );
-        assert_eq!(chat.state().stream_text, "the streamed reply");
-        chat.get_by_label("AI is selecting an emotion portrait…");
-        chat.render()
-            .expect("render compact emotion selection status")
-            .save("/tmp/chatty-emotion-selection-compact.png")
-            .expect("save compact emotion selection status");
-        drop(chat);
-
-        let mut desktop = harness(egui::vec2(1440.0, 900.0));
-        desktop.state_mut().sidebar_visible = false;
-        desktop.state_mut().active_request = Some(42);
-        desktop.state_mut().typing_character = Some("assistant".into());
-        desktop.state_mut().generation_status = Some(GenerationStatus::SelectingEmotion);
-        desktop.state_mut().stream_text = "the streamed reply".into();
-        desktop.run_ok();
-        desktop.get_by_label("AI is selecting an emotion portrait…");
-        desktop
-            .render()
-            .expect("render desktop emotion selection status")
-            .save("/tmp/chatty-emotion-selection-desktop.png")
-            .expect("save desktop emotion selection status");
-    }
-
-    #[test]
-    fn visual_desktop_restoring_session() {
-        let mut restoring = restoring_harness(egui::vec2(1440.0, 900.0));
-        restoring.get_by_label("Signing you in");
-        restoring
-            .render()
-            .expect("render desktop session restore")
-            .save("/tmp/chatty-restoring-session-desktop.png")
-            .expect("save desktop session restore");
-    }
-
-    #[test]
-    fn visual_compact_restoring_session() {
-        let mut restoring = restoring_harness(egui::vec2(430.0, 760.0));
-        restoring.get_by_label("Signing you in");
-        restoring
-            .render()
-            .expect("render compact session restore")
-            .save("/tmp/chatty-restoring-session-compact.png")
-            .expect("save compact session restore");
-    }
-
-    #[test]
-    fn visual_desktop_chat() {
-        harness(egui::vec2(1440.0, 900.0))
-            .render()
-            .expect("render desktop UI")
-            .save("/tmp/chatty-restored-desktop.png")
-            .expect("save desktop UI");
-    }
-
-    #[test]
-    fn sidebar_can_be_collapsed_and_reopened_on_desktop() {
-        let mut desktop = harness(egui::vec2(1440.0, 900.0));
-        desktop.run_ok();
-
-        desktop
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
-            .hover();
-        desktop.run_ok();
-        desktop
-            .render()
-            .expect("render hovered sidebar toggle")
-            .save("/tmp/chatty-sidebar-toggle-hover.png")
-            .expect("save hovered sidebar toggle");
-
-        desktop
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
-            .click();
-        desktop.run_ok();
-        assert!(!desktop.state().sidebar_visible);
-        desktop.get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar");
-
-        desktop
-            .render()
-            .expect("render collapsed desktop sidebar")
-            .save("/tmp/chatty-sidebar-collapsed-desktop.png")
-            .expect("save collapsed desktop sidebar");
-
-        desktop
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar")
-            .click();
-        desktop.run_ok();
-        assert!(desktop.state().sidebar_visible);
-        desktop.get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar");
-    }
-
-    #[test]
-    fn sidebar_can_be_closed_and_reopened_on_compact_layout() {
-        let mut compact = harness(egui::vec2(320.0, 480.0));
-        compact.run_ok();
-
-        let close_button = compact
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
-            .rect();
-        assert!(close_button.right() <= 320.0 && close_button.top() >= 0.0);
-        compact
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar")
-            .click();
-        compact.run_ok();
-        assert!(!compact.state().sidebar_visible);
-        let show_button = compact
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar")
-            .rect();
-        assert!(show_button.right() <= 320.0 && show_button.top() >= 0.0);
-
-        compact
-            .render()
-            .expect("render collapsed compact sidebar")
-            .save("/tmp/chatty-sidebar-collapsed-compact.png")
-            .expect("save collapsed compact sidebar");
-
-        compact
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Show sidebar")
-            .click();
-        compact.run_ok();
-        assert!(compact.state().sidebar_visible);
-        compact.get_by_role_and_label(egui::accesskit::Role::Button, "Hide sidebar");
-    }
-
-    #[test]
-    fn visual_narrow_split_chat() {
-        harness(egui::vec2(900.0, 650.0))
-            .render()
-            .expect("render narrow split UI")
-            .save("/tmp/chatty-restored-narrow-split.png")
-            .expect("save narrow split UI");
-    }
-
-    #[test]
-    fn visual_desktop_overflowing_conversation_list() {
-        let mut harness = harness(egui::vec2(1440.0, 900.0));
-        add_overflowing_conversations(harness.state_mut());
-        harness.run_ok();
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
-            .scroll_to_me();
-        harness.run_ok();
-        let last = harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
-            .rect();
-        let footer = harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Manage characters")
-            .rect();
-        assert!(last.bottom() <= footer.top());
-        harness
-            .render()
-            .expect("render desktop overflowing conversation list")
-            .save("/tmp/chatty-overflowing-conversations-desktop.png")
-            .expect("save desktop overflowing conversation list");
-    }
-
-    #[test]
-    fn visual_compact_overflowing_conversation_list() {
-        let mut harness = harness(egui::vec2(430.0, 760.0));
-        add_overflowing_conversations(harness.state_mut());
-        harness.run_ok();
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
-            .scroll_to_me();
-        harness.run_ok();
-        let last = harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Conversation 30")
-            .rect();
-        let footer = harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Manage characters")
-            .rect();
-        assert!(last.bottom() <= footer.top());
-        harness
-            .render()
-            .expect("render compact overflowing conversation list")
-            .save("/tmp/chatty-overflowing-conversations-compact.png")
-            .expect("save compact overflowing conversation list");
-    }
-
-    #[test]
-    fn visual_minimum_height_sidebar() {
-        let mut harness = harness(egui::vec2(640.0, 480.0));
-        add_overflowing_conversations(harness.state_mut());
-        harness.run_ok();
-        harness
-            .render()
-            .expect("render minimum-height sidebar")
-            .save("/tmp/chatty-sidebar-minimum-height.png")
-            .expect("save minimum-height sidebar");
-    }
-
-    #[test]
-    fn visual_narrow_minimum_height_sidebar() {
-        let mut harness = harness(egui::vec2(320.0, 480.0));
-        add_overflowing_conversations(harness.state_mut());
-        harness.run_ok();
-        harness
-            .render()
-            .expect("render narrow minimum-height sidebar")
-            .save("/tmp/chatty-sidebar-narrow-minimum-height.png")
-            .expect("save narrow minimum-height sidebar");
-    }
-
-    #[test]
-    fn visual_hover_chat_delete() {
-        let mut harness = harness(egui::vec2(1440.0, 900.0));
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "A quiet evening")
-            .hover();
-        harness.run_ok();
-        harness
-            .render()
-            .expect("render hovered delete control")
-            .save("/tmp/chatty-restored-hover-delete.png")
-            .expect("save hovered delete control");
-    }
-
-    #[test]
-    fn visual_hover_message_delete() {
-        let mut harness = harness(egui::vec2(1440.0, 900.0));
-        harness.get_by_label("Tell me about this place.").hover();
-        harness.run_ok();
-        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Edit");
-        harness
-            .render()
-            .expect("render hovered message delete control")
-            .save("/tmp/chatty-restored-hover-message-delete.png")
-            .expect("save hovered message delete control");
-    }
-
-    #[test]
-    fn visual_message_editor_and_user_markdown() {
-        let mut harness = harness(egui::vec2(1440.0, 900.0));
-        harness.state_mut().messages[0].content =
-            "# Trip notes\n\n- Bring the **brass** compass\n- Check the `telescope`".into();
-        let markdown = harness.state().messages[0].content.clone();
-        harness.state_mut().editing_message_id = Some("m1".into());
-        harness.state_mut().editing_message_content = markdown;
-        harness.run_ok();
-        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Save");
-        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Cancel");
-        harness
-            .render()
-            .expect("render message editor")
-            .save("/tmp/chatty-message-editor.png")
-            .expect("save message editor");
-
-        harness.state_mut().editing_message_id = None;
-        harness.run_ok();
-        harness.get_by_label("Trip notes");
-        harness
-            .render()
-            .expect("render user Markdown")
-            .save("/tmp/chatty-user-markdown.png")
-            .expect("save user Markdown");
-    }
-
-    #[test]
-    fn visual_hover_assistant_message_actions() {
-        let mut harness = harness(egui::vec2(1440.0, 900.0));
-        harness.get_by_label("The old observatory").hover();
-        harness.run_ok();
-        harness.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
-        harness
-            .render()
-            .expect("render hovered assistant message actions")
-            .save("/tmp/chatty-restored-hover-assistant-actions.png")
-            .expect("save hovered assistant message actions");
-    }
-
-    #[test]
-    fn visual_compact_chat() {
-        let mut compact = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(430.0, 760.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.sidebar_visible = false;
-                app
-            });
-        compact
-            .render()
-            .expect("render compact UI")
-            .save("/tmp/chatty-restored-compact.png")
-            .expect("save compact UI");
-    }
-
-    #[test]
-    fn visual_compact_light_chat() {
-        let mut compact = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(430.0, 760.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, true, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.light_mode = true;
-                app.sidebar_visible = false;
-                app
-            });
-        compact
-            .render()
-            .expect("render compact light UI")
-            .save("/tmp/chatty-restored-compact-light.png")
-            .expect("save compact light UI");
-    }
-
-    #[test]
-    fn visual_desktop_empty_chat() {
-        let mut empty = harness(egui::vec2(1440.0, 900.0));
-        empty.state_mut().selected_conversation = None;
-        empty.state_mut().messages.clear();
-        empty.run_ok();
-        empty
-            .render()
-            .expect("render desktop empty chat")
-            .save("/tmp/chatty-empty-desktop.png")
-            .expect("save desktop empty chat");
-    }
-
-    #[test]
-    fn visual_compact_empty_chat() {
-        let mut empty = harness(egui::vec2(430.0, 760.0));
-        empty.state_mut().sidebar_visible = false;
-        empty.state_mut().selected_conversation = None;
-        empty.state_mut().messages.clear();
-        empty.run_ok();
-        empty
-            .render()
-            .expect("render compact empty chat")
-            .save("/tmp/chatty-empty-compact.png")
-            .expect("save compact empty chat");
-    }
-
-    #[test]
-    fn visual_desktop_new_chat_dialog() {
-        let mut new_chat = harness(egui::vec2(1440.0, 900.0));
-        new_chat.state_mut().new_chat_open = true;
-        new_chat.run_ok();
-        new_chat.get_by_label("New chat");
-        new_chat
-            .render()
-            .expect("render desktop new chat dialog")
-            .save("/tmp/chatty-new-chat-desktop.png")
-            .expect("save desktop new chat dialog");
-    }
-
-    #[test]
-    fn creating_conversation_closes_new_chat_dialog() {
-        let (commands, mut requests) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
-        let mut new_chat = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(1440.0, 900.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app
-            });
-        new_chat.state_mut().new_chat_open = true;
-        new_chat
-            .state_mut()
-            .selected_characters
-            .insert("assistant".into());
-        new_chat.run_ok();
-
-        new_chat
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Create conversation")
-            .click();
-        new_chat.run_ok();
-
-        assert!(!new_chat.state().new_chat_open);
-        assert!(new_chat.query_by_label("New chat").is_none());
-        assert!(matches!(
-            requests.try_recv().unwrap(),
-            Command::Request(request)
-                if matches!(
-                    *request,
-                    Request::CreateConversation {
-                        kind: ConversationKind::Direct,
-                        ref participant_ids,
-                        ..
-                    } if participant_ids == &["assistant"]
-                )
-        ));
-    }
-
-    #[test]
-    fn visual_compact_new_chat_dialog() {
-        let mut new_chat = harness(egui::vec2(430.0, 760.0));
-        new_chat.state_mut().sidebar_visible = false;
-        new_chat.state_mut().new_chat_open = true;
-        new_chat.run_ok();
-        new_chat.get_by_label("New chat");
-        new_chat
-            .render()
-            .expect("render compact new chat dialog")
-            .save("/tmp/chatty-new-chat-compact.png")
-            .expect("save compact new chat dialog");
-    }
-
-    #[test]
-    fn visual_small_phone_new_chat_dialog() {
-        let mut new_chat = harness(egui::vec2(375.0, 667.0));
-        new_chat.state_mut().sidebar_visible = false;
-        new_chat.state_mut().new_chat_open = true;
-        new_chat.run_ok();
-        new_chat.get_by_label("New chat");
-        new_chat
-            .render()
-            .expect("render small-phone new chat dialog")
-            .save("/tmp/chatty-new-chat-375.png")
-            .expect("save small-phone new chat dialog");
-    }
-
-    #[test]
-    fn visual_compact_landscape_chat() {
-        let mut landscape = harness(egui::vec2(667.0, 375.0));
-        landscape.state_mut().sidebar_visible = false;
-        landscape.run_ok();
-        landscape
-            .render()
-            .expect("render compact landscape chat")
-            .save("/tmp/chatty-chat-landscape.png")
-            .expect("save compact landscape chat");
-    }
-
-    #[test]
-    fn visual_compact_hover_assistant_message_actions() {
-        let mut compact = harness(egui::vec2(430.0, 760.0));
-        compact.state_mut().sidebar_visible = false;
-        compact.run_ok();
-        compact.get_by_label("The old observatory").hover();
-        compact.run_ok();
-        compact.get_by_role_and_label(egui::accesskit::Role::Button, "↻");
-        compact
-            .render()
-            .expect("render compact hovered assistant message actions")
-            .save("/tmp/chatty-restored-compact-hover-assistant-actions.png")
-            .expect("save compact hovered assistant message actions");
-    }
-
-    #[test]
-    fn visual_minimum_chat() {
-        let mut minimum = harness(egui::vec2(640.0, 480.0));
-        minimum.state_mut().sidebar_visible = false;
-        minimum.run_ok();
-        minimum
-            .render()
-            .expect("render minimum-size UI")
-            .save("/tmp/chatty-minimum-640.png")
-            .expect("save minimum-size UI");
-    }
-
-    #[test]
-    fn visual_minimum_login() {
-        let mut login = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(640.0, 480.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                ChattyApp::new(commands, events)
-            });
-        login
-            .render()
-            .expect("render minimum-size login")
-            .save("/tmp/chatty-minimum-login.png")
-            .expect("save minimum-size login");
-    }
-
-    #[test]
-    fn visual_8k_chat() {
-        harness(egui::vec2(7680.0, 4320.0))
-            .render()
-            .expect("render 8K UI")
-            .save("/tmp/chatty-8k.png")
-            .expect("save 8K UI");
-    }
-
-    #[test]
-    fn visual_desktop_timestamped_notice() {
-        notice_harness(egui::vec2(1440.0, 900.0))
-            .render()
-            .expect("render desktop timestamped notice")
-            .save("/tmp/chatty-desktop-timestamped-notice.png")
-            .expect("save desktop timestamped notice");
-    }
-
-    #[test]
-    fn visual_compact_timestamped_notice() {
-        notice_harness(egui::vec2(430.0, 760.0))
-            .render()
-            .expect("render compact timestamped notice")
-            .save("/tmp/chatty-compact-timestamped-notice.png")
-            .expect("save compact timestamped notice");
-    }
-
-    #[test]
-    fn visual_world_editor() {
-        for (name, width, height) in [("desktop", 1440.0, 900.0), ("compact", 430.0, 760.0)] {
-            let mut harness = egui_kittest::Harness::builder()
-                .with_size(egui::vec2(width, height))
-                .build_eframe(|creation| {
-                    configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                    let (commands, _) = mpsc::unbounded_channel();
-                    let (_, events) = std::sync::mpsc::channel();
-                    let mut app = ChattyApp::new(commands, events);
-                    app.load_inspection_demo();
-                    app.worlds_open = true;
-                    app.world_import_pending = true;
-                    app.world_import_started = Some(Instant::now());
-                    app.world_entry_search = "gate".into();
-                    app.world_draft = World {
-                        id: "realm".into(),
-                        name: "The moonlit realm".into(),
-                        character_ids: vec![app.characters[0].id.clone()],
-                        entries: vec![
-                            WorldFact {
-                                title: "The two moons".into(),
-                                content:
-                                    "Everyone knows the silver moon marks the changing seasons."
-                                        .into(),
-                                common_knowledge: true,
-                                enabled: true,
-                                ..Default::default()
-                            },
-                            WorldFact {
-                                title: "Old gate".into(),
-                                content: "The northern gate closes at dusk.".into(),
-                                keywords: vec!["gate".into(), "north".into()],
-                                enabled: true,
-                                ..Default::default()
-                            },
-                        ],
-                    };
-                    app
-                });
-            harness.run_ok();
-            harness
-                .render()
-                .expect("render world editor")
-                .save(format!("/tmp/chatty-world-{name}.png"))
-                .expect("save world editor");
-            harness
-                .get_by_role_and_label(
-                    egui::accesskit::Role::TextInput,
-                    "Keywords (comma separated, case insensitive)",
-                )
-                .scroll_to_me();
-            harness.run_ok();
-            harness
-                .render()
-                .expect("render scrolled world editor")
-                .save(format!("/tmp/chatty-world-{name}-scrolled.png"))
-                .expect("save scrolled editor");
-        }
-    }
-
-    #[test]
-    fn visual_compact_character_popup() {
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(430.0, 760.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.draft = DraftCharacter::from(&app.characters[0]);
-                let template = app.characters[0].clone();
-                for index in 1..24 {
-                    let mut character = template.clone();
-                    character.id = format!("character-{index}");
-                    character.name = format!("Character {index}");
-                    app.characters.push(character);
-                }
-                app.draft_character_open = true;
-                app
-            });
-        harness.run_ok();
-        let age = harness
-            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
-            .rect();
-        let gender = harness
-            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Gender")
-            .rect();
-        assert!(age.bottom() < gender.top());
-        assert!((age.width() - gender.width()).abs() <= 1.0);
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
-            .scroll_to_me();
-        harness.run_ok();
-        harness
-            .render()
-            .expect("render compact character popup")
-            .save("/tmp/chatty-restored-compact-characters.png")
-            .expect("save compact character popup");
-        harness.get_by_label("Default / icon").scroll_to_me();
-        harness.run_ok();
-        harness
-            .render()
-            .expect("render compact character images")
-            .save("/tmp/chatty-restored-compact-character-images.png")
-            .expect("save compact character images");
-    }
-
-    #[test]
-    fn visual_character_world_links_desktop_and_compact() {
-        for (name, size) in [
-            ("desktop", egui::vec2(1440.0, 900.0)),
-            ("compact", egui::vec2(430.0, 760.0)),
-        ] {
-            let mut harness = egui_kittest::Harness::builder()
-                .with_size(size)
-                .build_eframe(|creation| {
-                    configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                    let (commands, _) = mpsc::unbounded_channel();
-                    let (_, events) = std::sync::mpsc::channel();
-                    let mut app = ChattyApp::new(commands, events);
-                    app.load_inspection_demo();
-                    app.worlds = vec![World {
-                        id: "moon-realm".into(),
-                        name: "Moon realm".into(),
-                        character_ids: vec![app.characters[0].id.clone()],
-                        entries: vec![],
-                    }];
-                    app.draft = DraftCharacter::from(&app.characters[0]);
-                    app.draft_world_ids.insert("moon-realm".into());
-                    app.draft_character_open = true;
-                    app
-                });
-            harness.run_ok();
-            harness.get_by_label("Moon realm").scroll_to_me();
-            harness.run_ok();
-            harness
-                .render()
-                .expect("render character world links")
-                .save(format!("/tmp/chatty-character-world-links-{name}.png"))
-                .expect("save character world links");
-        }
-    }
-
-    #[test]
-    fn character_age_is_a_typed_numeric_spinner_backed_by_a_string() {
-        let mut harness =
-            egui_kittest::Harness::new_ui_state(ChattyApp::age_field, "29".to_owned());
-
-        let age = harness.get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age");
-        age.focus();
-        harness.run_ok();
-        harness.key_press(egui::Key::ArrowUp);
-        harness.run_ok();
-        assert_eq!(harness.state(), "30");
-
-        let age = harness.get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age");
-        age.focus();
-        harness.run_ok();
-        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
-            .type_text("42");
-        harness.run_ok();
-        assert_eq!(harness.state(), "42");
-    }
-
-    #[test]
-    fn visual_desktop_character_popup() {
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(1440.0, 900.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.draft = DraftCharacter::from(&app.characters[0]);
-                let template = app.characters[0].clone();
-                for index in 1..24 {
-                    let mut character = template.clone();
-                    character.id = format!("character-{index}");
-                    character.name = format!("Character {index}");
-                    app.characters.push(character);
-                }
-                app.draft_character_open = true;
-                app
-            });
-        harness.run_ok();
-        let age = harness
-            .get_by_role_and_label(egui::accesskit::Role::SpinButton, "Age")
-            .rect();
-        let gender = harness
-            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Gender")
-            .rect();
-        let race = harness
-            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Race")
-            .rect();
-        assert!((age.width() - gender.width()).abs() <= 1.0);
-        assert!((gender.width() - race.width()).abs() <= 1.0);
-        assert!(
-            (age.center().y - gender.center().y).abs() <= 1.0,
-            "age {age:?}, gender {gender:?}"
-        );
-        assert!((gender.center().y - race.center().y).abs() <= 1.0);
-        harness
-            .render()
-            .expect("render desktop character popup")
-            .save("/tmp/chatty-restored-desktop-characters.png")
-            .expect("save desktop character popup");
-        harness.get_by_label("Default / icon").scroll_to_me();
-        harness.run_ok();
-        harness
-            .render()
-            .expect("render desktop character images")
-            .save("/tmp/chatty-restored-desktop-character-images.png")
-            .expect("save desktop character images");
-    }
-
-    #[test]
-    fn public_character_is_read_only_for_non_owner() {
-        let mut harness = public_character_harness(egui::vec2(1440.0, 900.0));
-
-        harness.run_ok();
-        harness.get_by_label("View character");
-        harness.get_by_label("Public character · Only the owner can edit it.");
-        assert!(
-            harness
-                .query_by_role_and_label(egui::accesskit::Role::Button, "Save")
-                .is_none()
-        );
-        let fields: Vec<_> = harness
-            .get_all_by_role(egui::accesskit::Role::TextInput)
-            .collect();
-        assert!(!fields.is_empty());
-        assert!(
-            fields
-                .iter()
-                .all(|field| field.accesskit_node().is_disabled())
-        );
-        harness
-            .render()
-            .expect("render desktop public character")
-            .save("/tmp/chatty-public-character-desktop.png")
-            .expect("save desktop public character");
-
-        public_character_harness(egui::vec2(430.0, 760.0))
-            .render()
-            .expect("render compact public character")
-            .save("/tmp/chatty-public-character-compact.png")
-            .expect("save compact public character");
-    }
-
-    #[test]
-    fn visual_admin_monitoring() {
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(1440.0, 900.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.screen = Screen::Admin;
-                app
-            });
-        harness
-            .render()
-            .expect("render admin monitoring UI")
-            .save("/tmp/chatty-restored-admin.png")
-            .expect("save admin UI");
-    }
-
-    #[test]
-    fn visual_compact_admin_monitoring() {
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(430.0, 760.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.screen = Screen::Admin;
-                app
-            });
-        harness
-            .render()
-            .expect("render compact admin monitoring UI")
-            .save("/tmp/chatty-admin-broker-compact.png")
-            .expect("save compact admin UI");
-    }
-
-    fn render_settings(
-        size: egui::Vec2,
-        light_mode: bool,
-        glass_mode: bool,
-        transparency: u8,
-        path: &str,
-    ) {
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(move |creation| {
-                configure_style_with_surface(
-                    &creation.egui_ctx,
-                    light_mode,
-                    glass_mode,
-                    transparency,
-                );
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.light_mode = light_mode;
-                app.glass_mode = glass_mode;
-                app.transparency = transparency;
-                app.screen = Screen::Settings;
-                app
-            });
-        harness
-            .render()
-            .expect("render settings UI")
-            .save(path)
-            .expect("save settings UI");
-    }
-
-    #[test]
-    fn visual_settings_desktop_dark() {
-        render_settings(
-            egui::vec2(1440.0, 900.0),
-            false,
-            false,
-            20,
-            "/tmp/chatty-settings-desktop-dark.png",
-        );
-    }
-
-    #[test]
-    fn visual_settings_compact_light() {
-        render_settings(
-            egui::vec2(430.0, 760.0),
-            true,
-            false,
-            20,
-            "/tmp/chatty-settings-compact-light.png",
-        );
-    }
-
-    #[test]
-    fn visual_settings_glass_dark_desktop() {
-        render_settings(
-            egui::vec2(1440.0, 900.0),
-            false,
-            true,
-            80,
-            "/tmp/chatty-settings-glass-dark-desktop.png",
-        );
-    }
-
-    #[test]
-    fn visual_settings_glass_light_compact() {
-        render_settings(
-            egui::vec2(430.0, 760.0),
-            true,
-            true,
-            80,
-            "/tmp/chatty-settings-glass-light-compact.png",
-        );
-    }
-
-    #[test]
-    fn visual_settings_short_viewport() {
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(320.0, 480.0))
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, true, 80);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.glass_mode = true;
-                app.transparency = 80;
-                app.screen = Screen::Settings;
-                app
-            });
-        let appearance = harness.get_by_label("Appearance");
-        appearance.scroll_down();
-        appearance.scroll_down();
-        harness.run_ok();
-        let total = harness.get_by_label("Total").rect();
-        assert!(total.top() >= 0.0 && total.bottom() <= 480.0);
-        harness
-            .render()
-            .expect("render scrolled settings UI at short viewport")
-            .save("/tmp/chatty-settings-short-scroll.png")
-            .expect("save scrolled settings UI at short viewport");
-    }
-
-    #[test]
-    fn visual_glass_surfaces_at_maximum_transparency() {
-        for (size, light_mode, path) in [
-            (
-                egui::vec2(1440.0, 900.0),
-                false,
-                "/tmp/chatty-glass-80-dark-desktop.png",
-            ),
-            (
-                egui::vec2(430.0, 760.0),
-                true,
-                "/tmp/chatty-glass-80-light-compact.png",
-            ),
-        ] {
-            let mut harness = egui_kittest::Harness::builder()
-                .with_size(size)
-                .build_eframe(move |creation| {
-                    configure_style_with_surface(&creation.egui_ctx, light_mode, true, 80);
-                    let (commands, _) = mpsc::unbounded_channel();
-                    let (_, events) = std::sync::mpsc::channel();
-                    let mut app = ChattyApp::new(commands, events);
-                    app.load_inspection_demo();
-                    app.light_mode = light_mode;
-                    app.glass_mode = true;
-                    app.transparency = 80;
-                    app
-                });
-            harness
-                .render()
-                .expect("render maximum-transparency glass UI")
-                .save(path)
-                .expect("save maximum-transparency glass UI");
-        }
-    }
-
-    #[test]
-    fn visual_admin_users_desktop_and_compact() {
-        for (size, path) in [
-            (
-                egui::vec2(1440.0, 900.0),
-                "/tmp/chatty-admin-users-desktop.png",
-            ),
-            (
-                egui::vec2(430.0, 760.0),
-                "/tmp/chatty-admin-users-compact.png",
-            ),
-        ] {
-            let mut harness = egui_kittest::Harness::builder()
-                .with_size(size)
-                .build_eframe(|creation| {
-                    configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                    let (commands, _) = mpsc::unbounded_channel();
-                    let (_, events) = std::sync::mpsc::channel();
-                    let mut app = ChattyApp::new(commands, events);
-                    app.load_inspection_demo();
-                    app.screen = Screen::Admin;
-                    app.admin_tab = 1;
-                    app
-                });
-            harness
-                .render()
-                .expect("render admin users UI")
-                .save(path)
-                .expect("save admin users UI");
-        }
-    }
-
-    #[test]
-    fn visual_admin_logs_desktop_and_compact() {
-        for (size, light_mode, path) in [
-            (
-                egui::vec2(1440.0, 900.0),
-                false,
-                "/tmp/chatty-admin-logs-desktop.png",
-            ),
-            (
-                egui::vec2(430.0, 760.0),
-                false,
-                "/tmp/chatty-admin-logs-compact.png",
-            ),
-            (
-                egui::vec2(375.0, 667.0),
-                true,
-                "/tmp/chatty-admin-logs-small-light.png",
-            ),
-            (
-                egui::vec2(760.0, 430.0),
-                false,
-                "/tmp/chatty-admin-logs-landscape.png",
-            ),
-        ] {
-            let mut harness = egui_kittest::Harness::builder()
-                .with_size(size)
-                .build_eframe(move |creation| {
-                    configure_style_with_surface(&creation.egui_ctx, light_mode, false, 20);
-                    let (commands, _) = mpsc::unbounded_channel();
-                    let (_, events) = std::sync::mpsc::channel();
-                    let mut app = ChattyApp::new(commands, events);
-                    app.load_inspection_demo();
-                    app.light_mode = light_mode;
-                    app.screen = Screen::Admin;
-                    app.admin_tab = 3;
-                    app
-                });
-            harness
-                .render()
-                .expect("render admin logs UI")
-                .save(path)
-                .expect("save admin logs UI");
-        }
-    }
-
-    fn render_ollama_admin(size: egui::Vec2, path: &str) {
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(size)
-            .build_eframe(|creation| {
-                configure_style_with_surface(&creation.egui_ctx, false, false, 20);
-                let (commands, _) = mpsc::unbounded_channel();
-                let (_, events) = std::sync::mpsc::channel();
-                let mut app = ChattyApp::new(commands, events);
-                app.load_inspection_demo();
-                app.screen = Screen::Admin;
-                app.admin_tab = 2;
-                app
-            });
-        harness
-            .render()
-            .expect("render Ollama administration UI")
-            .save(path)
-            .expect("save Ollama administration UI");
-    }
-
-    #[test]
-    fn visual_desktop_ollama_admin() {
-        render_ollama_admin(
-            egui::vec2(1440.0, 900.0),
-            "/tmp/chatty-admin-ollama-desktop.png",
-        );
-    }
-
-    #[test]
-    fn visual_compact_ollama_admin() {
-        render_ollama_admin(
-            egui::vec2(430.0, 760.0),
-            "/tmp/chatty-admin-ollama-compact.png",
-        );
-    }
-
-    #[test]
-    fn admin_monitor_refreshes_only_while_open() {
-        let (commands, mut command_rx) = mpsc::unbounded_channel();
-        let (_, events) = std::sync::mpsc::channel();
-        let mut app = ChattyApp::new(commands, events);
-        app.token = "session".into();
-        app.screen = Screen::Admin;
-        app.admin_tab = 0;
-        app.last_monitor_refresh = Some(Instant::now() - Duration::from_secs(3));
-        app.refresh_admin_monitor_if_due(&egui::Context::default());
-        assert!(matches!(
-            command_rx.try_recv(),
-            Ok(Command::Request(request))
-                if matches!(*request, Request::AdminGetBrokerMonitor { .. })
-        ));
-
+        app.connected = true;
+        app.token = "test-token".into();
         app.screen = Screen::Chat;
-        app.last_monitor_refresh = Some(Instant::now() - Duration::from_secs(3));
-        app.refresh_admin_monitor_if_due(&egui::Context::default());
-        assert!(command_rx.try_recv().is_err());
-    }
-}
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
 
-impl Drop for ChattyApp {
-    fn drop(&mut self) {
-        let _ = self.commands.send(Command::Stop);
-    }
-}
-impl eframe::App for ChattyApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.drain(&ctx);
-        self.refresh_admin_monitor_if_due(&ctx);
-        if self.glass_mode {
-            paint_glass_background(ui, self.light_mode);
-        }
-        let edge_padding = if ui.available_width() < 760.0 { 8 } else { 12 };
-        egui::Frame::new()
-            .fill(ui.visuals().panel_fill)
-            .inner_margin(edge_padding)
-            .show(ui, |ui| {
-                if !self.connected {
-                    self.render_server_connection(ui)
-                } else if self.restoring_session {
-                    self.render_session_restore(ui)
-                } else if self.token.is_empty() {
-                    self.render_login(ui)
-                } else {
-                    self.render_shell(ui)
-                }
-            });
-        let modal_open = self.worlds_open
-            || self.memory_dialog_open
-            || self.draft_character_open
-            || self.new_chat_open
-            || matches!(self.screen, Screen::Admin | Screen::Settings)
-            || self.pending_certificate.is_some()
-            || self.error.is_some();
-        if self.glass_mode && modal_open {
-            paint_glass_modal_scrim(ui, self.light_mode);
-        }
-        if !self.glass_mode && self.pending_certificate.is_some() {
-            paint_glass_modal_scrim(ui, self.light_mode);
-        }
-        if self.worlds_open {
-            self.render_world_dialog(&ctx);
-        }
-        if self.memory_dialog_open {
-            self.render_memory_dialog(&ctx);
-        }
-        if self.draft_character_open {
-            self.render_character_dialog(&ctx)
-        }
-        if self.new_chat_open {
-            self.render_new_chat_dialog(&ctx)
-        }
-        if self.screen == Screen::Admin {
-            self.render_admin_dialog(&ctx)
-        }
-        if self.screen == Screen::Settings {
-            self.render_settings_dialog(&ctx)
-        }
-        if let Some(certificate) = self.pending_certificate.clone() {
-            let dialog_width = (ctx.content_rect().width() - 32.0).clamp(280.0, 460.0);
-            let mut trust_decision = None;
-            egui::Window::new("Trust this Chatty server?")
-                .frame(modal_frame(&ctx, self.light_mode, self.glass_mode))
-                .collapsible(false)
-                .resizable(false)
-                .default_width(dialog_width)
-                .max_width(dialog_width)
-                .constrain(true)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(&ctx, |ui| {
-                    ui.label(format!(
-                        "{} does not have a certificate trusted by the public internet.",
-                        certificate.target.server_name
-                    ));
-                    ui.add_space(8.0);
-                    let fingerprint_subject = if certificate.is_ca() {
-                        "private CA"
-                    } else {
-                        "server certificate"
-                    };
-                    ui.label(format!(
-                        "Confirm this {fingerprint_subject} SHA-256 fingerprint with the server administrator before continuing:"
-                    ));
-                    ui.add_space(6.0);
-                    let fingerprint = certificate
-                        .fingerprint
-                        .split(':')
-                        .collect::<Vec<_>>()
-                        .chunks(8)
-                        .map(|group| group.join(":"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(fingerprint).monospace().small(),
-                        )
-                        .selectable(true)
-                        .wrap(),
-                    );
-                    ui.add_space(8.0);
-                    let remembered_material = if certificate.is_ca() {
-                        "this certificate authority and reject certificates it did not issue"
-                    } else {
-                        "this exact certificate and reject unexpected changes"
-                    };
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Chatty will remember {remembered_material}."
-                        ))
-                        .weak(),
-                    );
-                    ui.add_space(14.0);
-                    let compact = ui.available_width() < 360.0;
-                    let mut buttons = |ui: &mut egui::Ui| {
-                        let button_width = if compact {
-                            ui.available_width()
-                        } else {
-                            170.0
-                        };
-                        if ui
-                            .add_sized(
-                                [button_width, 42.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Trust and connect")
-                                        .color(COLOR_ON_PRIMARY)
-                                        .strong(),
-                                )
-                                .fill(COLOR_PRIMARY_STRONG),
-                            )
-                            .clicked()
-                        {
-                            trust_decision = Some(true);
-                        }
-                        if ui
-                            .add_sized([button_width, 42.0], egui::Button::new("Cancel"))
-                            .clicked()
-                        {
-                            trust_decision = Some(false);
-                        }
-                    };
-                    if compact {
-                        ui.vertical(&mut buttons);
-                    } else {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_sized([150.0, 42.0], egui::Button::new("Cancel"))
-                                .clicked()
-                            {
-                                trust_decision = Some(false);
-                            }
-                            if ui
-                                .add_sized(
-                                    [190.0, 42.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("Trust and connect")
-                                            .color(COLOR_ON_PRIMARY)
-                                            .strong(),
-                                    )
-                                    .fill(COLOR_PRIMARY_STRONG),
-                                )
-                                .clicked()
-                            {
-                                trust_decision = Some(true);
-                            }
-                        });
-                    }
-                });
-            if let Some(trust) = trust_decision {
-                self.pending_certificate = None;
-                self.connecting = trust;
-                if trust {
-                    self.status = "Saving trusted certificate…".into();
-                    let _ = self.commands.send(Command::TrustCertificate(certificate));
-                } else {
-                    self.status = "Not connected".into();
-                    let _ = self.commands.send(Command::RejectCertificate);
-                }
-            }
-        }
-        if let Some(error) = self.error.clone() {
-            egui::Window::new("Notice")
-                .frame(modal_frame(&ctx, self.light_mode, self.glass_mode))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 28.0])
-                .show(&ctx, |ui| {
-                    ui.set_max_width(360.0);
-                    ui.label(egui::RichText::new(error.timestamp).small().weak());
-                    ui.label(error.message);
-                    if ui.button("Close").clicked() {
-                        self.error = None;
-                    }
-                });
-        }
-    }
-}
+        // Modals
+        app.new_chat_open = true;
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
+        app.new_chat_open = false;
 
-impl ChattyApp {
-    fn render_server_connection(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            let top = (ui.available_height() * 0.18).clamp(36.0, 150.0);
-            ui.add_space(top);
-            ui.heading(egui::RichText::new("Connect to Chatty").size(30.0));
-            ui.label("Enter the IP address or domain of your Chatty server.");
-            ui.add_space(22.0);
-            ui.scope(|ui| {
-                ui.set_max_width(420.0);
-                ui.label("Server address");
-                let response = ui.add_enabled(
-                    !self.connecting,
-                    egui::TextEdit::singleline(&mut self.server_address)
-                        .hint_text("192.168.0.98 or chatty.example.com")
-                        .desired_width(ui.available_width()),
-                );
-                let submit =
-                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                ui.add_space(10.0);
-                let clicked = ui
-                    .add_enabled(
-                        !self.connecting,
-                        egui::Button::new(if self.connecting {
-                            "Trying connection…"
-                        } else {
-                            "Try connection"
-                        })
-                        .min_size(egui::vec2(ui.available_width(), 42.0))
-                        .fill(egui::Color32::from_rgb(37, 99, 235)),
-                    )
-                    .clicked();
-                if (clicked || submit) && !self.connecting {
-                    match connection_target(&self.server_address) {
-                        Some(target) => {
-                            self.server_address = target.server_name.clone();
-                            self.connecting = true;
-                            self.status = format!("Connecting to {}: 7443…", self.server_address);
-                            self.error = None;
-                            let _ = self.commands.send(Command::Connect(target));
-                        }
-                        None => self.set_error("Enter a valid IP address or domain."),
-                    }
-                }
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(&self.status).small().weak());
-            });
-        });
-    }
+        app.draft_character_open = true;
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
+        app.draft_character_open = false;
 
-    fn render_session_restore(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            let top = (ui.available_height() * 0.28).clamp(72.0, 220.0);
-            ui.add_space(top);
-            ui.spinner();
-            ui.add_space(14.0);
-            ui.heading(egui::RichText::new("Signing you in").size(30.0));
-            ui.add_space(6.0);
-            ui.label(&self.status);
-        });
-    }
+        app.worlds_open = true;
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
+        app.worlds_open = false;
 
-    fn render_login(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            let top = (ui.available_height() * 0.18).clamp(36.0, 150.0);
-            ui.add_space(top);
-            ui.heading(egui::RichText::new("Welcome back").size(30.0));
-            ui.label(&self.status);
-            ui.add_space(22.0);
-            ui.scope(|ui| {
-                ui.set_max_width(420.0);
-                ui.label("Username");
-                ui.add_sized(
-                    [ui.available_width(), 42.0],
-                    egui::TextEdit::singleline(&mut self.username),
-                );
-                ui.label("Password");
-                let response = ui.add_sized(
-                    [ui.available_width(), 42.0],
-                    egui::TextEdit::singleline(&mut self.password).password(true),
-                );
-                let submit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.add_space(10.0);
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 42.0],
-                        egui::Button::new(egui::RichText::new("Sign in").strong())
-                            .fill(egui::Color32::from_rgb(37, 99, 235)),
-                    )
-                    .clicked()
-                    || submit
-                {
-                    self.send(Request::Login {
-                        username: self.username.clone(),
-                        password: self.password.clone(),
-                    });
-                    self.status = "Signing in…".into();
-                }
-                if self.registration_enabled
-                    && ui
-                        .add_sized([ui.available_width(), 38.0], egui::Button::new("Register"))
-                        .clicked()
-                {
-                    self.send(Request::Register {
-                        username: self.username.clone(),
-                        password: self.password.clone(),
-                    });
-                    self.status = "Creating account…".into();
-                }
-                ui.add_space(8.0);
-                if ui.button("Change server").clicked() {
-                    let _ = self.commands.send(Command::Disconnect);
-                    self.connected = false;
-                    self.restoring_session = false;
-                    self.status = "Enter the server IP to begin.".into();
-                }
-            });
-        });
+        app.memory_dialog_open = true;
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
+        app.memory_dialog_open = false;
+
+        app.screen = Screen::Admin;
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
+
+        app.screen = Screen::Settings;
+        let _ = app.view_at_size(Size::new(360.0, 300.0));
     }
-    fn render_shell(&mut self, ui: &mut egui::Ui) {
-        let compact = ui.available_width() < 760.0;
-        if compact {
-            if self.sidebar_visible {
-                egui::Frame::new()
-                    .fill(ui.visuals().window_fill)
-                    .corner_radius(12.0)
-                    .inner_margin(12.0)
-                    .show(ui, |ui| self.render_sidebar(ui, true));
-            } else {
-                self.render_chat(ui);
-            }
-            return;
-        }
-        if !self.sidebar_visible {
-            self.render_chat(ui);
-            return;
-        }
-        let sidebar = (ui.available_width() * 0.24).clamp(248.0, 320.0);
-        let height = ui.available_height();
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(sidebar, height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    egui::Frame::new()
-                        .fill(ui.visuals().window_fill)
-                        .corner_radius(12.0)
-                        .inner_margin(12.0)
-                        .show(ui, |ui| self.render_sidebar(ui, compact));
-                },
-            );
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| self.render_chat(ui),
-            );
+    #[test]
+    fn model_request_errors_recover_only_the_matching_operation() {
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.admin.models.busy = true;
+        app.admin.models.request_id = Some(42);
+        let payload = encode(&WireError {
+            code: ErrorCode::BackendUnavailable,
+            message: "Download failed: disk full".into(),
+            retryable: true,
+        })
+        .unwrap();
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Error,
+            request_id: 41,
+            payload: payload.clone(),
         });
-    }
-    fn render_sidebar(&mut self, ui: &mut egui::Ui, compact: bool) {
-        ui.horizontal(|ui| {
-            ui.heading(egui::RichText::new("Chatty").size(22.0).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if Self::sidebar_toggle_button(ui, true).clicked() {
-                    self.sidebar_visible = false;
-                }
-            });
+        assert!(app.admin.models.busy);
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Error,
+            request_id: 42,
+            payload,
         });
-        ui.add_space(12.0);
-        if ui
-            .add_sized(
-                [ui.available_width(), 42.0],
-                egui::Button::new(egui::RichText::new("+  New chat").strong())
-                    .fill(COLOR_PRIMARY_STRONG)
-                    .corner_radius(10.0),
-            )
-            .clicked()
-        {
-            self.new_chat_open = true;
-        }
-        ui.add_space(14.0);
-        ui.label(egui::RichText::new("RECENT CHATS").size(11.0).weak());
-        ui.add_space(2.0);
-        let mut remaining = ui.available_rect_before_wrap();
-        remaining.max.y = (remaining.max.y - 12.0).max(remaining.min.y);
-        let footer_height = if self.role == Some(Role::Admin) {
-            136.0_f32
-        } else {
-            90.0_f32
-        }
-        .min(remaining.height());
-        let footer_rect = egui::Rect::from_min_max(
-            egui::pos2(remaining.left(), remaining.bottom() - footer_height),
-            remaining.max,
+        assert!(!app.admin.models.busy);
+        assert_eq!(
+            app.admin.models.notice.as_deref(),
+            Some("Download failed: disk full")
         );
-        let list_rect = egui::Rect::from_min_max(
-            remaining.min,
-            egui::pos2(
-                remaining.right(),
-                (footer_rect.top() - 4.0).max(remaining.top()),
-            ),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(footer_rect), |ui| {
-            ui.add_space(4.0);
-            ui.separator();
-            ui.horizontal(|ui| {
-                let status = ui.label(egui::RichText::new(&self.status).size(12.0).weak());
-                if let Some(detail) = &self.status_tooltip {
-                    status.on_hover_text(detail);
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if Self::footer_icon_button(ui, FooterIcon::Characters, "Manage characters")
-                    .clicked()
-                {
-                    self.screen = Screen::Characters;
-                    self.draft_character_open = true;
-                }
-                if Self::footer_icon_button(ui, FooterIcon::World, "Manage world lore").clicked() {
-                    self.worlds_open = true;
-                }
-                if Self::footer_icon_button(ui, FooterIcon::Memory, "Manage character memories")
-                    .clicked()
-                {
-                    self.open_memory_manager(None, None);
-                }
-                if self.role == Some(Role::Admin)
-                    && Self::footer_icon_button(ui, FooterIcon::Admin, "Open admin portal")
-                        .clicked()
-                {
-                    self.screen = Screen::Admin;
-                    self.admin_tab = 0;
-                    self.load_admin_tab();
-                }
-                if Self::footer_icon_button(ui, FooterIcon::Settings, "Open settings").clicked() {
-                    self.screen = Screen::Settings;
-                    self.send(Request::GetAccountUsage {
-                        session_token: self.token.clone(),
-                    });
-                }
-                if Self::footer_icon_button(ui, FooterIcon::SignOut, "Sign out").clicked() {
-                    self.send(Request::Logout {
-                        session_token: self.token.clone(),
-                    });
-                    let _ = self.commands.send(Command::ClearSession);
-                    self.worlds.clear();
-                    self.world_draft = World::default();
-                    self.worlds_open = false;
-                    self.memories.clear();
-                    self.memory_dialog_open = false;
-                    self.admin_log = BrokerLog::default();
-                    self.admin_log_search.clear();
-                    self.token.clear();
-                    self.role = None;
-                }
-            });
-        });
-        ui.scope_builder(egui::UiBuilder::new().max_rect(list_rect), |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("conversation-list")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for c in self.conversations.clone() {
-                        ui.push_id(&c.id, |ui| {
-                            let selected = self.selected_conversation.as_deref() == Some(&c.id);
-                            let (row_rect, _) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), 44.0),
-                                egui::Sense::hover(),
-                            );
-                            let tile_rect = row_rect.shrink2(egui::vec2(0.0, 2.0));
-                            let tile =
-                                ui.put(tile_rect, egui::Button::selectable(selected, &c.title));
-                            if tile.clicked() {
-                                self.open_conversation(&c.id);
-                                if compact {
-                                    self.sidebar_visible = false;
-                                }
-                            }
-                            tile.context_menu(|ui| {
-                                if ui.button("View memories").clicked() {
-                                    self.open_memory_manager(None, Some(c.id.clone()));
-                                    ui.close();
-                                }
-                            });
-                            let hovered = ui
-                                .input(|input| input.pointer.hover_pos())
-                                .is_some_and(|pointer| tile_rect.contains(pointer));
-                            let delete_rect = egui::Rect::from_min_size(
-                                egui::pos2(tile_rect.right() - 28.0, tile_rect.top() + 4.0),
-                                egui::vec2(24.0, 28.0),
-                            );
-                            if hovered
-                                && ui
-                                    .put(delete_rect, egui::Button::new("×").frame(false))
-                                    .on_hover_text("Delete")
-                                    .clicked()
-                            {
-                                self.send(Request::DeleteEntity {
-                                    session_token: self.token.clone(),
-                                    kind: EntityKind::Conversation,
-                                    entity_id: c.id.clone(),
-                                });
-                            }
-                        });
-                    }
-                });
-        });
+        app.admin.models.busy = true;
+        app.handle_event(Event::Status("Offline: connection lost".into()));
+        assert!(!app.admin.models.busy);
     }
-
-    fn render_settings_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.screen == Screen::Settings;
-        let max_height = Self::popup_max_height(ctx);
-        let dialog_width = (ctx.content_rect().width() - 24.0).clamp(280.0, 420.0);
-        egui::Window::new("Settings")
-            .frame(modal_frame(ctx, self.light_mode, self.glass_mode))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_size([dialog_width, max_height.min(560.0)])
-            .max_width(dialog_width)
-            .max_height(max_height)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("settings-popup-content")
-                    .max_height((max_height - 32.0).max(120.0))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.heading("Appearance");
-                        ui.label("Choose how Chatty looks on this device.");
-                        ui.add_space(6.0);
-                        ui.weak("Theme");
-                        let previous_light_mode = self.light_mode;
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_sized(
-                                    [96.0, 40.0],
-                                    egui::Button::selectable(!self.light_mode, "Dark"),
-                                )
-                                .clicked()
-                            {
-                                self.light_mode = false;
-                            }
-                            if ui
-                                .add_sized(
-                                    [96.0, 40.0],
-                                    egui::Button::selectable(self.light_mode, "Light"),
-                                )
-                                .clicked()
-                            {
-                                self.light_mode = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                        ui.weak("Surface");
-                        let previous_glass_mode = self.glass_mode;
-                        let previous_transparency = self.transparency;
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_sized(
-                                    [96.0, 40.0],
-                                    egui::Button::selectable(!self.glass_mode, "Solid"),
-                                )
-                                .clicked()
-                            {
-                                self.glass_mode = false;
-                            }
-                            if ui
-                                .add_sized(
-                                    [96.0, 40.0],
-                                    egui::Button::selectable(self.glass_mode, "Glass"),
-                                )
-                                .clicked()
-                            {
-                                self.glass_mode = true;
-                            }
-                        });
-                        ui.add_space(8.0);
-                        ui.add_enabled_ui(self.glass_mode, |ui| {
-                            ui.add_sized(
-                                [ui.available_width().min(320.0), 40.0],
-                                egui::Slider::new(&mut self.transparency, 0..=80)
-                                    .text("Transparency")
-                                    .suffix("%"),
-                            );
-                            ui.weak("0% is opaque · 80% is most transparent");
-                        });
-                        if previous_light_mode != self.light_mode
-                            || previous_glass_mode != self.glass_mode
-                            || previous_transparency != self.transparency
-                        {
-                            configure_style_with_surface(
-                                ctx,
-                                self.light_mode,
-                                self.glass_mode,
-                                self.transparency,
-                            );
-                            if let Some(path) = &self.preferences_path {
-                                network::save_preferences(
-                                    path,
-                                    self.light_mode,
-                                    self.glass_mode,
-                                    self.transparency,
-                                    self.tts_auto_speak,
-                                );
-                            }
-                            ctx.request_repaint();
-                        }
-                        ui.add_space(18.0);
-                        ui.separator();
-                        ui.heading("Token usage");
-                        egui::Grid::new("account-token-usage")
-                            .num_columns(2)
-                            .spacing([24.0, 8.0])
-                            .show(ui, |ui| {
-                                ui.label("Prompt tokens");
-                                ui.strong(format_token_count(self.account_usage.prompt_tokens));
-                                ui.end_row();
-                                ui.label("Completion tokens");
-                                ui.strong(format_token_count(self.account_usage.completion_tokens));
-                                ui.end_row();
-                                ui.label("Total");
-                                ui.strong(format_token_count(self.account_usage.total()));
-                                ui.end_row();
-                            });
-                        ui.add_space(18.0);
-                        ui.separator();
-                        ui.heading("Speech");
-                        ui.label("Read AI character replies with a private neural model running on this device.");
-                        let previous_auto_speak = self.tts_auto_speak;
-                        ui.add_enabled_ui(self.tts.is_available(), |ui| {
-                            ui.checkbox(&mut self.tts_auto_speak, "Automatically read new replies");
-                        });
-                        match self.tts.engine_name() {
-                            Some(engine) => ui.weak(format!("Local engine: {engine}")),
-                            None => ui.weak("Local speech is unavailable."),
-                        };
-                        ui.weak("The 25 MB voice model downloads once, then works fully offline.");
-                        if self.tts.is_speaking() && ui.button("Stop speaking").clicked() {
-                            self.tts.stop();
-                        }
-                        if previous_auto_speak != self.tts_auto_speak
-                            && let Some(path) = &self.preferences_path
-                        {
-                            network::save_preferences(
-                                path,
-                                self.light_mode,
-                                self.glass_mode,
-                                self.transparency,
-                                self.tts_auto_speak,
-                            );
-                        }
-                    });
-            });
-        if !open {
-            self.screen = Screen::Chat;
-        }
-    }
-}
-
-fn format_token_count(value: u64) -> String {
-    let digits = value.to_string();
-    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            formatted.push(',');
-        }
-        formatted.push(character);
-    }
-    formatted
 }

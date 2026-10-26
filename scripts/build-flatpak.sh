@@ -129,6 +129,8 @@ flatpak build-finish \
     --command=chatty-gui \
     --share=network \
     --socket=wayland \
+    --socket=pulseaudio \
+    --env=HF_HOME=/var/cache/huggingface \
     --device=dri \
     "$app_dir"
 

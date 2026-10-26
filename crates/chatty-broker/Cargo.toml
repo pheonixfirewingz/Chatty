@@ -9,11 +9,12 @@ license.workspace = true
 argon2.workspace = true
 bytes.workspace = true
 chatty-protocol = { path = "../chatty-protocol" }
+reqwest.workspace = true
+wasmi = { version = "0.46", default-features = false, features = ["std"] }
 chacha20poly1305.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 image.workspace = true
-reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -22,3 +23,6 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+wat = "1"

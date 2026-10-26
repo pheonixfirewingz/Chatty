@@ -84,10 +84,10 @@ if [[ ! -f "$certificate" || ! -f "$private_key" || ! -f "$ca_certificate" ]]; t
     (cd "$project_dir" && ./scripts/create-dev-cert.sh)
 fi
 
-if [[ ! -x "$project_dir/target/release/chatty-broker" || ! -x "$project_dir/target/release/chatty-gui" ]]; then
-    printf '%s\n' "Building Chatty release binaries…"
-    cargo build --release --workspace --manifest-path "$project_dir/Cargo.toml"
-fi
+printf '%s\n' "Cleaning Chatty build artifacts…"
+cargo clean --manifest-path "$project_dir/Cargo.toml"
+printf '%s\n' "Building Chatty release binaries…"
+cargo build --release --workspace --locked --manifest-path "$project_dir/Cargo.toml"
 
 printf 'Starting broker on %s…\n' "$listen_address"
 supervise_broker &

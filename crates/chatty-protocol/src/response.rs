@@ -14,6 +14,7 @@ pub enum GenerationStatus {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Response {
+    ModelSearchResults(Vec<crate::admin::ModelSearchResult>),
     Authenticated {
         session_token: String,
         user_id: String,

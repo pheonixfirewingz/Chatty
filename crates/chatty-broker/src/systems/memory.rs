@@ -118,7 +118,7 @@ pub(super) async fn list_memories(
     let rows = sqlx::query(
         "SELECT id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision \
          FROM memories WHERE owner_id=? AND status=0 \
-         AND (? IS NULL OR conversation_id=?) AND (? IS NULL OR character_id=?) \
+         AND (? IS NULL OR conversation_id IS NULL OR conversation_id=?) AND (? IS NULL OR character_id=?) \
          ORDER BY pinned DESC,updated_at DESC,revision DESC LIMIT 500",
     )
     .bind(owner_id)

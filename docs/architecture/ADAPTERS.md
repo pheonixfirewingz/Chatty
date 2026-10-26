@@ -1,0 +1,101 @@
+# Adapter contract
+
+The broker's internal `Adapter` interface handles model discovery, completion, streaming, model state, lifecycle actions, and catalogue searches. The interface accepts typed `ChatMessage`, `GenerationOptions`, `ChatRequest`, and `ModelAction` values. It returns provider-neutral content, finish reasons, usage, model metadata, and stream updates. It exposes no upstream HTTP response to broker systems.
+
+## Ownership
+
+- `crates/chatty-adapters/shared/api.rs`: serializable v1 contract and `register_adapter!` guest SDK. No networking or database dependencies.
+- `crates/chatty-broker/src/adapters/runtime`: module loading, Wasmi sandbox, HTTP/TLS transport, origin and method checks, timeouts, bounded response reading, and streaming record assembly.
+- `crates/chatty-adapters/`: provider plugin crates; this directory has no runtime crate or root Cargo manifest.
+- `crates/chatty-adapters/shared/openai_compatible.rs`: shared OpenAI-compatible request, response, and SSE translation, without export registration.
+- `crates/chatty-adapters/openai-compatible`: OpenAI-compatible guest entry point.
+- `crates/chatty-adapters/freetoken`: FreeToken serving API options, health state, and guest entry point; reuses the shared OpenAI translation.
+- `crates/chatty-adapters/ollama`: native chat, tags, version/running state, model pull/load/unload/delete, and NDJSON translation.
+- `crates/chatty-adapters/hugging-face`: public GGUF catalogue query and repository/file filtering.
+- `crates/chatty-broker/src/adapters.rs`: operator/configuration selection and mapping adapter results to existing broker/wire types.
+
+Authentication and authorization happen before the broker calls management operations. Plugins never receive session tokens, database handles, TLS private keys, or filesystem paths. FreeToken API keys stay in the host and are attached as sensitive bearer headers only after validation against an explicit operator-pinned origin. They are never passed to guests or other adapters; redirects remain disabled.
+
+## Loading and memory lifetime
+
+Startup indexes manifests and bundled byte locations without reading or compiling unused WASM. Only the selected inference provider has a retained compiled module. Its first operation loads it; subsequent operations share that module. Selecting a different provider or disabling inference evicts the previous module immediately. Active requests keep their own references until completion, and stale requests cannot restore an obsolete selection to the cache.
+
+Model management uses the same selected provider as inference. An unsupported operation returns an error instead of loading another provider. Hugging Face catalogue adapters are transient: load on demand, keep them only for the active search, and release them after completion, failure, or cancellation. Startup credential validation uses host-only code and does not load FreeToken.
+
+Bundled raw WASM remains embedded in the executable; unselected modules are not parsed, compiled, or instantiated. This loading policy concerns runtime module memory, rather than removing bundled artifacts from the binary. Existing plugin manifests are validated at discovery; module payload/ABI errors are reported when the module is first used.
+
+## Guest calls
+
+A plugin exports its linear `memory` and four functions:
+
+| Export | Signature | Contract |
+|---|---|---|
+| `adapter_abi_version` | `() -> u32` | Must return `1` |
+| `adapter_alloc` | `(length: u32) -> pointer: u32` | Allocate writable guest input |
+| `adapter_call` | `(pointer: u32, length: u32) -> u64` | Return output pointer in high 32 bits, output length in low 32 bits |
+| `adapter_free` | `(pointer: u32, length: u32)` | Release an allocation |
+
+Inputs are UTF-8 JSON `PluginInput` values; outputs are serialized `PluginResult` values. The SDK macro owns these exports and the memory allocation contract.
+
+`Prepare` converts an `AdapterRequest` and configured base URL into an `HttpPlan`. `Decode` converts JSON HTTP responses into a normalized result. `Stream` converts a batch of complete newline-terminated records into text, optional token counters, and a completion marker. The host retains incomplete records across network chunks and appends a final newline at EOF. A stream read can be cancelled and retried without losing buffered bytes.
+
+`StreamUpdate.finish_reason` is optional additive JSON metadata, defaulting to absent for older v1 guests. It does not change exports or existing required JSON fields, so ABI version remains 1. OpenAI-compatible decoders preserve this metadata without ending before the trailing usage event and `[DONE]`. Reasoning fields stay outside final content.
+
+Guests should keep translation stateless. A request owns its guest instance; streams keep their decoder instance until completion or cancellation. No instance state is shared between users. Unsupported operations return a descriptive error, rather than silently choosing a different provider.
+
+## Sandbox and transport limits
+
+- No WASI or other imported functions. Instantiation fails if any import exists.
+- Up to 8 MiB of WASM bytes per module; manifest up to 16 KiB; custom directory up to 64 entries.
+- Up to 64 MiB guest linear memory, one memory, one table, and 10,000 table elements per instance.
+- Up to 100 million fuel units per call, including allocations/frees; initialization also has a fuel budget.
+- Input/output JSON and an incomplete stream record are bounded to 8 MiB.
+- At most four HTTP calls for a state read; other operations issue one. Calls for a state read run concurrently and preserve result order.
+- Model discovery, state, and catalogue plans permit GET only; completions/streams permit POST only; lifecycle actions permit POST or DELETE.
+- Every URL must retain the configured origin and URL credentials. Redirects are rejected. Plugins may translate URL paths, such as removing `/v1` for native Ollama.
+- Caller timeouts cannot be lengthened by plugins. Lifecycle calls are capped at six hours; catalogue/state reads at 20 seconds. Host connection timeout is five seconds.
+- HTTP response JSON is bounded to 8 MiB per call, or 2 MiB for catalogue search. Streaming keeps bounded incomplete records without buffering the entire network response.
+- Dropping `AdapterStream` drops the upstream HTTP body. The broker retains its existing 32-unit/60-ms client batching, connection-scoped cancellation, and usage persistence.
+
+Modules run inside the broker's process through the interpreter. Resource limits contain guest execution; this is not a separate operating-system process boundary.
+
+## Implementing a plugin
+
+Create a Rust library with `crate-type = ["cdylib"]` and dependencies on `serde` and `serde_json`. Include `shared/api.rs` as an `adapter_api` module, as the bundled plugins do. For an external project, copy the versioned API module into the plugin source tree or adjust the relative path. Implement a translator and register it:
+
+```rust,ignore
+#[path = "../../shared/api.rs"]
+pub mod adapter_api;
+use adapter_api::*;
+
+fn translate(input: PluginInput) -> PluginResult {
+    match input {
+        PluginInput::Prepare {
+            base_url,
+            request: AdapterRequest::Models { timeout_ms },
+        } => Ok(PluginOutput::Plan(HttpPlan::new(
+            vec![HttpRequest::get(format!("{base_url}/models"), timeout_ms)],
+            ResponseKind::Models,
+        ))),
+        PluginInput::Decode {
+            kind: ResponseKind::Models,
+            responses,
+        } => {
+            let models = responses[0]["data"]
+                .as_array()
+                .ok_or("models response missing data")?
+                .iter()
+                .filter_map(|model| model["id"].as_str().map(str::to_owned))
+                .collect();
+            Ok(PluginOutput::Models(models))
+        }
+        _ => Err("operation unsupported by this plugin".into()),
+    }
+}
+
+register_adapter!(translate);
+```
+
+Build for `wasm32-unknown-unknown`; use the bundled plugins as complete examples. Preserve the v1 types and export signatures. A contract change requires an ABI version increment and coordinated host/guest support; it does not automatically require a client protocol change.
+
+See [Operations](../OPERATIONS.md#wasm-adapter-plugins) for manifest/installation and [Release](../RELEASE.md#adapter-artifacts) for rebuilding bundled modules.

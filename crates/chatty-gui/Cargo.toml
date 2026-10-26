@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 chatty-protocol = { path = "../chatty-protocol" }
-eframe.workspace = true
+iced.workspace = true
+iced_dialog = "0.14.0"
 image.workspace = true
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 kittentts = { version = "0.3.0", features = ["espeak"] }
 rfd.workspace = true
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
@@ -17,6 +19,3 @@ sha2.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
-
-[dev-dependencies]
-egui_kittest = { version = "0.35", features = ["eframe", "wgpu"] }

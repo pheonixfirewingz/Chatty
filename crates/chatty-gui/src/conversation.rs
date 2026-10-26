@@ -1,776 +1,1143 @@
-use super::*;
+use chatty_protocol::Character;
+use chatty_protocol::conversation::{ChatMessage, Conversation};
+use chatty_protocol::response::GenerationStatus;
+use iced::widget::{
+    Id, Space, button, canvas, column, container, image, mouse_area, row, scrollable, text,
+    text_input, tooltip,
+};
+use iced::{Alignment, Background, Border, Color, Element, Length, Theme, font};
 
-impl ChattyApp {
-    pub(super) fn displayed_message_content(message: &ChatMessage) -> &str {
-        message
-            .selected_variant_id
-            .as_deref()
-            .and_then(|selected| {
-                message
-                    .variants
-                    .iter()
-                    .find(|variant| variant.id == selected)
-            })
-            .map(|variant| variant.content.as_str())
-            .unwrap_or(&message.content)
-    }
+use crate::characters::image_handle;
+use crate::ui::{
+    COLOR_PRIMARY, MessageIcon, VectorIcon, card, card_style, render_markdown,
+    sidebar_toggle_button, user_chat_bubble_style,
+};
 
-    fn character_name(&self, id: Option<&str>) -> String {
-        id.and_then(|id| self.characters.iter().find(|c| c.id == id))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "Assistant".into())
-    }
+/// Interaction messages for the conversation view and new-chat dialog.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum ConversationMessage {
+    /// User typed into the composer input.
+    InputChanged(String),
+    /// Submit composer message (Send or Continue).
+    SubmitMessage,
+    /// Cancel active generation request.
+    CancelRequest(u64),
+    /// Start editing an existing message.
+    StartEditMessage { id: String, content: String },
+    /// Editing message content changed.
+    EditContentChanged(String),
+    /// Save the edited message.
+    SaveMessageEdit,
+    /// Cancel the message edit.
+    CancelMessageEdit,
+    /// Delete a message by ID.
+    DeleteMessage(String),
+    /// Request regeneration of an assistant response.
+    RegenerateMessage(String),
+    /// Speak a message locally via TTS.
+    SpeakMessage {
+        text: String,
+        author_id: Option<String>,
+    },
+    /// Switch to a different variant of a message.
+    SelectVariant {
+        message_id: String,
+        variant_id: String,
+    },
+    /// Open the new-chat dialog.
+    OpenNewChatDialog,
+    /// Close the new-chat dialog.
+    CloseNewChatDialog,
+    /// New conversation title changed.
+    NewChatTitleChanged(String),
+    /// Selected character for a new conversation.
+    SelectNewChatCharacter(String),
+    /// Create the new chat conversation.
+    CreateNewChat,
+    /// Toggle sidebar visibility.
+    ToggleSidebar,
+    /// Clicked a link in markdown.
+    OpenLink(String),
+    /// Hovering over a chat message bubble.
+    HoverMessage(Option<String>),
+}
 
-    fn avatar(ui: &mut egui::Ui, name: &str, size: f32) {
-        Self::character_portrait(ui, name, None, name, size);
-    }
+/// Zero-copy snapshot of application state required to render the conversation view.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ConversationViewState<'a> {
+    pub characters: &'a [Character],
+    pub conversations: &'a [Conversation],
+    pub messages: &'a [ChatMessage],
+    pub selected_conversation: Option<&'a str>,
+    pub selected_speaker: Option<&'a str>,
+    pub input: &'a str,
+    pub active_request: Option<u64>,
+    pub stream_text: &'a str,
+    pub typing_character: Option<&'a str>,
+    pub generation_status: Option<GenerationStatus>,
+    pub editing_message_id: Option<&'a str>,
+    pub editing_message_content: &'a str,
+    pub hovered_message_id: Option<&'a str>,
+    pub sidebar_visible: bool,
+    pub available_size: iced::Size,
+    pub light_mode: bool,
+    pub glass_mode: bool,
+}
 
-    pub(super) fn character_portrait(
-        ui: &mut egui::Ui,
-        image_id: &str,
-        data: Option<&[u8]>,
-        name: &str,
-        size: f32,
-    ) {
-        Self::character_image(ui, image_id, data, name, size, size / 2.0);
-    }
+/// Zero-copy snapshot of application state required to render the new-chat modal dialog.
+#[derive(Debug, Clone)]
+pub struct NewChatViewState<'a> {
+    pub is_open: bool,
+    pub characters: &'a [Character],
+    pub selected_character_id: Option<&'a str>,
+    pub title: &'a str,
+    pub light_mode: bool,
+    pub glass_mode: bool,
+}
 
-    fn character_image(
-        ui: &mut egui::Ui,
-        image_id: &str,
-        data: Option<&[u8]>,
-        name: &str,
-        size: f32,
-        corner_radius: f32,
-    ) {
-        let texture = data.and_then(|data| Self::cache_character_portrait(ui.ctx(), image_id, data));
-        if let Some(texture) = texture {
-            let uv = Self::top_center_square_uv(texture.size_vec2());
-            ui.add(
-                egui::Image::new(&texture)
-                    .fit_to_exact_size(egui::vec2(size, size))
-                    .uv(uv)
-                    .corner_radius(corner_radius),
-            );
-            return;
-        }
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-        ui.painter()
-            .circle_filled(rect.center(), size / 2.0, COLOR_PRIMARY);
-        let initial = name.chars().next().unwrap_or('A').to_ascii_uppercase();
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            initial,
-            egui::FontId::new(size * 0.42, egui::FontFamily::Proportional),
-            egui::Color32::WHITE,
-        );
-    }
-
-    pub(super) fn top_center_square_uv(source: egui::Vec2) -> egui::Rect {
-        if source.x > source.y {
-            let margin = (1.0 - source.y / source.x) / 2.0;
-            egui::Rect::from_min_max(egui::pos2(margin, 0.0), egui::pos2(1.0 - margin, 1.0))
-        } else {
-            // Keep the top of portrait images and trim the lower edge. This preserves
-            // faces much more reliably than a vertically centered square crop.
-            egui::Rect::from_min_max(
-                egui::pos2(0.0, 0.0),
-                egui::pos2(1.0, source.x / source.y),
-            )
-        }
-    }
-
-    pub(super) fn current_emotion_portrait(&self) -> Option<(String, String, String, Vec<u8>)> {
-        self.selected_conversation.as_ref()?;
-        for message in self.messages.iter().rev() {
-            let (Some(character_id), Some(image_id)) =
-                (message.author_id.as_deref(), message.character_image_id.as_deref())
-            else {
-                continue;
-            };
-            let Some(character) = self
-                .characters
+/// Returns the effective content to display for a message (selected variant or default).
+#[must_use]
+pub fn displayed_message_content(message: &ChatMessage) -> &str {
+    message
+        .selected_variant_id
+        .as_deref()
+        .and_then(|selected| {
+            message
+                .variants
                 .iter()
-                .find(|character| character.id == character_id)
-            else {
-                continue;
-            };
-            if let Some(image) = character.images.iter().find(|image| image.id == image_id) {
-                return Some((
-                    character.name.clone(),
-                    image.label.clone(),
-                    image.id.clone(),
-                    image.data.clone(),
-                ));
-            }
-        }
-        let character_id = self.selected_speaker()?;
-        let character = self
-            .characters
-            .iter()
-            .find(|character| character.id == character_id)?;
-        let image_id = character.default_image_id.as_deref()?;
-        let image = character.images.iter().find(|image| image.id == image_id)?;
-        Some((
-            character.name.clone(),
-            image.label.clone(),
-            image.id.clone(),
-            image.data.clone(),
-        ))
-    }
+                .find(|variant| variant.id == selected)
+        })
+        .map(|variant| variant.content.as_str())
+        .unwrap_or(&message.content)
+}
 
-    fn render_emotion_window(
-        ui: &mut egui::Ui,
-        portrait: &(String, String, String, Vec<u8>),
-        image_size: f32,
-    ) {
-        egui::Frame::new()
-            .fill(color_surface_raised(ui))
-            .stroke(egui::Stroke::new(1.0, color_border(ui)))
-            .corner_radius(14.0)
-            .inner_margin(8.0)
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    Self::character_image(
-                        ui,
-                        &portrait.2,
-                        Some(&portrait.3),
-                        &format!("{} — {}", portrait.0, portrait.1),
-                        image_size,
-                        image_size / 2.0,
-                    );
-                    ui.add_space(3.0);
-                    ui.label(egui::RichText::new(&portrait.0).strong());
-                    ui.label(
-                        egui::RichText::new(format!("Emotion: {}", portrait.1)).size(13.0),
-                    );
-                });
-            });
-    }
+/// Looks up the display name for a character ID, defaulting to "Assistant".
+#[must_use]
+pub fn character_name<'a>(characters: &'a [Character], id: Option<&str>) -> &'a str {
+    id.and_then(|id| characters.iter().find(|c| c.id == id))
+        .map(|c| c.name.as_str())
+        .unwrap_or("Assistant")
+}
 
-    pub(super) fn cache_character_portraits(&mut self, ctx: &egui::Context) {
-        for (image_id, data) in self.received_character_images.drain(..) {
-            let _ = Self::cache_character_portrait(ctx, &image_id, &data);
-        }
-
-        let mut requests = Vec::new();
-        for character in &self.characters {
-            for image in &character.images {
-                if !image.data.is_empty() {
-                    let _ = Self::cache_character_portrait(ctx, &image.id, &image.data);
-                    continue;
-                }
-                let texture_key = egui::Id::new(("character-portrait", &image.id));
-                let cached = ctx.data_mut(|store| {
-                    store
-                        .get_temp::<egui::TextureHandle>(texture_key)
-                        .is_some()
-                });
-                let request_key = (character.id.clone(), image.id.clone());
-                if !cached && !self.character_image_requests.contains(&request_key) {
-                    requests.push(request_key);
-                }
-            }
-        }
-        for (character_id, image_id) in requests {
-            self.character_image_requests
-                .insert((character_id.clone(), image_id.clone()));
-            self.send(Request::GetCharacterImage {
-                session_token: self.token.clone(),
-                character_id,
-                image_id,
-            });
+/// Determines the current emotion portrait for the active conversation.
+///
+/// Looks backwards from the latest message for an `author_id` and `character_image_id`.
+/// If none is found, falls back to the selected speaker's default image.
+#[must_use]
+pub fn current_emotion_portrait(
+    characters: &[Character],
+    messages: &[ChatMessage],
+    selected_conversation: Option<&str>,
+    selected_speaker: Option<&str>,
+) -> Option<(String, String, String, Vec<u8>)> {
+    selected_conversation?;
+    for message in messages.iter().rev() {
+        let (Some(character_id), Some(image_id)) =
+            (message.author_id.as_deref(), message.character_image_id.as_deref())
+        else {
+            continue;
+        };
+        let Some(character) = characters.iter().find(|c| c.id == character_id) else {
+            continue;
+        };
+        if let Some(image) = character.images.iter().find(|img| img.id == image_id) {
+            return Some((
+                character.name.clone(),
+                image.label.clone(),
+                image.id.clone(),
+                image.data.clone(),
+            ));
         }
     }
 
-    fn cache_character_portrait(
-        ctx: &egui::Context,
-        image_id: &str,
-        data: &[u8],
-    ) -> Option<egui::TextureHandle> {
-        let texture_key = egui::Id::new(("character-portrait", image_id));
-        if let Some(texture) =
-            ctx.data_mut(|store| store.get_temp::<egui::TextureHandle>(texture_key))
-        {
-            return Some(texture);
-        }
-        let dimensions = image::ImageReader::with_format(
-            std::io::Cursor::new(data),
-            image::ImageFormat::Png,
+    let character_id = selected_speaker?;
+    let character = characters.iter().find(|c| c.id == character_id)?;
+    let image_id = character.default_image_id.as_deref()?;
+    let image = character.images.iter().find(|img| img.id == image_id)?;
+    Some((
+        character.name.clone(),
+        image.label.clone(),
+        image.id.clone(),
+        image.data.clone(),
+    ))
+}
+
+/// Renders a circular character avatar (or initial letter if no image is present).
+#[must_use]
+pub fn character_avatar_view<'a, Message: 'a>(
+    name: &str,
+    image_data: Option<&[u8]>,
+    size: f32,
+) -> Element<'a, Message> {
+    if let Some(data) = image_data
+        && let Some(handle) = image_handle(data)
+    {
+        return container(
+            image(handle)
+                .width(Length::Fixed(size))
+                .height(Length::Fixed(size)),
         )
-        .into_dimensions()
-        .ok()?;
-        if dimensions.0 < 128
-            || dimensions.1 < 128
-            || dimensions.0 > 512
-            || dimensions.1 > 512
-        {
-            return None;
-        }
-        let rgba = image::load_from_memory_with_format(data, image::ImageFormat::Png)
-            .ok()?
-            .to_rgba8();
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [rgba.width() as usize, rgba.height() as usize],
-            rgba.as_raw(),
-        );
-        let texture = ctx.load_texture(
-            format!("character-portrait-{image_id}"),
-            color_image,
-            egui::TextureOptions::LINEAR,
-        );
-        ctx.data_mut(|store| store.insert_temp(texture_key, texture.clone()));
-        Some(texture)
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_| container::Style {
+            border: Border {
+                radius: (size / 2.0).into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+            ..Default::default()
+        })
+        .into();
     }
 
-    pub(super) fn render_chat(&mut self, ui: &mut egui::Ui) {
-        let available = ui.available_rect_before_wrap();
-        let compact = available.width() < 760.0;
-        let emotion_portrait = self.current_emotion_portrait();
-        let sidebar_toggle_height = if self.sidebar_visible { 0.0 } else { 50.0 };
-        let typing_height = if self.typing_character.is_some() {
-            24.0
-        } else {
-            0.0
+    let initial = name
+        .chars()
+        .next()
+        .unwrap_or('A')
+        .to_ascii_uppercase()
+        .to_string();
+
+    container(text(initial).size(size * 0.45).color(Color::WHITE))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(COLOR_PRIMARY)),
+            border: Border {
+                radius: (size / 2.0).into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Renders the floating emotion portrait card.
+#[must_use]
+pub fn emotion_portrait_card<'a, Message: 'a>(
+    portrait: &(String, String, String, Vec<u8>),
+    light_mode: bool,
+    glass_mode: bool,
+    compact: bool,
+) -> Element<'a, Message> {
+    let (name, label, _img_id, data) = portrait;
+    let img_size = if compact { 80.0 } else { 140.0 };
+
+    let avatar = character_avatar_view(name, Some(data), img_size);
+    let title = text(name.clone()).size(13).color(if light_mode {
+        Color::from_rgb(0.1, 0.1, 0.2)
+    } else {
+        Color::WHITE
+    });
+    let emotion_label = text(format!("Emotion: {label}"))
+        .size(11)
+        .color(crate::ui::secondary_text_color(light_mode));
+
+    let card_content = column![avatar, Space::new().height(4), title, emotion_label]
+        .align_x(Alignment::Center)
+        .spacing(2);
+
+    card(card_content, light_mode, glass_mode)
+        .width(Length::Fixed(if compact { 110.0 } else { 168.0 }))
+        .into()
+}
+
+/// Renders an individual chat message bubble (user or assistant).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn render_message_bubble<'a, Message: Clone + 'a>(
+    message: &'a ChatMessage,
+    characters: &'a [Character],
+    is_editing: bool,
+    editing_content: &'a str,
+    is_hovered: bool,
+    light_mode: bool,
+    glass_mode: bool,
+    on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
+) -> Element<'a, Message> {
+    let is_user = message.author_type == "user";
+
+    if is_editing {
+        let input_box = text_input("Edit message content…", editing_content)
+            .on_input(move |c| on_msg(ConversationMessage::EditContentChanged(c)))
+            .padding(10)
+            .size(14);
+
+        let save_btn = button(text("Save").size(12))
+            .padding([5, 12])
+            .on_press(on_msg(ConversationMessage::SaveMessageEdit))
+            .style(crate::ui::primary_button_style());
+
+        let cancel_btn = button(text("Cancel").size(12))
+            .padding([5, 12])
+            .on_press(on_msg(ConversationMessage::CancelMessageEdit))
+            .style(crate::ui::secondary_button_style(light_mode));
+
+        let actions = row![save_btn, cancel_btn, text("Esc to cancel").size(11)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+        return container(column![input_box, actions].spacing(8))
+            .padding(12)
+            .max_width(620)
+            .style(move |_| card_style(light_mode, glass_mode))
+            .into();
+    }
+
+    let displayed_text = displayed_message_content(message);
+    let md = render_markdown(displayed_text, move |uri| {
+        on_msg(ConversationMessage::OpenLink(uri.to_string()))
+    });
+
+    if is_user {
+        let bubble = container(md)
+            .padding(14)
+            .max_width(620)
+            .style(move |_| user_chat_bubble_style());
+
+        let actions = {
+            let edit_id = &message.id;
+            let edit_content = &message.content;
+            let edit_btn = message_action_button(
+                MessageIcon::Edit,
+                "Edit message",
+                is_hovered.then(|| {
+                    on_msg(ConversationMessage::StartEditMessage {
+                        id: edit_id.clone(),
+                        content: edit_content.clone(),
+                    })
+                }),
+                light_mode,
+            );
+
+            let del_id = message.id.clone();
+            let del_btn = message_action_button(
+                MessageIcon::Delete,
+                "Delete message",
+                is_hovered.then(|| on_msg(ConversationMessage::DeleteMessage(del_id))),
+                light_mode,
+            );
+
+            row![edit_btn, del_btn]
+                .spacing(4)
+                .align_y(Alignment::Center)
         };
-        let composer_height = if compact { 94.0 } else { 104.0 };
-        let content_width = available.width() - if compact { 0.0 } else { 28.0 };
-        let content_left = available.center().x - content_width / 2.0;
-        let mut messages_rect = egui::Rect::from_min_max(
-            egui::pos2(content_left, available.min.y + sidebar_toggle_height),
-            egui::pos2(
-                content_left + content_width,
-                (available.max.y - composer_height - typing_height).max(available.min.y),
-            ),
-        );
-        let emotion_rect = emotion_portrait.as_ref().map(|_| {
-            if compact {
-                let size = egui::vec2(128.0, 160.0);
-                messages_rect.min.y =
-                    (messages_rect.min.y + size.y + 12.0).min(messages_rect.max.y);
-                egui::Rect::from_min_size(
-                    egui::pos2(
-                        content_left + content_width - size.x - 8.0,
-                        available.min.y + sidebar_toggle_height + 8.0,
-                    ),
-                    size,
-                )
-            } else {
-                let size = egui::vec2(216.0, 250.0);
-                messages_rect.max.x =
-                    (messages_rect.max.x - size.x - 18.0).max(messages_rect.min.x);
-                egui::Rect::from_min_size(
-                    egui::pos2(
-                        content_left + content_width - size.x,
-                        available.min.y + sidebar_toggle_height + 8.0,
-                    ),
-                    size,
-                )
-            }
-        });
-        let composer_rect = egui::Rect::from_min_max(
-            egui::pos2(content_left, available.max.y - composer_height),
-            egui::pos2(
-                content_left + content_width - if compact { 13.0 } else { 0.0 },
-                available.max.y,
-            ),
-        );
 
-        if !self.sidebar_visible {
-            let toggle_rect = egui::Rect::from_min_size(
-                egui::pos2(content_left, available.min.y),
-                egui::vec2(44.0, 44.0),
-            );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(toggle_rect), |ui| {
-                if Self::sidebar_toggle_button(ui, false).clicked() {
-                    self.sidebar_visible = true;
-                }
-            });
-        }
+        let msg_id_enter = message.id.clone();
+        let interactive = mouse_area(
+            column![actions.wrap(), bubble]
+                .spacing(4)
+                .align_x(Alignment::End),
+        )
+        .on_enter(on_msg(ConversationMessage::HoverMessage(Some(
+            msg_id_enter,
+        ))))
+        .on_exit(on_msg(ConversationMessage::HoverMessage(None)));
 
-        if let (Some(rect), Some(portrait)) = (emotion_rect, emotion_portrait.as_ref()) {
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                Self::render_emotion_window(
-                    ui,
-                    portrait,
-                    if compact { 96.0 } else { 180.0 },
-                );
-            });
-        }
-
-        ui.scope_builder(egui::UiBuilder::new().max_rect(composer_rect), |ui| {
-            ui.add_space(8.0);
-            egui::Frame::new()
-                .fill(color_surface_raised(ui))
-                .stroke(egui::Stroke::new(1.0, color_border(ui)))
-                .corner_radius(16.0)
-                .inner_margin(egui::Margin::symmetric(12, 9))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let response = ui.add_sized(
-                            [(ui.available_width() - 86.0).max(120.0), 42.0],
-                            egui::TextEdit::multiline(&mut self.input)
-                                .hint_text("Message your character...")
-                                .frame(egui::Frame::NONE)
-                                .vertical_align(egui::Align::Center)
-                                .desired_rows(1),
-                        );
-                        let enter = response.has_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                        if let Some(id) = self.active_request {
-                            if ui
-                                .add_sized([70.0, 40.0], egui::Button::new("Stop"))
-                                .clicked()
-                            {
-                                let _ = self.commands.send(Command::Cancel(id));
-                            }
-                        } else {
-                            let label = if self.input.trim().is_empty() {
-                                "Continue"
-                            } else {
-                                "Send"
-                            };
-                            if ui
-                                .add_sized(
-                                    [70.0, 40.0],
-                                    egui::Button::new(egui::RichText::new(label).strong())
-                                        .fill(COLOR_PRIMARY_STRONG)
-                                        .corner_radius(11.0),
-                                )
-                                .clicked()
-                                || enter
-                            {
-                                self.submit_message();
-                            }
-                        }
-                    });
-                    if !compact {
-                        ui.label(
-                            egui::RichText::new("Enter to send  ·  Shift + Enter for a new line")
-                                .size(11.0)
-                                .weak(),
-                        );
-                    }
-                });
-        });
-        if let Some(id) = self.typing_character.as_deref() {
-            let typing_rect = egui::Rect::from_min_max(
-                egui::pos2(content_left + 8.0, messages_rect.max.y),
-                egui::pos2(content_left + content_width, composer_rect.min.y),
-            );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(typing_rect), |ui| {
-                let status = match self.generation_status {
-                    Some(GenerationStatus::SelectingEmotion) => {
-                        "AI is selecting an emotion portrait…".to_owned()
-                    }
-                    None => format!("{} is typing…", self.character_name(Some(id))),
-                };
-                ui.label(
-                    egui::RichText::new(status).italics().weak(),
-                );
-            });
-        }
-        ui.scope_builder(egui::UiBuilder::new().max_rect(messages_rect), |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("chat-messages")
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.add_space(24.0);
-                    if self.selected_conversation.is_none() {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() * 0.32);
-                            ui.heading(egui::RichText::new("Who will you meet today?").size(24.0));
-                            ui.label(
-                                egui::RichText::new(
-                                    "Pick a character, set the scene, and start a conversation.",
-                                )
-                                .weak(),
-                            );
-                            ui.add_space(16.0);
-                            if ui
-                                .add_sized(
-                                    [168.0, 42.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("Start a new chat").strong(),
-                                    )
-                                    .fill(COLOR_PRIMARY_STRONG)
-                                    .corner_radius(11.0),
-                                )
-                                .clicked()
-                            {
-                                self.new_chat_open = true;
-                            }
-                        });
-                        return;
-                    }
-                    for message in self.messages.clone() {
-                        ui.push_id(&message.id, |ui| self.render_message(ui, &message));
-                        ui.add_space(18.0);
-                    }
-                    if !self.stream_text.is_empty() {
-                        let name = self.character_name(self.typing_character.as_deref());
-                        let text = self.stream_text.clone();
-                        ui.push_id("streaming-message", |ui| {
-                            ui.vertical(|ui| {
-                                ui.strong(egui::RichText::new(format!("{name}:")).size(16.0));
-                                self.render_markdown(ui, &text);
-                            });
-                        });
-                    }
-                });
-        });
+        return row![Space::new().width(Length::Fill), interactive]
+            .width(Length::Fill)
+            .into();
     }
-    fn render_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage) {
-        let user = message.author_type == "user";
-        if self.editing_message_id.as_deref() == Some(message.id.as_str()) {
-            self.render_message_editor(ui, message, user);
-            return;
-        }
-        let rendered = ui.scope(|ui| {
-            if user {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    egui::Frame::new()
-                        .fill(COLOR_PRIMARY_STRONG)
-                        .corner_radius(16.0)
-                        .inner_margin(egui::Margin::symmetric(15, 7))
-                        .show(ui, |ui| {
-                            ui.set_max_width((ui.available_width() * 0.72).clamp(150.0, 620.0));
-                            ui.visuals_mut().override_text_color = Some(COLOR_ON_PRIMARY);
-                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                self.render_markdown(ui, Self::displayed_message_content(message))
-                            });
-                        });
-                });
-            } else {
-                let name = self.character_name(message.author_id.as_deref());
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{name}:"))
-                            .size(14.0)
-                            .strong()
-                            .color(color_primary_text(ui)),
-                    );
-                    ui.add_space(1.0);
-                    self.render_markdown(ui, Self::displayed_message_content(message));
-                });
-            }
-        });
-        let message_rect = rendered.response.rect;
-        let hovered = ui
-            .input(|input| input.pointer.hover_pos())
-            .is_some_and(|pointer| message_rect.contains(pointer));
-        let delete_rect = egui::Rect::from_min_size(
-            egui::pos2(message_rect.right() - 20.0, message_rect.top()),
-            egui::vec2(18.0, 24.0),
+
+    let author_name = character_name(characters, message.author_id.as_deref());
+    let author_header = text(format!("{author_name}:"))
+        .size(13)
+        .font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        })
+        .color(crate::ui::accent_text_color(light_mode));
+
+    let mut header_row = row![author_header].spacing(8).align_y(Alignment::Center);
+
+    {
+        let edit_id = &message.id;
+        let edit_content = &message.content;
+        let edit_btn = message_action_button(
+            MessageIcon::Edit,
+            "Edit message",
+            is_hovered.then(|| {
+                on_msg(ConversationMessage::StartEditMessage {
+                    id: edit_id.clone(),
+                    content: edit_content.clone(),
+                })
+            }),
+            light_mode,
         );
-        if hovered {
-            let edit_rect = egui::Rect::from_min_size(
-                egui::pos2(message_rect.right() - 55.0, message_rect.top()),
-                egui::vec2(34.0, 24.0),
+
+        let author_id_opt = &message.author_id;
+        let speak_btn = message_action_button(
+            MessageIcon::Read,
+            "Read message aloud",
+            is_hovered.then(|| {
+                on_msg(ConversationMessage::SpeakMessage {
+                    text: displayed_text.to_owned(),
+                    author_id: author_id_opt.clone(),
+                })
+            }),
+            light_mode,
+        );
+
+        let regen_id = message.id.clone();
+        let regen_btn = message_action_button(
+            MessageIcon::Regenerate,
+            "Regenerate reply",
+            is_hovered.then(|| on_msg(ConversationMessage::RegenerateMessage(regen_id))),
+            light_mode,
+        );
+
+        let del_id = message.id.clone();
+        let del_btn = message_action_button(
+            MessageIcon::Delete,
+            "Delete message",
+            is_hovered.then(|| on_msg(ConversationMessage::DeleteMessage(del_id))),
+            light_mode,
+        );
+
+        let mut actions = row![speak_btn, regen_btn, edit_btn, del_btn].spacing(4);
+
+        if message.variants.len() > 1 {
+            let current_variant = message
+                .selected_variant_id
+                .as_deref()
+                .and_then(|sel| message.variants.iter().position(|v| v.id == sel))
+                .unwrap_or(0);
+            let total = message.variants.len();
+
+            let prev_idx = if current_variant > 0 {
+                current_variant - 1
+            } else {
+                total - 1
+            };
+            let next_idx = (current_variant + 1) % total;
+
+            let msg_id1 = message.id.clone();
+            let prev_v_id = message.variants[prev_idx].id.clone();
+            let prev_btn = message_action_button(
+                MessageIcon::Previous,
+                "Previous variant",
+                is_hovered.then(|| {
+                    on_msg(ConversationMessage::SelectVariant {
+                        message_id: msg_id1,
+                        variant_id: prev_v_id,
+                    })
+                }),
+                light_mode,
             );
-            if ui
-                .put(
-                    edit_rect,
-                    egui::Button::new(egui::RichText::new("Edit").size(10.0)).frame(false),
-                )
-                .on_hover_text("Edit message")
-                .clicked()
-            {
-                self.editing_message_id = Some(message.id.clone());
-                self.editing_message_content = message.content.clone();
-            }
-            if !user {
-                let speak_rect = delete_rect.translate(egui::vec2(-82.0, 1.0));
-                if ui
-                    .put(
-                        speak_rect,
-                        egui::Button::new(egui::RichText::new("🔊").size(11.0)).frame(false),
-                    )
-                    .on_hover_text("Read aloud locally")
-                    .clicked()
-                {
-                    let text = Self::displayed_message_content(message).to_owned();
-                    if let Err(error) = self.tts.speak(&text, message.author_id.as_deref()) {
-                        self.set_error(error);
-                    }
-                }
-                let regenerate_rect = delete_rect.translate(egui::vec2(-54.0, 1.0));
-                if ui
-                    .put(
-                        regenerate_rect,
-                        egui::Button::new(egui::RichText::new("↻").size(8.0)).frame(false),
-                    )
-                    .on_hover_text("Regenerate response")
-                    .clicked()
-                {
-                    self.regenerate(message);
-                }
-            }
-            if ui
-                .put(delete_rect, egui::Button::new("×").frame(false))
-                .on_hover_text("Delete")
-                .clicked()
-            {
-                self.delete_message(&message.id);
+
+            let msg_id2 = message.id.clone();
+            let next_v_id = message.variants[next_idx].id.clone();
+            let next_btn = message_action_button(
+                MessageIcon::Next,
+                "Next variant",
+                is_hovered.then(|| {
+                    on_msg(ConversationMessage::SelectVariant {
+                        message_id: msg_id2,
+                        variant_id: next_v_id,
+                    })
+                }),
+                light_mode,
+            );
+
+            let counter = text(format!("{}/{}", current_variant + 1, total))
+                .size(11)
+                .color(if is_hovered {
+                    crate::ui::palette(light_mode).text
+                } else {
+                    Color::TRANSPARENT
+                });
+
+            let variant_controls = row![prev_btn, counter, next_btn]
+                .spacing(4)
+                .align_y(Alignment::Center);
+
+            actions = actions.push(Space::new().width(8)).push(variant_controls);
+        }
+
+        header_row = header_row.push(actions.wrap());
+    }
+
+    let assistant_content = column![header_row.wrap(), Space::new().height(2), md].spacing(2);
+
+    let msg_id_enter = message.id.clone();
+    let area = mouse_area(
+        container(assistant_content)
+            .padding(10)
+            .max_width(700)
+            .width(Length::Fill)
+            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
+    )
+    .on_enter(on_msg(ConversationMessage::HoverMessage(Some(
+        msg_id_enter,
+    ))))
+    .on_exit(on_msg(ConversationMessage::HoverMessage(None)));
+
+    row![area].width(Length::Fill).into()
+}
+
+fn message_action_button<'a, Message: Clone + 'a>(
+    icon: MessageIcon,
+    label: &'static str,
+    action: Option<Message>,
+    light_mode: bool,
+) -> Element<'a, Message> {
+    let visible = action.is_some();
+    let color = if visible {
+        crate::ui::palette(light_mode).text
+    } else {
+        Color::TRANSPARENT
+    };
+    let icon = canvas::Canvas::new(VectorIcon::new(icon).with_color(color))
+        .width(24)
+        .height(24);
+    let control = button(icon)
+        .width(28)
+        .height(28)
+        .padding(2)
+        .on_press_maybe(action)
+        .style(message_action_style(light_mode, visible));
+    tooltip(
+        control,
+        container(text(label).size(12))
+            .padding(6)
+            .style(crate::ui::tooltip_style),
+        tooltip::Position::Top,
+    )
+    .into()
+}
+
+// Hidden action buttons retain their measured size so hover never reflows text.
+fn message_action_style(
+    light_mode: bool,
+    visible: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        if visible {
+            crate::ui::chat_action_button_style(light_mode, false)(theme, status)
+        } else {
+            button::Style {
+                background: None,
+                text_color: Color::TRANSPARENT,
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: false,
             }
         }
     }
-    fn render_message_editor(&mut self, ui: &mut egui::Ui, message: &ChatMessage, user: bool) {
-        let frame = egui::Frame::new()
-            .fill(if user {
-                COLOR_PRIMARY_STRONG
+}
+
+/// Primary conversation view combining chat history, streaming responses, and composer.
+#[must_use]
+pub fn conversation_view<'a, Message: Clone + 'a>(
+    view: &ConversationViewState<'a>,
+    on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
+) -> Element<'a, Message> {
+    let light_mode = view.light_mode;
+    let glass_mode = view.glass_mode;
+    if view.selected_conversation.is_none() {
+        let heading = text("Who will you meet today?")
+            .size(26)
+            .color(crate::ui::accent_text_color(light_mode));
+        let subtitle = text("Pick a character, set the scene, and start a conversation.")
+            .size(14)
+            .color(crate::ui::secondary_text_color(light_mode));
+
+        let start_btn = button(text("Start a new chat").size(15).font(font::Font {
+                weight: font::Weight::Bold,
+                ..Default::default()
+            }))
+            .padding([10, 24])
+            .on_press(on_msg(ConversationMessage::OpenNewChatDialog))
+            .style(crate::ui::primary_button_style());
+
+        let center_col = card(
+            column![heading, subtitle, Space::new().height(12), start_btn]
+                .align_x(Alignment::Center)
+                .spacing(8),
+            light_mode,
+            glass_mode,
+        )
+        .max_width(480);
+
+        let content: Element<'a, Message> = if !view.sidebar_visible {
+            let toggle_btn = sidebar_toggle_button(false, on_msg(ConversationMessage::ToggleSidebar));
+            column![
+                row![toggle_btn].align_y(Alignment::Center),
+                container(center_col)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        } else {
+            container(center_col)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
+        };
+
+        return container(content)
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
+
+    let emotion_portrait = if view.available_size.width >= 900.0
+        && view.available_size.height >= 500.0
+    {
+        current_emotion_portrait(
+            view.characters,
+            view.messages,
+            view.selected_conversation,
+            view.selected_speaker,
+        )
+    } else {
+        None
+    };
+
+    let mut message_list = column![].spacing(16).width(Length::Fill);
+
+    for msg in view.messages {
+        let is_editing = view.editing_message_id == Some(msg.id.as_str());
+        let is_hovered = view.hovered_message_id == Some(msg.id.as_str());
+        message_list = message_list.push(render_message_bubble(
+            msg,
+            view.characters,
+            is_editing,
+            view.editing_message_content,
+            is_hovered,
+            view.light_mode,
+            view.glass_mode,
+            on_msg,
+        ));
+    }
+
+    if !view.stream_text.is_empty() {
+        let author_name = character_name(view.characters, view.typing_character);
+        let header = text(format!("{author_name}:"))
+            .size(13)
+            .color(crate::ui::accent_text_color(light_mode));
+        let md = render_markdown(view.stream_text, move |uri| {
+            on_msg(ConversationMessage::OpenLink(uri.to_string()))
+        });
+
+        let stream_content = container(column![header, Space::new().height(2), md].spacing(2))
+            .padding(10)
+            .max_width(700)
+            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode));
+
+        message_list = message_list.push(row![stream_content]);
+    }
+
+    if let Some(speaker_id) = view.typing_character {
+        let typing_name = character_name(view.characters, Some(speaker_id));
+        let status_text = match view.generation_status {
+            Some(GenerationStatus::SelectingEmotion) => {
+                "AI is selecting an emotion portrait…".to_string()
+            }
+            None => format!("{typing_name} is typing…"),
+        };
+        message_list = message_list.push(
+            container(
+                text(status_text)
+                    .size(12)
+                    .color(crate::ui::secondary_text_color(light_mode)),
+            )
+                .padding(8)
+                .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
+        );
+    }
+
+    let scrollable_messages = scrollable(
+        container(message_list)
+            .padding(if view.available_size.width < 500.0 {
+                8
             } else {
-                color_surface_raised(ui)
+                20
             })
-            .stroke(egui::Stroke::new(1.0, color_border(ui)))
-            .corner_radius(12.0)
-            .inner_margin(egui::Margin::symmetric(12, 9));
-        if user {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                frame.show(ui, |ui| {
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        self.render_message_editor_contents(ui, message)
-                    });
-                });
-            });
+            .width(Length::Fill),
+    )
+    .id(Id::new("chat-messages"))
+    .height(Length::Fill)
+    .width(Length::Fill);
+
+    let composer_input = text_input("Message your character…", view.input)
+        .style(crate::ui::input_style)
+        .on_input(move |v| on_msg(ConversationMessage::InputChanged(v)))
+        .on_submit(on_msg(ConversationMessage::SubmitMessage))
+        .padding(12)
+        .size(14)
+        .width(Length::Fill);
+
+    let action_btn = if let Some(req_id) = view.active_request {
+        button(text("Stop").size(13).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        }))
+        .padding([10, 18])
+        .on_press(on_msg(ConversationMessage::CancelRequest(req_id)))
+        .style(crate::ui::danger_button_style())
+    } else {
+        let label = if view.input.trim().is_empty() {
+            "Continue"
         } else {
-            frame.show(ui, |ui| self.render_message_editor_contents(ui, message));
-        }
+            "Send"
+        };
+        button(text(label).size(13).font(font::Font {
+            weight: font::Weight::Bold,
+            ..Default::default()
+        }))
+        .padding([10, 18])
+        .on_press(on_msg(ConversationMessage::SubmitMessage))
+        .style(crate::ui::primary_button_style())
+    };
+
+    let hint = text("Enter to send")
+        .size(12)
+        .color(crate::ui::secondary_text_color(light_mode));
+
+    let composer_box = card(
+        column![
+            row![composer_input, action_btn]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            hint
+        ]
+        .spacing(4),
+        light_mode,
+        glass_mode,
+    )
+    .width(Length::Fill);
+
+    let mut chat_content = column![].spacing(8).width(Length::Fill).height(Length::Fill);
+
+    if !view.sidebar_visible {
+        let toggle_btn = sidebar_toggle_button(false, on_msg(ConversationMessage::ToggleSidebar));
+        chat_content = chat_content.push(row![toggle_btn].align_y(Alignment::Center));
     }
-    fn render_message_editor_contents(&mut self, ui: &mut egui::Ui, message: &ChatMessage) {
-        ui.set_width((ui.available_width() * 0.72).clamp(240.0, 620.0));
-        let response = ui.add_sized(
-            [ui.available_width(), 96.0],
-            egui::TextEdit::multiline(&mut self.editing_message_content)
-                .desired_rows(4)
-                .hint_text("Message text (Markdown supported)"),
+
+    chat_content = chat_content.push(scrollable_messages).push(composer_box);
+
+    let chat_bg = crate::ui::chat_panel_background(light_mode, glass_mode);
+    if let Some(ref portrait) = emotion_portrait {
+        let emotion_card = emotion_portrait_card(portrait, light_mode, glass_mode, false);
+        let content_with_portrait = row![chat_content, Space::new().width(12), emotion_card]
+            .width(Length::Fill)
+            .height(Length::Fill);
+        container(content_with_portrait)
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(chat_bg),
+                ..Default::default()
+            })
+            .into()
+    } else {
+        container(chat_content)
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(chat_bg),
+                ..Default::default()
+            })
+            .into()
+    }
+}
+
+/// Modal dialog for creating a new chat conversation.
+#[must_use]
+pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
+    view: &NewChatViewState<'a>,
+    on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
+) -> Option<Element<'a, Message>> {
+    if !view.is_open {
+        return None;
+    }
+    let light_mode = view.light_mode;
+    let _glass_mode = view.glass_mode;
+
+    let title_text = text("New chat")
+        .size(20)
+        .color(crate::ui::accent_text_color(light_mode));
+    let desc_text = text("Choose a character for a private chat.")
+        .size(13)
+        .color(crate::ui::secondary_text_color(light_mode));
+
+    let name_label = text("CONVERSATION NAME").size(11);
+    let name_input = text_input("Optional — we can name it for you", view.title)
+        .on_input(move |t| on_msg(ConversationMessage::NewChatTitleChanged(t)))
+        .padding(8)
+        .size(13);
+
+    let char_label = text("CHARACTERS").size(11);
+
+    let mut char_list = column![].spacing(8);
+
+    for c in view.characters {
+        let is_selected = view.selected_character_id == Some(c.id.as_str());
+
+        let avatar = character_avatar_view(
+            &c.name,
+            c.images.first().map(|img| img.data.as_slice()),
+            36.0,
         );
-        if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.cancel_message_edit();
-            return;
-        }
-        ui.horizontal(|ui| {
-            let valid = !self.editing_message_content.trim().is_empty()
-                && self.editing_message_content != message.content;
-            if ui.add_enabled(valid, egui::Button::new("Save")).clicked() {
-                let content = self.editing_message_content.clone();
-                self.send(Request::UpdateMessage {
-                    session_token: self.token.clone(),
-                    message_id: message.id.clone(),
-                    content,
+
+        let name_t = text(&c.name).size(14);
+        let summary_t = text(if c.personality.trim().is_empty() {
+            "Ready to chat"
+        } else {
+            &c.personality
+        })
+        .size(11)
+        .color(crate::ui::secondary_text_color(light_mode));
+
+        let char_info = column![name_t, summary_t].spacing(2);
+
+        let radio_marker =
+            text(if is_selected { "●" } else { "○" })
+                .size(16)
+                .color(if is_selected {
+                    COLOR_PRIMARY
+                } else {
+                    crate::ui::secondary_text_color(light_mode)
                 });
-                self.cancel_message_edit();
-            }
-            if ui.button("Cancel").clicked() {
-                self.cancel_message_edit();
-            }
-            ui.label(egui::RichText::new("Esc to cancel").size(11.0).weak());
-        });
-    }
-    fn cancel_message_edit(&mut self) {
-        self.editing_message_id = None;
-        self.editing_message_content.clear();
-    }
-    fn delete_message(&self, id: &str) {
-        self.send(Request::DeleteEntity {
-            session_token: self.token.clone(),
-            kind: EntityKind::Message,
-            entity_id: id.into(),
-        });
-    }
-    pub(super) fn regenerate(&self, message: &ChatMessage) {
-        if let Some(cid) = self.selected_conversation.clone() {
-            self.send(Request::Generate {
-                session_token: self.token.clone(),
-                conversation_id: cid,
-                speaker_id: message.author_id.clone(),
-                parent_id: Some(message.id.clone()),
-            });
-        }
-    }
-    pub(super) fn submit_message(&mut self) {
-        let Some(cid) = self.selected_conversation.clone() else {
-            self.new_chat_open = true;
-            return;
-        };
-        let speaker = self.selected_speaker();
-        if self.input.trim().is_empty() {
-            self.send(Request::Generate {
-                session_token: self.token.clone(),
-                conversation_id: cid,
-                speaker_id: speaker,
-                parent_id: None,
-            });
-            return;
-        }
-        let content = std::mem::take(&mut self.input);
-        let message = Request::SendMessage {
-            session_token: self.token.clone(),
-            conversation_id: cid.clone(),
-            content,
-            speaker_id: None,
-        };
-        let generate = Request::Generate {
-            session_token: self.token.clone(),
-            conversation_id: cid,
-            speaker_id: speaker,
-            parent_id: None,
-        };
-        let _ = self.commands.send(Command::SendThenGenerate {
-            message: Box::new(message),
-            generate: Box::new(generate),
-        });
-    }
-    fn selected_speaker(&self) -> Option<String> {
-        self.selected_conversation
-            .as_ref()
-            .and_then(|id| self.conversations.iter().find(|c| &c.id == id))
-            .and_then(|c| c.participant_ids.first().cloned())
-    }
-    pub(super) fn render_new_chat_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.new_chat_open;
-        let mut conversation_created = false;
-        let max_height = Self::popup_max_height(ctx);
-        let dialog_width = (ctx.content_rect().width() - 32.0).clamp(300.0, 520.0);
-        egui::Window::new("New chat")
-            .frame(modal_frame(ctx, self.light_mode, self.glass_mode))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(dialog_width)
-            .max_width(dialog_width)
-            .max_height(max_height)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("new-chat-popup-content")
-                    .max_height((max_height - 118.0).max(120.0))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new("Choose a character for a private chat.").weak(),
-                        );
-                        ui.add_space(16.0);
-                        ui.label(egui::RichText::new("CONVERSATION NAME").size(11.0).weak());
-                        ui.add_sized(
-                            [ui.available_width(), 42.0],
-                            egui::TextEdit::singleline(&mut self.new_conversation_title)
-                                .hint_text("Optional — we can name it for you"),
-                        );
-                        ui.add_space(14.0);
-                        ui.label(egui::RichText::new("CHARACTERS").size(11.0).weak());
-                        ui.add_space(4.0);
-                        for c in &self.characters {
-                            let selected = self.selected_characters.contains(&c.id);
-                            let mut selector_clicked = false;
-                            let response = egui::Frame::new()
-                                .fill(if selected {
-                                    egui::Color32::from_rgb(40, 43, 75)
-                                } else {
-                                    color_surface_raised(ui)
-                                })
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    if selected {
-                                        COLOR_PRIMARY
-                                    } else {
-                                        color_border(ui)
-                                    },
-                                ))
-                                .corner_radius(12.0)
-                                .inner_margin(egui::Margin::symmetric(12, 8))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let portrait = c
-                                            .default_image_id
-                                            .as_deref()
-                                            .and_then(|id| {
-                                                c.images.iter().find(|image| image.id == id)
-                                            });
-                                        if let Some(image) = portrait {
-                                            Self::character_portrait(
-                                                ui,
-                                                &image.id,
-                                                Some(&image.data),
-                                                &c.name,
-                                                34.0,
-                                            );
-                                        } else {
-                                            Self::avatar(ui, &c.name, 34.0);
-                                        }
-                                        ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new(&c.name).strong());
-                                            let summary = if c.personality.trim().is_empty() {
-                                                "Ready to chat"
-                                            } else {
-                                                c.personality.as_str()
-                                            };
-                                            ui.label(
-                                                egui::RichText::new(summary).size(12.0).weak(),
-                                            );
-                                        });
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                selector_clicked = ui
-                                                    .radio(selected, "")
-                                                    .on_hover_text(format!(
-                                                        "Start a private chat with {}",
-                                                        c.name
-                                                    ))
-                                                    .clicked();
-                                            },
-                                        );
-                                    });
-                                })
-                                .response
-                                .interact(egui::Sense::click());
-                            if response.clicked() || selector_clicked {
-                                self.selected_characters.clear();
-                                self.selected_characters.insert(c.id.clone());
-                            }
-                            ui.add_space(6.0);
-                        }
-                    });
-                ui.add_space(12.0);
-                let ready = !self.selected_characters.is_empty();
-                let create = ui.add_enabled(
-                    ready,
-                    egui::Button::new(egui::RichText::new("Create conversation").strong())
-                        .fill(COLOR_PRIMARY_STRONG)
-                        .corner_radius(11.0)
-                        .min_size(egui::vec2(ui.available_width(), 44.0)),
-                );
-                if create.clicked() {
-                    let ids = self
-                        .selected_characters
-                        .iter()
-                        .next()
-                        .cloned()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    let title = if self.new_conversation_title.trim().is_empty() {
-                        self.characters
-                            .iter()
-                            .find(|c| ids.contains(&c.id))
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| "New chat".into())
-                    } else {
-                        self.new_conversation_title.clone()
+
+        let card_row = row![
+            avatar,
+            char_info,
+            Space::new().width(Length::Fill),
+            radio_marker
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let char_id = c.id.clone();
+        let card_btn = button(card_row)
+            .width(Length::Fill)
+            .padding(10)
+            .on_press(on_msg(ConversationMessage::SelectNewChatCharacter(
+                char_id,
+            )))
+            .style(move |theme: &Theme, status: button::Status| {
+                if is_selected {
+                    button::Style {
+                        background: Some(Background::Color(crate::ui::COLOR_PRIMARY_STRONG)),
+                        text_color: Color::WHITE,
+                        border: Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    let (bg, border_color) = match status {
+                        button::Status::Hovered => (
+                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.08),
+                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.16),
+                        ),
+                        _ => (
+                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.04),
+                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.08),
+                        ),
                     };
-                    self.send(Request::CreateConversation {
-                        session_token: self.token.clone(),
-                        title,
-                        kind: ConversationKind::Direct,
-                        participant_ids: ids,
-                    });
-                    conversation_created = true;
-                    self.new_conversation_title.clear();
-                    self.selected_characters.clear();
+                    button::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: theme.palette().text,
+                        border: Border {
+                            color: border_color,
+                            width: 0.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    }
                 }
             });
-        self.new_chat_open = open && !conversation_created;
+
+        char_list = char_list.push(card_btn);
+    }
+
+    let scrollable_chars = scrollable(char_list).height(Length::Fill);
+
+    let create_enabled = view.selected_character_id.is_some();
+    let mut create_btn = button(text("Create conversation").size(14).font(font::Font {
+        weight: font::Weight::Bold,
+        ..Default::default()
+    }))
+    .padding([10, 20])
+    .width(Length::Fill)
+    .style(crate::ui::primary_button_style());
+
+    if create_enabled {
+        create_btn = create_btn.on_press(on_msg(ConversationMessage::CreateNewChat));
+    }
+
+    let cancel_btn = button(text("Cancel").size(13))
+        .padding([8, 16])
+        .on_press(on_msg(ConversationMessage::CloseNewChatDialog))
+        .style(crate::ui::secondary_button_style(light_mode));
+
+    let dialog_content = column![
+        title_text,
+        desc_text,
+        Space::new().height(10),
+        name_label,
+        name_input,
+        Space::new().height(10),
+        char_label,
+        scrollable_chars,
+        Space::new().height(14),
+        create_btn,
+        cancel_btn,
+    ]
+    .spacing(6)
+    .align_x(Alignment::Center);
+
+    Some(
+        container(dialog_content)
+            .padding(20)
+            .width(Length::Fill)
+            .into(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatty_protocol::conversation::Variant;
+    use chatty_protocol::CharacterImage;
+
+    fn dummy_character(id: &str, name: &str) -> Character {
+        Character {
+            id: id.into(),
+            name: name.into(),
+            description: "A test bot".into(),
+            personality: "Friendly companion".into(),
+            scenario: String::new(),
+            system_prompt: String::new(),
+            example_dialogue: String::new(),
+            appearance: String::new(),
+            age: String::new(),
+            gender: String::new(),
+            race: String::new(),
+            misc: String::new(),
+            tags: Vec::new(),
+            avatar: None,
+            images: Vec::new(),
+            default_image_id: None,
+            is_public: false,
+            owned_by_user: true,
+            revision: 1,
+        }
+    }
+
+    fn dummy_message(id: &str, author_type: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.into(),
+            author_type: author_type.into(),
+            author_id: if author_type == "user" {
+                None
+            } else {
+                Some("bot1".into())
+            },
+            content: content.into(),
+            parent_id: None,
+            selected_variant_id: None,
+            character_image_id: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            revision: 1,
+            variants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_displayed_message_content_default() {
+        let msg = dummy_message("m1", "user", "Hello world");
+        assert_eq!(displayed_message_content(&msg), "Hello world");
+    }
+
+    #[test]
+    fn test_displayed_message_content_variant() {
+        let mut msg = dummy_message("m1", "assistant", "Default response");
+        msg.variants = vec![
+            Variant {
+                id: "v1".into(),
+                content: "Alternative 1".into(),
+                created_at: "2026-01-01".into(),
+                revision: 1,
+            },
+            Variant {
+                id: "v2".into(),
+                content: "Alternative 2".into(),
+                created_at: "2026-01-01".into(),
+                revision: 1,
+            },
+        ];
+        msg.selected_variant_id = Some("v2".into());
+        assert_eq!(displayed_message_content(&msg), "Alternative 2");
+    }
+
+    #[test]
+    fn test_character_name() {
+        let chars = vec![dummy_character("bot1", "Seraphina")];
+        assert_eq!(character_name(&chars, Some("bot1")), "Seraphina");
+        assert_eq!(character_name(&chars, Some("nonexistent")), "Assistant");
+        assert_eq!(character_name(&chars, None), "Assistant");
+    }
+
+    #[test]
+    fn test_current_emotion_portrait_fallback() {
+        let mut character = dummy_character("bot1", "Seraphina");
+        character.default_image_id = Some("img1".into());
+        character.images.push(CharacterImage {
+            id: "img1".into(),
+            label: "neutral".into(),
+            data: vec![1, 2, 3],
+        });
+        let chars = vec![character];
+        let messages = vec![dummy_message("m1", "assistant", "Hi")];
+
+        let portrait =
+            current_emotion_portrait(&chars, &messages, Some("c1"), Some("bot1"));
+        assert!(portrait.is_some());
+        let (name, label, id, data) = portrait.unwrap();
+        assert_eq!(name, "Seraphina");
+        assert_eq!(label, "neutral");
+        assert_eq!(id, "img1");
+        assert_eq!(data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_conversation_view_empty_state() {
+        let view_state = ConversationViewState {
+            characters: &[],
+            conversations: &[],
+            messages: &[],
+            selected_conversation: None,
+            selected_speaker: None,
+            input: "",
+            active_request: None,
+            stream_text: "",
+            typing_character: None,
+            generation_status: None,
+            editing_message_id: None,
+            editing_message_content: "",
+            hovered_message_id: None,
+            sidebar_visible: true,
+            available_size: iced::Size::new(800.0, 720.0),
+            light_mode: false,
+            glass_mode: false,
+        };
+
+        let _el: Element<'_, ConversationMessage> =
+            conversation_view(&view_state, std::convert::identity);
+    }
+
+    #[test]
+    fn test_new_chat_dialog_rendering() {
+        let chars = vec![dummy_character("c1", "Alice")];
+        let view_state = NewChatViewState {
+            is_open: true,
+            characters: &chars,
+            selected_character_id: Some("c1"),
+            title: "My Chat",
+            light_mode: false,
+            glass_mode: false,
+        };
+
+        let dialog = new_chat_dialog_view(&view_state, std::convert::identity);
+        assert!(dialog.is_some());
+    }
+
+    #[test]
+    fn test_conversation_view_collapsed_sidebar() {
+        let view_state = ConversationViewState {
+            characters: &[],
+            conversations: &[],
+            messages: &[],
+            selected_conversation: None,
+            selected_speaker: None,
+            input: "",
+            active_request: None,
+            stream_text: "",
+            typing_character: None,
+            generation_status: None,
+            editing_message_id: None,
+            editing_message_content: "",
+            hovered_message_id: None,
+            sidebar_visible: false,
+            available_size: iced::Size::new(800.0, 720.0),
+            light_mode: false,
+            glass_mode: false,
+        };
+
+        let _el: Element<'_, ConversationMessage> =
+            conversation_view(&view_state, std::convert::identity);
+    }
+
+    #[test]
+    fn test_conversation_view_with_messages_hover() {
+        let chars = vec![dummy_character("bot1", "Mara")];
+        let msgs = vec![
+            dummy_message("m1", "user", "Tell me about this place."),
+            dummy_message("m2", "assistant", "It has watched the valley for centuries."),
+        ];
+        let conv = Conversation {
+            id: "c1".into(),
+            title: "Chat 1".into(),
+            participant_ids: vec!["bot1".into()],
+            kind: chatty_protocol::conversation::ConversationKind::Direct,
+            state: String::new(),
+            summary: String::new(),
+            revision: 1,
+        };
+        let convs = vec![conv];
+
+        let view_state_unhovered = ConversationViewState {
+            characters: &chars,
+            conversations: &convs,
+            messages: &msgs,
+            selected_conversation: Some("c1"),
+            selected_speaker: Some("bot1"),
+            input: "",
+            active_request: None,
+            stream_text: "",
+            typing_character: None,
+            generation_status: None,
+            editing_message_id: None,
+            editing_message_content: "",
+            hovered_message_id: None,
+            sidebar_visible: false,
+            available_size: iced::Size::new(800.0, 720.0),
+            light_mode: false,
+            glass_mode: false,
+        };
+        let _el1: Element<'_, ConversationMessage> =
+            conversation_view(&view_state_unhovered, std::convert::identity);
+
+        let view_state_user_hover = ConversationViewState {
+            hovered_message_id: Some("m1"),
+            ..view_state_unhovered
+        };
+        let _el2: Element<'_, ConversationMessage> =
+            conversation_view(&view_state_user_hover, std::convert::identity);
+
+        let view_state_asst_hover = ConversationViewState {
+            hovered_message_id: Some("m2"),
+            ..view_state_unhovered
+        };
+        let _el3: Element<'_, ConversationMessage> =
+            conversation_view(&view_state_asst_hover, std::convert::identity);
     }
 }

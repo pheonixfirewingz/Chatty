@@ -2,17 +2,15 @@
 
 Chatty is a Linux-native client and broker for persistent AI character roleplay. The desktop client connects to a separately operated broker over TLS 1.3; the broker owns accounts, conversations, prompt assembly, persistence, synchronization, and model access. Inference stays in Ollama or another OpenAI-compatible service.
 
-Chatty is currently a working `0.1.0` pre-release. It is suitable for development and controlled deployments, but the release checks and Flatpak submission are not finished. See [Project status](docs/PROJECT-STATUS.md) for the current baseline.
+Chatty is currently a working `0.1.0` pre-release. It is suitable for development and controlled deployments, but the release checks and Flatpak submission are not finished. See [Release](docs/RELEASE.md) for the remaining gates.
 
 ## Workspace
 
 | Package | Purpose |
 |---|---|
-| `chatty-gui` | Native `egui`/`eframe` desktop client |
+| `chatty-gui` | Native `iced` desktop client |
 | `chatty-broker` | Multi-user TLS broker, SQLite owner, and inference adapter |
 | `chatty-protocol` | Shared bincode messages, framing, compression, and error types |
-
-The repository does not contain a terminal client. Scripts that invoke `chatty-client` or `chatty-net-proxy` are legacy and are not part of the supported verification path.
 
 ## What works
 
@@ -21,13 +19,16 @@ The repository does not contain a terminal client. Scripts that invoke `chatty-c
 - Character creation and editing, public sharing, and SillyTavern JSON/PNG import
 - Private direct conversations, streamed generation, cancellation, regeneration, deletion, and automatic titles
 - Reconnect/resume and live deltas across a user's connected clients
-- Dark/light and solid/glass appearance settings
+- Dark glass appearance with a visible desktop and readable content plates
+- Layout follows compositor-assigned space: compact navigation, stacked character fields, and scrollable dialogs
+- Local neural text-to-speech for character replies, with optional automatic playback
 - OS-level screen-capture exclusion in the official client where the windowing platform supports it
 - Per-user prompt and completion token accounting
 - Admin monitoring, user management, broker policy, inference settings, and Ollama model controls
+- Sandboxed WASM adapter plugins for OpenAI-compatible servers, remote [FreeToken](docs/OPERATIONS.md#freetoken-on-a-remote-machine), Ollama, and Hugging Face model discovery
 - Broker/protocol support for group modes, variants, lore, memories, conversation state, and summaries
 
-The current GUI intentionally exposes direct conversations only. World lore has a native editor with character links, common knowledge, and scene-triggered facts. Group workflows, memory, conversation state, summaries, and variant selection still need a GUI pass.
+The GUI focuses on direct conversations. World lore has a native editor with character links, common knowledge, and scene-triggered facts. Broker/protocol support does not imply a complete GUI workflow for every feature.
 
 ## Quick start
 
@@ -35,7 +36,7 @@ Requirements:
 
 - A current Rust toolchain
 - OpenSSL for development certificates
-- Linux desktop libraries required by `eframe`/Wayland
+- Linux desktop, audio, and speech libraries required by `iced`/Wayland and local speech
 - Ollama or another OpenAI-compatible chat-completions server for generation
 
 Run the broker and GUI together:
@@ -58,6 +59,36 @@ CHATTY_BROKER=127.0.0.1 CHATTY_CA=certs/ca.pem cargo run --release -p chatty-gui
 ```
 
 `CHATTY_LLAMA_URL` seeds only a new database. After initialization, change the persisted adapter configuration from the GUI's admin portal.
+
+Admins can open **Admin Portal → Models** to manage the inference server:
+
+- **Installed:** filter by model name or family, inspect disk/VRAM use, load or unload models, and confirm deletion.
+- **Find & download:** search public Hugging Face GGUF repositories, select a file/quantization, and download it through Ollama. You can also enter an Ollama model tag or `hf.co/owner/repository:filename.gguf` directly. Search excludes gated repositories and split GGUF files.
+- **Configure:** choose the chat model, server URL, native Ollama API mode, and generation defaults, then save. These defaults apply across the broker. Unload a model and save a different chat model before deleting it.
+
+Downloads are stored on the inference server, not the desktop client or broker. When inference runs on another machine, set the adapter URL to that machine's reachable Ollama address (for example, `http://192.168.1.50:11434`), then save before downloading. `127.0.0.1` refers to the broker's machine. Hugging Face search requires broker internet access; downloads require an Ollama server with Hugging Face support. Search runs only when requested, and download status reports completion or failure without byte-level progress.
+
+
+## Local speech
+
+Open **Settings → Speech → Test voice** to check speech and your audio output.
+Use the speaker action on a character reply to read it aloud, or enable
+**Automatically read new replies**. **Stop speaking** cancels playback and pending
+speech. Model preparation, synthesis, and audio errors are shown in the app.
+
+Speech uses the small KittenTTS Nano model on your CPU. The model and voices download
+on first use (about 28 MB combined), then stay cached for offline use. No reply text
+is sent to a speech service. The Flatpak includes ONNX Runtime and requests audio
+server access; no host Python installation or speech packages are required.
+
+To test the complete speech path from a terminal:
+
+```sh
+flatpak run io.github.pheonixfirewingz.Chatty//25.08 --test-speech
+```
+
+The test plays a short phrase and exits with an error if model loading, synthesis,
+or audio output fails.
 
 ## Data locations
 
@@ -94,31 +125,21 @@ certificate; the development certificate script produces this chain. Older leaf-
 back to an exact `<host>.cert.der` pin. If a private CA intentionally changes, remove the saved
 `<host>.ca.der` (or legacy `.cert.der`) and confirm the replacement fingerprint on next connection.
 
-## Verify
+## Development and release
 
-```sh
-cargo fmt --all -- --check
-cargo test --workspace --offline
-cargo clippy --workspace --all-targets --offline -- -D warnings
-cargo build --release --workspace --offline
-```
-
-At the 2026-09-08 baseline, all 88 tests pass; formatting and strict Clippy still fail. The exact issues are recorded in [Project status](docs/PROJECT-STATUS.md).
+See [AGENTS.md](AGENTS.md#build-and-verification) for build commands, checks, and
+contribution rules. Release readiness requires fresh check results and the
+[functional and packaging gates](docs/RELEASE.md); historical test counts are not
+release evidence.
 
 ## Documentation
 
-- [Project status](docs/PROJECT-STATUS.md)
-- [Development](docs/DEVELOPMENT.md)
-- [Operations](docs/OPERATIONS.md)
-- [Release](docs/RELEASE.md)
-- [Architecture](docs/architecture/ARCHITECTURE.md)
-- [Original plan and historical audit](docs/ORIGINAL-PLAN-AUDIT.md)
+- [Engineering guide](AGENTS.md)
+- [Operations](docs/OPERATIONS.md): configuration, trust, backups, and upgrades
+- [Release](docs/RELEASE.md): acceptance checks and Flatpak packaging
+- [Architecture](docs/architecture/ARCHITECTURE.md): boundaries, wire contract, and decisions
 
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-### World lore
+## World lore
 
 Open **Worlds** in the sidebar to create and edit world lore. When creating or editing
 a character, use the **World lore** checkboxes in the character form to link or unlink
@@ -138,3 +159,9 @@ Upgrade the GUI and broker together. Migration `0010_remove_legacy_lore.sql` rem
 old global/conversation lore and its sync deltas; that data is not converted to worlds.
 Existing characters, conversations, and memories remain. Historical migrations are
 retained so existing databases can upgrade normally.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+Provider integrations run as WASM plugins behind a shared broker interface. See [Operations](docs/OPERATIONS.md#wasm-adapter-plugins) to install/select a plugin and [Adapter contract](docs/architecture/ADAPTERS.md) to build one.

@@ -428,33 +428,17 @@ pub(super) async fn maybe_name_new_chat(
     let fallback = fallback_chat_title(first_message);
     let generated = async {
         let model = selected_model(app).await.ok()?;
-        let response = app
-            .http
-            .post(format!("{}/chat/completions", adapter_url(app).await.ok()?))
-            .timeout(Duration::from_secs(12))
-            .json(&json!({
-                "model": &model,
-                "messages": [
-                    {"role":"system","content":"Name this conversation in 2 to 6 words. Return only the title, without quotes or punctuation."},
-                    {"role":"user","content": first_message}
-                ],
-                "stream": false,
-                "temperature": 0.2,
-                "max_tokens": 24
-            }))
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json::<Value>()
+        let messages=vec![
+            AdapterMessage::new("system","Name this conversation in 2 to 6 words. Return only the title, without quotes or punctuation."),
+            AdapterMessage::new("user",first_message),
+        ];
+        let response=complete(app,&model,messages,GenerationOptions {
+            temperature:Some(0.2),max_tokens:Some(24),..Default::default()
+        },Duration::from_secs(12)).await.ok()?;
+        record_token_usage(app, user_id, adapter_token_usage(response.usage))
             .await
             .ok()?;
-        record_token_usage(app, user_id, token_usage_from_openai(&response))
-            .await
-            .ok()?;
-        response["choices"][0]["message"]["content"]
-            .as_str()
+        response.content.as_deref()
             .map(|title| clean_chat_title(title, first_message))
     }
     .await;
