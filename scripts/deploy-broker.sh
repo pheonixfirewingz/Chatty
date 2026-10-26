@@ -15,10 +15,10 @@ usage() {
         'Usage: scripts/deploy-broker.sh [--user|--system] [--repo DIR] [--service NAME] [--binary PATH]' \
         '' \
         'Run ONLY on the broker host, as the Git checkout owner.' \
-        'Requires a clean checkout, an upstream branch, Rust, and an installed service.' \
+        'Requires a clean checkout, an upstream branch, Rust with rustup, and an installed service.' \
         'Detects a system service first, then a per-user service; --user/--system override this.' \
         'System deployments require sudo; per-user deployments use the current account.' \
-        'Pulls with --ff-only, builds from scratch, backs up and replaces the broker,' \
+        'Pulls with --ff-only, builds adapters and broker from scratch, backs up and replaces the broker,' \
         'then starts the service and checks it for 10 seconds.' \
         'Back up the broker database before deploying; migrations cannot be rolled back automatically.'
 }
@@ -49,7 +49,7 @@ done
 [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.@-]*$ ]] || die 'Invalid service name'
 [[ "$service" == *.service ]] || service+=.service
 [[ -z "$binary" || ( "$binary" == /* && "$binary" != */ ) ]] || die '--binary must be an absolute file path'
-for command in git cargo rustc systemctl install mktemp cp mv rm flock sed date sleep; do
+for command in git cargo rustc rustup systemctl install mktemp cp mv rm flock sed date sleep; do
     command -v "$command" >/dev/null || die "Required command not found: $command"
 done
 
@@ -133,6 +133,9 @@ revision=$(git rev-parse HEAD)
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/chatty-deploy.XXXXXXXX")
 host_target=$(rustc -vV | sed -n 's/^host: //p')
 [[ -n "$host_target" ]] || die 'Cannot determine the Rust host target'
+printf 'Building bundled WASM adapters for revision %s…\n' "$revision"
+rustup target add wasm32-unknown-unknown
+CARGO_TARGET_DIR="$build_dir" bash scripts/build-adapters.sh
 printf 'Building broker revision %s from scratch for %s…\n' "$revision" "$host_target"
 cargo build --locked --release --package chatty-broker --bin chatty-broker \
     --target "$host_target" --target-dir "$build_dir"
