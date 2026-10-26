@@ -2,13 +2,15 @@
 set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_dir"
+offline=(--offline)
 case "${1:-}" in
     ""|--check) ;;
-    *) printf 'Usage: %s [--check]\n' "$0" >&2; exit 2 ;;
+    --online) offline=() ;;
+    *) printf 'Usage: %s [--check|--online]\n' "$0" >&2; exit 2 ;;
 esac
 # Install once before running: rustup target add wasm32-unknown-unknown
 # Prebuilt modules are shipped so normal native builds need no WASM toolchain.
-cargo build --release --locked --offline --target wasm32-unknown-unknown \
+cargo build --release --locked "${offline[@]}" --target wasm32-unknown-unknown \
     -p chatty-adapter-openai-compatible -p chatty-adapter-ollama -p chatty-adapter-hugging-face -p chatty-adapter-freetoken
 adapter_target="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release"
 for adapter_name in openai-compatible ollama hugging-face freetoken; do

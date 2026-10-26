@@ -205,8 +205,8 @@ installation:
 Back up SQLite first. The script fast-forwards the checkout with `git pull
 --ff-only`, ensures the `wasm32-unknown-unknown` Rust target is installed, and rebuilds
 all bundled adapters before building the broker that embeds them. Both builds use
-a fresh temporary target directory and `Cargo.lock`; the adapter build requires
-cached Cargo dependencies because `scripts/build-adapters.sh` runs offline.
+a fresh temporary target directory and `Cargo.lock`; deployment passes `--online`
+to `scripts/build-adapters.sh` so Cargo can download missing dependencies.
 The script then stops the service and atomically replaces the binary. The
 old executable is retained alongside it as `chatty-broker.backup.<timestamp>.<pid>`.
 Temporary build files are removed on exit. The service configuration, certificates,
