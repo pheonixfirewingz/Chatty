@@ -12,6 +12,17 @@ pub enum GenerationStatus {
     SelectingEmotion,
 }
 
+/// Context consumed by the latest generation in one conversation.
+/// Estimates are used until the provider supplies token counts.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct GenerationContext {
+    pub conversation_id: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub context_tokens: u32,
+    pub estimated: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Response {
     ModelDownloadProgress(crate::admin::ModelDownloadProgress),
@@ -33,6 +44,7 @@ pub enum Response {
     CharacterImage {
         character_id: String,
         image_id: String,
+        #[serde(with = "crate::byte_vec")]
         data: Vec<u8>,
     },
     Users(Vec<UserAccount>),
@@ -65,6 +77,7 @@ pub enum Response {
     GenerationStarted {
         message_id: String,
         character_id: String,
+        context: GenerationContext,
     },
     GenerationStatus {
         message_id: String,
@@ -74,6 +87,7 @@ pub enum Response {
         message_id: String,
         revision: i64,
         cancelled: bool,
+        context: GenerationContext,
     },
     Pong,
     /// The requested conversation disappeared before it could be opened.

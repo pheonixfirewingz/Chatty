@@ -357,14 +357,25 @@ pub fn normalize_character_image_png(
     Ok(output.into_inner())
 }
 
-/// Creates an `Option<iced::widget::image::Handle>` from image bytes if non-empty.
+const MAX_CACHED_IMAGES: usize = 32;
+const MAX_CACHED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+thread_local! {
+    // Iced builds views on the UI thread. Reuse identities so its renderer can
+    // reuse decoded images instead of decoding every rebuilt avatar.
+    static IMAGE_HANDLES: std::cell::RefCell<CharacterImageCache> =
+        std::cell::RefCell::new(CharacterImageCache::default());
+}
+
+/// Reuses a bounded, content-checked image handle for non-empty encoded bytes.
 #[must_use]
 pub fn image_handle(bytes: &[u8]) -> Option<iced::widget::image::Handle> {
-    if bytes.is_empty() {
-        None
-    } else {
-        Some(iced::widget::image::Handle::from_bytes(bytes.to_vec()))
-    }
+    IMAGE_HANDLES.with_borrow_mut(|cache| cache.get_or_insert(bytes))
+}
+
+/// Releases retained image bytes when the account is cleared or changed.
+pub fn clear_image_handles() {
+    IMAGE_HANDLES.with_borrow_mut(CharacterImageCache::clear);
 }
 
 /// Alias for `image_handle`.
@@ -373,10 +384,11 @@ pub fn image_handle_from_bytes(bytes: &[u8]) -> Option<iced::widget::image::Hand
     image_handle(bytes)
 }
 
-/// Cache mapping image IDs/hashes to `iced::widget::image::Handle` instances.
+/// Least-recently-used encoded images, bounded by both bytes and entry count.
 #[derive(Default, Debug, Clone)]
 pub struct CharacterImageCache {
-    handles: std::collections::HashMap<String, iced::widget::image::Handle>,
+    handles: std::collections::VecDeque<(u64, iced::widget::image::Handle)>,
+    retained_bytes: usize,
 }
 
 impl CharacterImageCache {
@@ -385,20 +397,44 @@ impl CharacterImageCache {
         Self::default()
     }
 
-    pub fn get_or_insert(&mut self, id: &str, bytes: &[u8]) -> Option<iced::widget::image::Handle> {
+    pub fn get_or_insert(&mut self, bytes: &[u8]) -> Option<iced::widget::image::Handle> {
+        use std::hash::{Hash, Hasher};
+
         if bytes.is_empty() {
             return None;
         }
-        if let Some(h) = self.handles.get(id) {
-            return Some(h.clone());
+        let mut hasher = std::hash::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some(index) = self.handles.iter().position(|(key, handle)| {
+            *key == hash && matches!(handle, iced::widget::image::Handle::Bytes(_, data) if data.as_ref() == bytes)
+        }) {
+            let entry = self.handles.remove(index).expect("cached image exists");
+            let handle = entry.1.clone();
+            self.handles.push_back(entry);
+            return Some(handle);
         }
+
         let handle = iced::widget::image::Handle::from_bytes(bytes.to_vec());
-        self.handles.insert(id.to_string(), handle.clone());
+        if bytes.len() <= MAX_CACHED_IMAGE_BYTES {
+            while self.handles.len() >= MAX_CACHED_IMAGES
+                || self.retained_bytes + bytes.len() > MAX_CACHED_IMAGE_BYTES
+            {
+                if let Some((_, iced::widget::image::Handle::Bytes(_, data))) =
+                    self.handles.pop_front()
+                {
+                    self.retained_bytes -= data.len();
+                }
+            }
+            self.retained_bytes += bytes.len();
+            self.handles.push_back((hash, handle.clone()));
+        }
         Some(handle)
     }
 
     pub fn clear(&mut self) {
         self.handles.clear();
+        self.retained_bytes = 0;
     }
 }
 
@@ -1429,6 +1465,95 @@ pub mod tests {
     }
 
     #[test]
+    fn image_cache_reuses_content_and_obeys_lru_entry_limit() {
+        let mut cache = CharacterImageCache::new();
+        let first = cache.get_or_insert(&[1]).unwrap();
+        let second = cache.get_or_insert(&[2]).unwrap();
+        for n in 3..=MAX_CACHED_IMAGES as u8 {
+            cache.get_or_insert(&[n]).unwrap();
+        }
+        assert_eq!(cache.get_or_insert(&[1]).unwrap().id(), first.id());
+        cache.get_or_insert(&[99]).unwrap();
+        assert_eq!(cache.handles.len(), MAX_CACHED_IMAGES);
+        assert_eq!(cache.get_or_insert(&[1]).unwrap().id(), first.id());
+        assert_ne!(cache.get_or_insert(&[2]).unwrap().id(), second.id());
+
+        // An image edited in place must get a different renderer identity.
+        let mut bytes = vec![111, 112];
+        let original = cache.get_or_insert(&bytes).unwrap();
+        bytes[0] = 113;
+        assert_ne!(cache.get_or_insert(&bytes).unwrap().id(), original.id());
+    }
+
+    #[test]
+    fn image_cache_bounds_bytes_and_checks_hash_collisions() {
+        use std::hash::{Hash, Hasher};
+
+        let mut cache = CharacterImageCache::new();
+        let first = cache.get_or_insert(&[1, 2, 3]).unwrap();
+        let mut hasher = std::hash::DefaultHasher::new();
+        [4u8, 5, 6].as_slice().hash(&mut hasher);
+        cache.handles[0].0 = hasher.finish();
+        assert_ne!(cache.get_or_insert(&[4, 5, 6]).unwrap().id(), first.id());
+        cache.clear();
+        for n in 1..=3 {
+            cache
+                .get_or_insert(&vec![n; MAX_CACHED_IMAGE_BYTES / 2])
+                .unwrap();
+            assert!(cache.retained_bytes <= MAX_CACHED_IMAGE_BYTES);
+        }
+        assert_eq!(cache.handles.len(), 2);
+        let oversized = vec![9; MAX_CACHED_IMAGE_BYTES + 1];
+        let first = cache.get_or_insert(&oversized).unwrap();
+        let second = cache.get_or_insert(&oversized).unwrap();
+        assert_ne!(first.id(), second.id());
+        assert_eq!(cache.handles.len(), 2);
+        assert_eq!(cache.retained_bytes, MAX_CACHED_IMAGE_BYTES);
+        cache.clear();
+        assert_eq!(cache.retained_bytes, 0);
+        assert!(cache.handles.is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual image resource measurement"]
+    fn image_handle_rebuild_resource_probe() {
+        let pixels = ::image::RgbaImage::from_fn(256, 256, |x, y| {
+            ::image::Rgba([x as u8, y as u8, (x.wrapping_mul(y)) as u8, 255])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        pixels
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let png = png.into_inner();
+        for cached in [false, true] {
+            clear_image_handles();
+            let started = std::time::Instant::now();
+            let mut last_id = None;
+            let mut decodes = 0;
+            for _ in 0..100 {
+                let handle = if cached {
+                    image_handle(&png).unwrap()
+                } else {
+                    iced::widget::image::Handle::from_bytes(png.clone())
+                };
+                // Model the renderer's ID-keyed decode lookup without opening
+                // a window or touching a running application.
+                if last_id != Some(handle.id()) {
+                    std::hint::black_box(::image::load_from_memory(&png).unwrap());
+                    decodes += 1;
+                    last_id = Some(handle.id());
+                }
+            }
+            eprintln!(
+                "cached={cached}, 100 rebuilds: {:?}, decodes={decodes}, encoded_bytes={}",
+                started.elapsed(),
+                png.len()
+            );
+        }
+        clear_image_handles();
+    }
+
+    #[test]
     fn test_image_handle_helpers_and_cache() {
         assert!(image_handle(&[]).is_none());
         assert!(image_handle_from_bytes(&[]).is_none());
@@ -1438,11 +1563,11 @@ pub mod tests {
         assert!(handle.is_some());
 
         let mut cache = CharacterImageCache::new();
-        assert!(cache.get_or_insert("key1", &[]).is_none());
+        assert!(cache.get_or_insert(&[]).is_none());
 
-        let h1 = cache.get_or_insert("key1", &dummy);
+        let h1 = cache.get_or_insert(&dummy);
         assert!(h1.is_some());
-        let h2 = cache.get_or_insert("key1", &dummy);
+        let h2 = cache.get_or_insert(&dummy);
         assert!(h2.is_some());
 
         cache.clear();

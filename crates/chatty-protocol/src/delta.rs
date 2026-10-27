@@ -19,6 +19,7 @@ pub struct StateDelta {
     pub entity_type: String,
     pub entity_id: String,
     pub operation: DeltaOperation,
+    #[serde(with = "crate::byte_vec")]
     pub changed_fields: Vec<u8>,
 }
 

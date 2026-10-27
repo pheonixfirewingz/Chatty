@@ -35,6 +35,38 @@ Record the Rust toolchain used for artifacts. Workspace tests exercise the gener
 - Exercise admin user, policy, monitor, adapter, and Ollama controls. Start concurrent downloads, verify per-layer progress, delete an unrelated installed model, cancel one download while another continues, and verify disconnect cleanup.
 - Test an unavailable inference server without losing broker availability.
 
+## Responsive UI inspection
+
+Run the native demo UI through 100 unique viewport sizes and generate PNG captures,
+a JSON result file, and an HTML image gallery:
+
+```sh
+./scripts/gui-responsive-test.py --output /tmp/chatty-responsive
+```
+
+The script needs Python 3 and a running graphical session. It builds the GUI with
+locked, offline dependencies by default. To use an existing binary or a smaller
+matrix:
+
+```sh
+./scripts/gui-responsive-test.py --binary target/release/chatty-gui \
+  --sizes 375x640,800x600,1280x720 --theme light \
+  --output /tmp/chatty-responsive-light
+```
+
+The default matrix crosses ten widths (320–1920) with ten heights (240–1080).
+Each run owns an isolated inspection process, FIFO, and session path, and closes
+that process when finished. On Hyprland it floats and resizes only that process's
+window. Other desktops use the inspector's resize command; allow application
+window resizing there. Use 100% display scaling for exact pixel-size comparisons.
+The output directory must be empty, so earlier evidence is not overwritten.
+
+Open `index.html` in the output directory to review all images at full size.
+`results.json` records requested and captured dimensions. A size mismatch, app
+exit, or capture timeout returns a nonzero exit status and keeps a partial report.
+Successful capture proves image dimensions, not layout quality: inspect narrow,
+short, and wide images for clipping, overlap, and inaccessible controls.
+
 ## Flatpak bundle
 
 The supported local bundle builder vendors locked dependencies and builds only the GUI inside the Freedesktop SDK:

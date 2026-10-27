@@ -251,7 +251,12 @@ impl ProtocolCodec {
         self.rx_scratch.clear();
         self.rx_scratch.reserve(len);
         while self.rx_scratch.len() < len {
-            let n = reader.read_buf(&mut self.rx_scratch).await?;
+            // Spare buffer capacity must not consume the next frame's header.
+            let remaining = (len - self.rx_scratch.len()) as u64;
+            let n = (&mut *reader)
+                .take(remaining)
+                .read_buf(&mut self.rx_scratch)
+                .await?;
             if n == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,

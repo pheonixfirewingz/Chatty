@@ -141,6 +141,14 @@ release evidence.
 - [Release](docs/RELEASE.md): acceptance checks and Flatpak packaging
 - [Architecture](docs/architecture/ARCHITECTURE.md): boundaries, wire contract, and decisions
 
+## Context usage
+
+The pie inside the message input shows context used by the latest request in that
+conversation. Hover over it for tokens used, the context-window size, and percentage
+used. A `~` marks an estimate; provider counts replace estimates when available after
+the reply. Unsent text is not included. A dash means
+no request has been measured in this app session yet.
+
 ## World lore
 
 Open **Worlds** in the sidebar to create and edit world lore. When creating or editing

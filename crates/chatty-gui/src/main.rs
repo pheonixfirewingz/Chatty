@@ -2,6 +2,7 @@
 
 mod admin_monitor;
 pub mod characters;
+mod context_usage;
 mod conversation;
 pub mod memories;
 mod network;
@@ -44,7 +45,7 @@ use network::{
     Command, ConnectionTarget, Event, PendingCertificate, save_preferences, session_path,
 };
 use tts::{LocalTts, TtsEvent, test_speech, tts_channel};
-use ui::{FooterIcon, icon_button, sidebar_panel, sidebar_toggle_button};
+use ui::{FooterIcon, sidebar_panel, sidebar_toggle_button};
 use worlds::{WorldAction, WorldDialogState, WorldMessage, WorldViewState, world_dialog_view};
 
 const USAGE: &str = "chatty-gui -- Chatty client\n\n\
@@ -276,6 +277,7 @@ pub struct ChattyApp {
     memory_dialog_open: bool,
     conversations: Vec<Conversation>,
     messages: Vec<ChatMessage>,
+    markdown: conversation::ConversationMarkdown,
     selected_conversation: Option<String>,
     auto_select_conversation: bool,
     selected_characters: HashSet<String>,
@@ -287,6 +289,7 @@ pub struct ChattyApp {
     stream_text: String,
     typing_character: Option<String>,
     generation_status: Option<GenerationStatus>,
+    context_usage: HashMap<String, GenerationContext>,
     active_request: Option<u64>,
     screen: Screen,
     sidebar_visible: bool,
@@ -363,6 +366,7 @@ impl ChattyApp {
             memory_dialog_open: false,
             conversations: Vec::new(),
             messages: Vec::new(),
+            markdown: conversation::ConversationMarkdown::default(),
             selected_conversation: None,
             auto_select_conversation: true,
             selected_characters: HashSet::new(),
@@ -374,6 +378,7 @@ impl ChattyApp {
             stream_text: String::new(),
             typing_character: None,
             generation_status: None,
+            context_usage: HashMap::new(),
             active_request: None,
             screen: Screen::Login,
             sidebar_visible: true,
@@ -438,6 +443,17 @@ impl ChattyApp {
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_message(message);
+        if self.token.is_empty() {
+            characters::clear_image_handles();
+            self.markdown = conversation::ConversationMarkdown::default();
+        } else {
+            self.markdown.update(&self.messages, &self.stream_text);
+        }
+        task
+    }
+
+    fn update_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::InspectControl(cmd) => {
                 let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -554,6 +570,7 @@ impl ChattyApp {
                             match parts[1] {
                                 "login" => {
                                     self.token.clear();
+                                    self.context_usage.clear();
                                     self.screen = Screen::Login;
                                 }
                                 "main" => {
@@ -724,6 +741,7 @@ impl ChattyApp {
                 self.admin.admin_log = BrokerLog::default();
                 self.admin.admin_log_search.clear();
                 self.token.clear();
+                self.context_usage.clear();
                 self.role = None;
                 self.screen = Screen::Login;
                 Task::none()
@@ -1447,6 +1465,12 @@ impl ChattyApp {
                 ..Default::default()
             }),
             Space::new().width(Length::Fill),
+            ui::ghost_icon_button(
+                ui::VectorIcon::new(ui::MessageIcon::NewChat),
+                Some("New chat"),
+                Message::OpenNewChat,
+            ),
+            Space::new().width(12),
             sidebar_toggle_button(
                 true,
                 if compact {
@@ -1457,22 +1481,6 @@ impl ChattyApp {
             ),
         ]
         .align_y(Alignment::Center);
-
-        let new_chat_btn = button(
-            row![
-                text("+").size(18),
-                text("New chat").size(15).font(font::Font {
-                    weight: font::Weight::Bold,
-                    ..Default::default()
-                })
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::OpenNewChat)
-        .padding(10)
-        .width(Length::Fill)
-        .style(ui::primary_button_style());
 
         let recent_label = text("RECENT CHATS")
             .size(11)
@@ -1671,50 +1679,66 @@ impl ChattyApp {
                 .color(ui::secondary_text_color(self.light_mode))
         ];
 
-        let mut icons_row = row![
-            icon_button(
+        let mut actions = vec![
+            (
                 FooterIcon::Characters,
                 Some("Manage characters"),
                 Message::OpenCharactersDialog,
             ),
-            icon_button(
+            (
                 FooterIcon::World,
                 Some("Manage world lore"),
                 Message::OpenWorldsDialog,
             ),
-            icon_button(
+            (
                 FooterIcon::Memory,
                 Some("Manage character memories"),
                 Message::OpenMemoriesDialog(None, None),
             ),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
+        ];
 
         if self.role == Some(Role::Admin) {
-            icons_row = icons_row.push(icon_button(
+            actions.push((
                 FooterIcon::Admin,
                 Some("Open admin portal"),
                 Message::OpenAdminDialog,
             ));
         }
 
-        icons_row = icons_row
-            .push(icon_button(
+        actions.extend([
+            (
                 FooterIcon::Settings,
                 Some("Open settings"),
                 Message::OpenSettingsDialog,
-            ))
-            .push(icon_button(
+            ),
+            (
                 FooterIcon::SignOut,
                 Some("Sign out"),
                 Message::SignOut,
-            ));
+            ),
+        ]);
+
+        let icons = responsive(move |size| {
+            let (button_size, columns) = sidebar_icon_layout(size.width, actions.len());
+            let mut rows = column![].spacing(6);
+            for group in actions.chunks(columns) {
+                let mut icons_row = row![].spacing(6).align_y(Alignment::Center);
+                for (icon, label, message) in group {
+                    icons_row = icons_row.push(ui::sized_icon_button(
+                        *icon,
+                        *label,
+                        message.clone(),
+                        button_size,
+                    ));
+                }
+                rows = rows.push(icons_row);
+            }
+            rows.into()
+        })
+        .height(Length::Shrink);
 
         let sidebar_content = column![
             header,
-            Space::new().height(8),
-            new_chat_btn,
             Space::new().height(10),
             recent_label,
             Space::new().height(4),
@@ -1722,7 +1746,7 @@ impl ChattyApp {
             Space::new().height(8),
             status_row,
             Space::new().height(6),
-            icons_row.wrap(),
+            icons,
         ]
         .spacing(4)
         .padding(12)
@@ -1759,6 +1783,7 @@ impl ChattyApp {
             characters: &self.characters,
             conversations: &self.conversations,
             messages: &self.messages,
+            markdown: &self.markdown,
             selected_conversation: self.selected_conversation.as_deref(),
             selected_speaker: self.selected_speaker(),
             input: &self.input,
@@ -1766,6 +1791,10 @@ impl ChattyApp {
             stream_text: &self.stream_text,
             typing_character: self.typing_character.as_deref(),
             generation_status: self.generation_status,
+            context_usage: self
+                .selected_conversation
+                .as_ref()
+                .and_then(|id| self.context_usage.get(id)),
             editing_message_id: self.editing_message_id.as_deref(),
             editing_message_content: &self.editing_message_content,
             hovered_message_id: self.hovered_message_id.as_deref(),
@@ -1996,6 +2025,10 @@ impl ChattyApp {
         self.connecting = false;
         self.restoring_session = false;
         self.token = token;
+        if self.user_id != user_id {
+            characters::clear_image_handles();
+            self.context_usage.clear();
+        }
         self.user_id = user_id.clone();
         self.admin.current_user_id = user_id;
         self.role = Some(role);
@@ -2082,6 +2115,7 @@ impl ChattyApp {
                 self.active_request = None;
                 self.typing_character = None;
                 self.token.clear();
+                self.context_usage.clear();
                 self.character_image_requests.clear();
                 self.received_character_images.clear();
                 self.generation_status = None;
@@ -2110,6 +2144,7 @@ impl ChattyApp {
                 self.active_request = None;
                 self.typing_character = None;
                 self.token.clear();
+                self.context_usage.clear();
                 self.character_image_requests.clear();
                 self.received_character_images.clear();
                 self.generation_status = None;
@@ -2218,6 +2253,11 @@ impl ChattyApp {
                                     conversation.kind == ConversationKind::Direct
                                 })
                                 .collect();
+                            self.context_usage.retain(|id, _| {
+                                self.conversations
+                                    .iter()
+                                    .any(|conversation| &conversation.id == id)
+                            });
                             if self.selected_conversation.as_ref().is_some_and(|selected| {
                                 !self
                                     .conversations
@@ -2322,7 +2362,12 @@ impl ChattyApp {
                         }
                         Response::OllamaState(v) => self.admin.ollama_state = Some(v),
                         Response::AdminDatabase(v) => self.admin.admin_data = v,
-                        Response::GenerationStarted { character_id, .. } => {
+                        Response::GenerationStarted {
+                            character_id,
+                            context,
+                            ..
+                        } => {
+                            self.update_context_usage(context);
                             self.active_request = Some(frame.request_id);
                             self.typing_character = Some(character_id);
                             self.generation_status = None;
@@ -2337,7 +2382,9 @@ impl ChattyApp {
                             message_id,
                             revision,
                             cancelled,
+                            context,
                         } => {
+                            self.update_context_usage(context);
                             self.pending_tts_message_id = (!cancelled).then_some(message_id);
                             self.finish_generation(revision);
                         }
@@ -2387,8 +2434,10 @@ impl ChattyApp {
                     message_id,
                     revision,
                     cancelled,
+                    context,
                 }) = decode::<Response>(&frame.payload)
                 {
+                    self.update_context_usage(context);
                     self.pending_tts_message_id = (!cancelled).then_some(message_id);
                     self.finish_generation(revision);
                 } else {
@@ -2433,12 +2482,26 @@ impl ChattyApp {
         }
     }
 
+    fn update_context_usage(&mut self, context: GenerationContext) {
+        if self
+            .conversations
+            .iter()
+            .any(|conversation| conversation.id == context.conversation_id)
+        {
+            self.context_usage
+                .insert(context.conversation_id.clone(), context);
+        }
+    }
+
     pub(crate) fn apply_delta(&mut self, d: StateDelta) {
         let payload = if matches!(d.operation, DeltaOperation::Delete) {
             None
         } else {
             decode::<DeltaPayload>(&d.changed_fields).ok()
         };
+        if d.entity_type == "conversation" && matches!(d.operation, DeltaOperation::Delete) {
+            self.context_usage.remove(&d.entity_id);
+        }
         if d.entity_type == "world" {
             self.worlds.retain(|world| world.id != d.entity_id);
             if let Some(DeltaPayload::World(world)) = payload.as_ref() {
@@ -2621,7 +2684,7 @@ impl ChattyApp {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn current_emotion_portrait(&self) -> Option<(String, String, String, Vec<u8>)> {
+    pub(crate) fn current_emotion_portrait(&self) -> Option<(&str, &str, &str, &[u8])> {
         conversation::current_emotion_portrait(
             &self.characters,
             &self.messages,
@@ -2746,6 +2809,13 @@ impl ChattyApp {
             revision: 1,
         }];
         self.selected_conversation = Some("demo".into());
+        self.update_context_usage(GenerationContext {
+            conversation_id: "demo".into(),
+            prompt_tokens: 2800,
+            completion_tokens: 420,
+            context_tokens: 8192,
+            estimated: false,
+        });
         self.messages.push(ChatMessage {
             id: "m1".into(),
             author_type: "user".into(),
@@ -2894,6 +2964,7 @@ impl ChattyApp {
                 expires_at: "2026-08-24T15:05:00Z".into(),
             }],
         });
+        self.markdown.update(&self.messages, &self.stream_text);
     }
 }
 
@@ -2999,9 +3070,39 @@ fn main() -> Result<()> {
     .map_err(|e| Error::msg(e.to_string()))
 }
 
+/// Shrink sidebar actions to 32px before switching to groups of three.
+fn sidebar_icon_layout(width: f32, count: usize) -> (f32, usize) {
+    let single_row_size = (width - 6.0 * (count - 1) as f32) / count as f32;
+    if single_row_size >= 32.0 {
+        (single_row_size.min(44.0), count)
+    } else {
+        (((width - 12.0) / 3.0).clamp(32.0, 44.0), 3)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_icons_shrink_before_wrapping_into_threes() {
+        for count in [5, 6] {
+            let (size, columns) = sidebar_icon_layout(300.0, count);
+            assert_eq!((size, columns), (44.0, count));
+
+            let threshold = count as f32 * 32.0 + (count - 1) as f32 * 6.0;
+            let (size, columns) = sidebar_icon_layout(threshold, count);
+            assert_eq!((size, columns), (32.0, count));
+            let (size, columns) = sidebar_icon_layout(threshold - 1.0, count);
+            assert_eq!(columns, 3);
+            assert!((32.0..=44.0).contains(&size));
+        }
+
+        let (size, columns) = sidebar_icon_layout(224.0, 6);
+        assert_eq!(columns, 6);
+        assert!(size >= 32.0);
+        assert!(size * 6.0 + 30.0 <= 224.0);
+    }
 
     #[test]
     fn broker_host_accepts_ips_and_domains() {
@@ -3043,6 +3144,67 @@ mod tests {
         let (min, max) = ChattyApp::top_center_square_uv(512.0, 256.0);
         assert_eq!(min, Point::new(0.25, 0.0));
         assert_eq!(max, Point::new(0.75, 1.0));
+    }
+
+    #[test]
+    fn context_usage_tracks_its_conversation_and_clears_on_sign_out() {
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+        let mut other = app.conversations[0].clone();
+        other.id = "other".into();
+        app.conversations.push(other);
+        let context = GenerationContext {
+            conversation_id: "other".into(),
+            prompt_tokens: 1000,
+            completion_tokens: 0,
+            context_tokens: 8192,
+            estimated: true,
+        };
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::Response,
+            request_id: 7,
+            payload: encode(&Response::GenerationStarted {
+                message_id: "reply".into(),
+                character_id: "assistant".into(),
+                context: context.clone(),
+            })
+            .unwrap(),
+        });
+        assert_eq!(app.selected_conversation.as_deref(), Some("demo"));
+        assert_eq!(app.context_usage["demo"].prompt_tokens, 2800);
+        assert_eq!(app.context_usage["other"], context);
+        let final_context = GenerationContext {
+            completion_tokens: 200,
+            estimated: false,
+            ..context
+        };
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: MessageType::StreamEnd,
+            request_id: 7,
+            payload: encode(&Response::GenerationFinished {
+                message_id: "reply".into(),
+                revision: 10,
+                cancelled: false,
+                context: final_context.clone(),
+            })
+            .unwrap(),
+        });
+        assert_eq!(app.context_usage["other"], final_context);
+        assert_eq!(app.context_usage["demo"].prompt_tokens, 2800);
+        app.apply_delta(StateDelta {
+            revision: 11,
+            entity_type: "conversation".into(),
+            entity_id: "other".into(),
+            operation: DeltaOperation::Delete,
+            changed_fields: vec![],
+        });
+        assert!(!app.context_usage.contains_key("other"));
+        let _ = app.update(Message::SignOut);
+        assert!(app.context_usage.is_empty());
     }
 
     #[test]
@@ -3221,6 +3383,52 @@ mod tests {
         app.set_network_status("Online · TLS 1.3".into());
         assert_eq!(app.status, "Online · TLS 1.3");
         assert!(app.status_tooltip.is_none());
+    }
+
+    #[test]
+    fn image_handles_clear_on_sign_out_and_account_change() {
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+        app.connected = true;
+        let bytes = [1, 2, 3];
+        let original = characters::image_handle(&bytes).unwrap();
+        let _ = app.update(Message::Conversation(ConversationMessage::InputChanged(
+            "hello".into(),
+        )));
+        assert_eq!(
+            characters::image_handle(&bytes).unwrap().id(),
+            original.id()
+        );
+        let _ = app.update(Message::SignOut);
+        let after_sign_out = characters::image_handle(&bytes).unwrap();
+        assert_ne!(after_sign_out.id(), original.id());
+        app.authenticated("new-session".into(), "new-owner".into(), Role::User, 0);
+        assert_ne!(
+            characters::image_handle(&bytes).unwrap().id(),
+            after_sign_out.id()
+        );
+    }
+
+    #[test]
+    fn signed_in_login_state_keeps_markdown_when_composer_changes() {
+        let (commands, _) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+        app.connected = true;
+        // Authentication controls the visible shell independently of Screen.
+        assert_eq!(app.screen, Screen::Login);
+        let _ = app.update(Message::Conversation(ConversationMessage::InputChanged(
+            "hello".into(),
+        )));
+        let _ = app.view_at_size(Size::new(800.0, 720.0));
+        let _ = app.update(Message::SignOut);
+        assert_eq!(
+            format!("{:?}", app.markdown),
+            format!("{:?}", conversation::ConversationMarkdown::default())
+        );
     }
 
     #[test]

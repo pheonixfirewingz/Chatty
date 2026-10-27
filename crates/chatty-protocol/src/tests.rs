@@ -227,3 +227,46 @@ async fn codec_rejects_oversized_frame_before_allocation() {
         Err(ProtocolError::Invalid("payload too large"))
     ));
 }
+
+#[tokio::test]
+async fn reusable_codec_keeps_consecutive_frames_separate() {
+    let (mut writer, mut reader) = tokio::io::duplex(4096);
+    // Queue both frames before reading so payload reads can see the next header.
+    for id in [11, 12] {
+        write_message(&mut writer, MessageType::Response, id, &Response::Pong)
+            .await
+            .unwrap();
+    }
+    let chunk = StreamChunk {
+        message_id: "message".into(),
+        sequence: 1,
+        text: "roleplay ".repeat(100),
+    };
+    write_message(&mut writer, MessageType::StreamChunk, 13, &chunk)
+        .await
+        .unwrap();
+    write_payload(&mut writer, MessageType::Cancel, 14, Vec::new())
+        .await
+        .unwrap();
+    drop(writer);
+    let mut codec = ProtocolCodec::new().unwrap();
+    for id in [11, 12] {
+        let frame = codec.read_frame(&mut reader).await.unwrap();
+        assert_eq!(frame.request_id, id);
+        assert!(matches!(
+            decode::<Response>(&frame.payload).unwrap(),
+            Response::Pong
+        ));
+    }
+    let frame = codec.read_frame(&mut reader).await.unwrap();
+    assert_eq!(frame.request_id, 13);
+    assert!(frame.compressed);
+    assert_eq!(
+        decode::<StreamChunk>(&frame.payload).unwrap().text,
+        chunk.text
+    );
+    let frame = codec.read_frame(&mut reader).await.unwrap();
+    assert_eq!(frame.request_id, 14);
+    assert_eq!(frame.message_type, MessageType::Cancel);
+    assert!(frame.payload.is_empty());
+}

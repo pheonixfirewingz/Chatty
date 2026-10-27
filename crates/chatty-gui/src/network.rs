@@ -515,7 +515,7 @@ async fn verify_chatty_handshake(mut stream: TlsStream<TcpStream>) -> Result<Tls
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
-        || value["protocol"] != 18
+        || value["protocol"] != 19
         || value["encoding"] != "bincode2"
     {
         bail!("unsupported broker handshake");
@@ -921,16 +921,7 @@ pub(crate) async fn run(
                         }
                     }
                     Err(e) => {
-                        let idle_close = matches!(
-                            &e,
-                            chatty_protocol::ProtocolError::Io(io)
-                                if io.kind() == std::io::ErrorKind::UnexpectedEof
-                        );
-                        let state = if idle_close { "Idle · offline" } else { "Offline" };
-                        let _ = events.send(Event::Status(format!(
-                            "{} · {state}: {e}",
-                            current_utc_timestamp()
-                        )));
+                        let _ = events.send(Event::Status(connection_closed_status(&e)));
                         reconnect = true;
                         break;
                     }
@@ -947,6 +938,16 @@ pub(crate) async fn run(
                 return;
             }
         }
+    }
+}
+
+fn connection_closed_status(error: &chatty_protocol::ProtocolError) -> String {
+    if matches!(error, chatty_protocol::ProtocolError::Io(io)
+        if io.kind() == std::io::ErrorKind::UnexpectedEof)
+    {
+        "Idle · reconnects on demand".into()
+    } else {
+        format!("{} · Offline: {error}", current_utc_timestamp())
     }
 }
 
@@ -986,6 +987,59 @@ mod tests {
     };
     use chatty_protocol::{ErrorCode, Request, Response, WireError};
     use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+
+    #[test]
+    fn closed_idle_connection_is_normal_but_other_failures_remain_visible() {
+        let closed = chatty_protocol::ProtocolError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "peer closed connection without sending TLS close_notify",
+        ));
+        assert_eq!(
+            super::connection_closed_status(&closed),
+            "Idle · reconnects on demand"
+        );
+
+        let failure = chatty_protocol::ProtocolError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid TLS record",
+        ));
+        assert!(
+            super::connection_closed_status(&failure)
+                .contains("Offline: I/O error: invalid TLS record")
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_connection_waits_for_and_preserves_the_next_command() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut pending = std::collections::VecDeque::new();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                super::park_for_command(&mut pending, &mut receiver),
+            )
+            .await
+            .is_err()
+        );
+        sender
+            .send(super::Command::Request(Box::new(Request::GetServerCapabilities)))
+            .unwrap();
+        assert!(
+            super::park_for_command(&mut pending, &mut receiver)
+                .await
+                .is_some()
+        );
+        assert!(matches!(
+            super::next_command(&mut pending, &mut receiver).await,
+            Some(super::Command::Request(request)) if matches!(*request, Request::GetServerCapabilities)
+        ));
+        sender.send(super::Command::Stop).unwrap();
+        assert!(
+            super::park_for_command(&mut pending, &mut receiver)
+                .await
+                .is_none()
+        );
+    }
 
     #[test]
     fn generation_is_released_only_after_its_user_message_is_accepted() {

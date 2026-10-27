@@ -8,6 +8,7 @@ pub struct CharacterImage {
     pub id: String,
     /// Short, user-editable description such as "happy" or "battle damaged".
     pub label: String,
+    #[serde(with = "crate::byte_vec")]
     pub data: Vec<u8>,
 }
 

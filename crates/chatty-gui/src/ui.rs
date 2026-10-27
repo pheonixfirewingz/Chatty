@@ -442,7 +442,7 @@ pub fn tooltip_style(theme: &Theme) -> container::Style {
 /// Container style for user chat bubbles.
 #[must_use]
 pub fn user_chat_bubble_style() -> container::Style {
-    let base = Color::from_rgba8(0x4f, 0x46, 0xe5, 242.0 / 255.0);
+    let base = Color::from_rgba8(0x4f, 0x46, 0xe5, 242.0 / 255.0 * 0.9);
     container::Style {
         background: Some(glass_background(base)),
         text_color: Some(COLOR_ON_PRIMARY),
@@ -463,8 +463,10 @@ pub fn user_chat_bubble_style() -> container::Style {
 /// Container style for assistant chat bubbles.
 #[must_use]
 pub fn assistant_chat_bubble_style(light_mode: bool, glass_mode: bool) -> container::Style {
+    let mut base = surface_raised_color(light_mode, glass_mode);
+    base.a *= 0.9;
     container::Style {
-        background: Some(raised_background(light_mode, glass_mode)),
+        background: Some(glass_background(base)),
         text_color: None,
         border: Border {
             color: border_color(light_mode, glass_mode),
@@ -631,6 +633,7 @@ impl SidebarToggle {
 /// Message actions share the same vector style as sidebar controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MessageIcon {
+    NewChat,
     Read,
     Regenerate,
     Edit,
@@ -969,7 +972,9 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for FooterIcon {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let center = frame.center();
+        let scale = bounds.width.min(bounds.height) / 28.0;
+        frame.scale(scale);
+        let center = Point::new(14.0, 14.0);
         let stroke_color = theme.palette().text;
         let stroke = Stroke::default().with_color(stroke_color).with_width(1.8);
         draw_footer_icon(&mut frame, *self, center, stroke);
@@ -1000,6 +1005,24 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for SidebarToggle {
 fn draw_message_icon(frame: &mut Frame, icon: MessageIcon, center: Point, stroke: Stroke) {
     let point = |x, y| center + Vector::new(x, y);
     let path = Path::new(|b| match icon {
+        MessageIcon::NewChat => {
+            b.move_to(point(-6.0, -8.0));
+            b.line_to(point(6.0, -8.0));
+            b.quadratic_curve_to(point(9.0, -8.0), point(9.0, -5.0));
+            b.line_to(point(9.0, 3.0));
+            b.quadratic_curve_to(point(9.0, 6.0), point(6.0, 6.0));
+            b.line_to(point(-2.0, 6.0));
+            b.line_to(point(-7.0, 10.0));
+            b.line_to(point(-7.0, 6.0));
+            b.quadratic_curve_to(point(-9.0, 6.0), point(-9.0, 3.0));
+            b.line_to(point(-9.0, -5.0));
+            b.quadratic_curve_to(point(-9.0, -8.0), point(-6.0, -8.0));
+            b.close();
+            b.move_to(point(-4.0, -1.0));
+            b.line_to(point(4.0, -1.0));
+            b.move_to(point(0.0, -5.0));
+            b.line_to(point(0.0, 3.0));
+        }
         MessageIcon::Edit => {
             b.move_to(point(-7.0, 4.0));
             b.line_to(point(3.0, -6.0));
@@ -1071,6 +1094,9 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for VectorIcon {
         let mut frame = Frame::new(renderer, bounds.size());
         let center = frame.center();
         let stroke_color = self.color.unwrap_or(theme.palette().text);
+        frame.translate(Vector::new(center.x, center.y));
+        frame.scale((bounds.width.min(bounds.height) / 24.0).min(1.0));
+        let center = Point::ORIGIN;
         let stroke = Stroke::default()
             .with_color(stroke_color)
             .with_width(self.stroke_width);
@@ -1093,13 +1119,23 @@ pub fn icon_button<'a, Message: Clone + 'a>(
     tooltip_text: Option<&'static str>,
     on_press: Message,
 ) -> Element<'a, Message> {
+    sized_icon_button(program, tooltip_text, on_press, 44.0)
+}
+
+/// Creates an icon button with a proportionally sized canvas.
+pub fn sized_icon_button<'a, Message: Clone + 'a>(
+    program: impl canvas::Program<Message, Theme, Renderer> + 'a,
+    tooltip_text: Option<&'static str>,
+    on_press: Message,
+    size: f32,
+) -> Element<'a, Message> {
     let icon_canvas = canvas::Canvas::new(program)
-        .width(28)
-        .height(28);
+        .width(size * 28.0 / 44.0)
+        .height(size * 28.0 / 44.0);
 
     let btn = button(container(icon_canvas).center_x(Length::Fill).center_y(Length::Fill))
-        .width(44)
-        .height(44)
+        .width(size)
+        .height(size)
         .padding(0)
         .on_press(on_press)
         .style(|theme: &Theme, status: button::Status| {
@@ -1236,14 +1272,31 @@ pub fn sidebar_toggle_button<'a, Message: Clone + 'a>(
 // Markdown Rendering
 // -----------------------------------------------------------------------------
 
-/// Renders markdown text into an Iced Element with clickable link support.
+/// Parsed markdown owned by the loaded conversation, never by a global cache.
+#[derive(Debug, Clone, Default)]
+pub struct Markdown {
+    source: String,
+    items: Vec<markdown::Item>,
+}
+
+impl Markdown {
+    /// Reparse only when displayed content changes, including variant switches.
+    pub fn update(&mut self, text: &str) {
+        if self.source != text {
+            *self = Self {
+                source: text.to_owned(),
+                items: markdown::parse(text).collect(),
+            };
+        }
+    }
+}
+
+/// Borrows parsed markdown for the lifetime of the rendered element.
 pub fn render_markdown<'a, Message: Clone + 'a>(
-    text: &'a str,
+    markdown: &'a Markdown,
     on_link: impl Fn(markdown::Uri) -> Message + 'a,
 ) -> Element<'a, Message> {
-    let items: &'a [markdown::Item] =
-        Box::leak(markdown::parse(text).collect::<Vec<_>>().into_boxed_slice());
-    render_markdown_items(items, on_link)
+    render_markdown_items(&markdown.items, on_link)
 }
 
 /// Renders pre-parsed markdown items into an Iced Element.
@@ -1722,12 +1775,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "manual resource measurement"]
+    fn markdown_rebuild_resource_probe() {
+        let sample = "A **bold** paragraph with a [link](https://example.invalid).\n\n".repeat(100);
+        let started = std::time::Instant::now();
+        let mut markdown = Markdown::default();
+        for _ in 0..500 {
+            markdown.update(&sample);
+            let element: Element<'_, String> = render_markdown(&markdown, |uri| uri.to_string());
+            std::hint::black_box(element);
+        }
+        eprintln!("markdown 500 rebuilds: {:?}", started.elapsed());
+        eprintln!(
+            "{}",
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("VmRSS:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn markdown_reuses_unchanged_parsing_and_releases_replaced_content() {
+        let mut parsed = Markdown::default();
+        parsed.update("First **reply**");
+        let markdown::Item::Paragraph(paragraph) = &parsed.items[0] else {
+            panic!("expected paragraph");
+        };
+        let spans = paragraph.spans(markdown::Style::from_palette(Theme::Dark.palette()));
+        let weak = std::sync::Arc::downgrade(&spans);
+        drop(spans);
+        let items = parsed.items.as_ptr();
+        for _ in 0..100 {
+            parsed.update("First **reply**");
+            let element: Element<'_, ()> = render_markdown(&parsed, |_| ());
+            drop(element);
+        }
+        assert_eq!(items, parsed.items.as_ptr());
+        assert!(weak.upgrade().is_some());
+        parsed.update("Selected variant");
+        assert!(weak.upgrade().is_none());
+        assert_eq!(parsed.source, "Selected variant");
+        parsed.update("");
+        assert!(parsed.items.is_empty());
+        assert!(parsed.source.is_empty());
+    }
+
+    #[test]
     fn test_markdown_rendering() {
         let sample = "# Header\n\nThis is a **bold** paragraph with a [link](https://example.invalid).\n\n```rust\nlet x = 42;\n```\n";
-        let _element: Element<'_, String> = render_markdown(sample, |uri| uri.to_string());
+        let mut markdown = Markdown::default();
+        markdown.update(sample);
+        let _element: Element<'_, String> = render_markdown(&markdown, |uri| uri.to_string());
 
         // Test empty string
-        let _empty: Element<'_, ()> = render_markdown("", |_| ());
+        let empty = Markdown::default();
+        let _empty: Element<'_, ()> = render_markdown(&empty, |_| ());
     }
 
     #[test]

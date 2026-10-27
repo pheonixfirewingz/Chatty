@@ -3,6 +3,7 @@
 
 pub mod account;
 pub mod admin;
+mod byte_vec;
 pub mod character;
 pub mod conversation;
 pub mod delta;
@@ -30,7 +31,7 @@ pub use frame::{
 };
 pub use memory::{MemoryEntry, MemoryInput, MemoryKind, MemorySource};
 pub use request::Request;
-pub use response::{GenerationStatus, Response};
+pub use response::{GenerationContext, GenerationStatus, Response};
 pub use util::current_utc_timestamp;
 
 #[cfg(test)]

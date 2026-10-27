@@ -41,7 +41,7 @@ pub(super) async fn serve(
         MessageType::Handshake,
         0,
         serde_json::to_vec(
-            &json!({"protocol":18,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
+            &json!({"protocol":19,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
         )?
         .into(),
     ))
@@ -147,6 +147,9 @@ pub(super) async fn serve(
                             if errors.len() > 20 {
                                 errors.remove(0);
                             }
+                            // Writer backpressure must not block other clients'
+                            // error recording or the administrator's log view.
+                            drop(errors);
                             let _ = tx
                                 .send((
                                     MessageType::Error,

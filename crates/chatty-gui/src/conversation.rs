@@ -1,4 +1,4 @@
-use chatty_protocol::Character;
+use chatty_protocol::{Character, GenerationContext};
 use chatty_protocol::conversation::{ChatMessage, Conversation};
 use chatty_protocol::response::GenerationStatus;
 use iced::widget::{
@@ -63,6 +63,24 @@ pub enum ConversationMessage {
     HoverMessage(Option<String>),
 }
 
+/// Keeps parsed data only for loaded messages and the current stream.
+#[derive(Debug, Clone, Default)]
+pub struct ConversationMarkdown {
+    messages: Vec<crate::ui::Markdown>,
+    stream: crate::ui::Markdown,
+}
+
+impl ConversationMarkdown {
+    pub fn update(&mut self, messages: &[ChatMessage], stream: &str) {
+        self.messages.truncate(messages.len());
+        self.messages.resize_with(messages.len(), Default::default);
+        for (parsed, message) in self.messages.iter_mut().zip(messages) {
+            parsed.update(displayed_message_content(message));
+        }
+        self.stream.update(stream);
+    }
+}
+
 /// Zero-copy snapshot of application state required to render the conversation view.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -70,6 +88,7 @@ pub struct ConversationViewState<'a> {
     pub characters: &'a [Character],
     pub conversations: &'a [Conversation],
     pub messages: &'a [ChatMessage],
+    pub markdown: &'a ConversationMarkdown,
     pub selected_conversation: Option<&'a str>,
     pub selected_speaker: Option<&'a str>,
     pub input: &'a str,
@@ -77,6 +96,7 @@ pub struct ConversationViewState<'a> {
     pub stream_text: &'a str,
     pub typing_character: Option<&'a str>,
     pub generation_status: Option<GenerationStatus>,
+    pub context_usage: Option<&'a GenerationContext>,
     pub editing_message_id: Option<&'a str>,
     pub editing_message_content: &'a str,
     pub hovered_message_id: Option<&'a str>,
@@ -126,12 +146,12 @@ pub fn character_name<'a>(characters: &'a [Character], id: Option<&str>) -> &'a 
 /// Looks backwards from the latest message for an `author_id` and `character_image_id`.
 /// If none is found, falls back to the selected speaker's default image.
 #[must_use]
-pub fn current_emotion_portrait(
-    characters: &[Character],
+pub fn current_emotion_portrait<'a>(
+    characters: &'a [Character],
     messages: &[ChatMessage],
     selected_conversation: Option<&str>,
     selected_speaker: Option<&str>,
-) -> Option<(String, String, String, Vec<u8>)> {
+) -> Option<(&'a str, &'a str, &'a str, &'a [u8])> {
     selected_conversation?;
     for message in messages.iter().rev() {
         let (Some(character_id), Some(image_id)) =
@@ -143,12 +163,7 @@ pub fn current_emotion_portrait(
             continue;
         };
         if let Some(image) = character.images.iter().find(|img| img.id == image_id) {
-            return Some((
-                character.name.clone(),
-                image.label.clone(),
-                image.id.clone(),
-                image.data.clone(),
-            ));
+            return Some((&character.name, &image.label, &image.id, &image.data));
         }
     }
 
@@ -156,12 +171,7 @@ pub fn current_emotion_portrait(
     let character = characters.iter().find(|c| c.id == character_id)?;
     let image_id = character.default_image_id.as_deref()?;
     let image = character.images.iter().find(|img| img.id == image_id)?;
-    Some((
-        character.name.clone(),
-        image.label.clone(),
-        image.id.clone(),
-        image.data.clone(),
-    ))
+    Some((&character.name, &image.label, &image.id, &image.data))
 }
 
 /// Renders a circular character avatar (or initial letter if no image is present).
@@ -219,16 +229,16 @@ pub fn character_avatar_view<'a, Message: 'a>(
 /// Renders the floating emotion portrait card.
 #[must_use]
 pub fn emotion_portrait_card<'a, Message: 'a>(
-    portrait: &(String, String, String, Vec<u8>),
+    portrait: &(&'a str, &'a str, &'a str, &'a [u8]),
     light_mode: bool,
     glass_mode: bool,
     compact: bool,
 ) -> Element<'a, Message> {
-    let (name, label, _img_id, data) = portrait;
+    let (name, label, _img_id, data) = *portrait;
     let img_size = if compact { 80.0 } else { 140.0 };
 
     let avatar = character_avatar_view(name, Some(data), img_size);
-    let title = text(name.clone()).size(13).color(if light_mode {
+    let title = text(name).size(13).color(if light_mode {
         Color::from_rgb(0.1, 0.1, 0.2)
     } else {
         Color::WHITE
@@ -251,6 +261,7 @@ pub fn emotion_portrait_card<'a, Message: 'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn render_message_bubble<'a, Message: Clone + 'a>(
     message: &'a ChatMessage,
+    markdown: &'a crate::ui::Markdown,
     characters: &'a [Character],
     is_editing: bool,
     editing_content: &'a str,
@@ -289,7 +300,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
     }
 
     let displayed_text = displayed_message_content(message);
-    let md = render_markdown(displayed_text, move |uri| {
+    let md = render_markdown(markdown, move |uri| {
         on_msg(ConversationMessage::OpenLink(uri.to_string()))
     });
 
@@ -492,12 +503,12 @@ fn message_action_button<'a, Message: Clone + 'a>(
         Color::TRANSPARENT
     };
     let icon = canvas::Canvas::new(VectorIcon::new(icon).with_color(color))
-        .width(24)
-        .height(24);
+        .width(9)
+        .height(9);
     let control = button(icon)
-        .width(28)
-        .height(28)
-        .padding(2)
+        .width(24)
+        .height(24)
+        .padding(7.5)
         .on_press_maybe(action)
         .style(message_action_style(light_mode, visible));
     tooltip(
@@ -607,11 +618,13 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
 
     let mut message_list = column![].spacing(16).width(Length::Fill);
 
-    for msg in view.messages {
+    debug_assert_eq!(view.messages.len(), view.markdown.messages.len());
+    for (msg, markdown) in view.messages.iter().zip(&view.markdown.messages) {
         let is_editing = view.editing_message_id == Some(msg.id.as_str());
         let is_hovered = view.hovered_message_id == Some(msg.id.as_str());
         message_list = message_list.push(render_message_bubble(
             msg,
+            markdown,
             view.characters,
             is_editing,
             view.editing_message_content,
@@ -627,7 +640,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
         let header = text(format!("{author_name}:"))
             .size(13)
             .color(crate::ui::accent_text_color(light_mode));
-        let md = render_markdown(view.stream_text, move |uri| {
+        let md = render_markdown(&view.markdown.stream, move |uri| {
             on_msg(ConversationMessage::OpenLink(uri.to_string()))
         });
 
@@ -675,9 +688,23 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
         .style(crate::ui::input_style)
         .on_input(move |v| on_msg(ConversationMessage::InputChanged(v)))
         .on_submit(on_msg(ConversationMessage::SubmitMessage))
-        .padding(12)
+        .padding(iced::Padding {
+            top: 12.0,
+            right: 88.0,
+            bottom: 12.0,
+            left: 12.0,
+        })
         .size(14)
         .width(Length::Fill);
+    let composer_input = iced::widget::stack![
+        composer_input,
+        container(crate::context_usage::indicator(view.context_usage))
+            .padding([0, 10])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::End)
+            .align_y(Alignment::Center),
+    ];
 
     let action_btn = if let Some(req_id) = view.active_request {
         button(text("Stop").size(13).font(font::Font {
@@ -1015,12 +1042,15 @@ mod tests {
         assert_eq!(name, "Seraphina");
         assert_eq!(label, "neutral");
         assert_eq!(id, "img1");
-        assert_eq!(data, vec![1, 2, 3]);
+        assert_eq!(data, &[1, 2, 3]);
+        assert_eq!(data.as_ptr(), chars[0].images[0].data.as_ptr());
     }
 
     #[test]
     fn test_conversation_view_empty_state() {
+        let markdown = ConversationMarkdown::default();
         let view_state = ConversationViewState {
+            markdown: &markdown,
             characters: &[],
             conversations: &[],
             messages: &[],
@@ -1031,6 +1061,7 @@ mod tests {
             stream_text: "",
             typing_character: None,
             generation_status: None,
+            context_usage: None,
             editing_message_id: None,
             editing_message_content: "",
             hovered_message_id: None,
@@ -1062,7 +1093,9 @@ mod tests {
 
     #[test]
     fn test_conversation_view_collapsed_sidebar() {
+        let markdown = ConversationMarkdown::default();
         let view_state = ConversationViewState {
+            markdown: &markdown,
             characters: &[],
             conversations: &[],
             messages: &[],
@@ -1073,6 +1106,7 @@ mod tests {
             stream_text: "",
             typing_character: None,
             generation_status: None,
+            context_usage: None,
             editing_message_id: None,
             editing_message_content: "",
             hovered_message_id: None,
@@ -1104,7 +1138,10 @@ mod tests {
         };
         let convs = vec![conv];
 
+        let mut markdown = ConversationMarkdown::default();
+        markdown.update(&msgs, "");
         let view_state_unhovered = ConversationViewState {
+            markdown: &markdown,
             characters: &chars,
             conversations: &convs,
             messages: &msgs,
@@ -1115,6 +1152,7 @@ mod tests {
             stream_text: "",
             typing_character: None,
             generation_status: None,
+            context_usage: None,
             editing_message_id: None,
             editing_message_content: "",
             hovered_message_id: None,

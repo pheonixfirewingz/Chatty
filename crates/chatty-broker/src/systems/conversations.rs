@@ -179,24 +179,34 @@ pub(super) async fn load_conversation_from_row(
     let conversation = conversation_from_row(db, row).await?;
     let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,character_image_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY revision,id LIMIT 2000")
         .bind(&id).fetch_all(db).await?;
+    // Fetch variants for exactly the bounded timeline, rather than issuing one
+    // SQLite round trip per message. Stream rows to avoid a second full row set.
+    let message_ids: Vec<&str> = rows.iter().map(|row| row.get("id")).collect();
+    let mut variants_by_message = HashMap::<String, Vec<Variant>>::new();
+    if !message_ids.is_empty() {
+        let mut variants = sqlx::query(
+            "SELECT message_id,id,content,created_at,revision FROM variants \
+             WHERE message_id IN (SELECT value FROM json_each(?)) \
+             ORDER BY message_id,created_at,id",
+        )
+        .bind(serde_json::to_string(&message_ids)?)
+        .fetch(db);
+        while let Some(row) = variants.try_next().await? {
+            variants_by_message
+                .entry(row.get("message_id"))
+                .or_default()
+                .push(Variant {
+                    id: row.get("id"),
+                    content: row.get("content"),
+                    created_at: row.get("created_at"),
+                    revision: row.get("revision"),
+                });
+        }
+    }
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
         let message_id: String = row.get("id");
-        let variant_rows = sqlx::query(
-            "SELECT id,content,created_at,revision FROM variants WHERE message_id=? ORDER BY created_at,id",
-        )
-        .bind(&message_id)
-        .fetch_all(db)
-        .await?;
-        let variants = variant_rows
-            .into_iter()
-            .map(|v| Variant {
-                id: v.get("id"),
-                content: v.get("content"),
-                created_at: v.get("created_at"),
-                revision: v.get("revision"),
-            })
-            .collect();
+        let variants = variants_by_message.remove(&message_id).unwrap_or_default();
         messages.push(ChatMessage {
             id: message_id,
             author_type: row.get("author_type"),
@@ -504,4 +514,87 @@ pub(super) async fn load_worlds(db: &SqlitePool, uid: &str) -> Result<Vec<World>
     rows.iter()
         .map(|data| decode(data).map_err(Into::into))
         .collect()
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_timeline_keeps_variant_order_selection_and_owner_scope() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username,password_hash) VALUES('owner','owner','hash'),('other','other','hash')")
+            .execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('chat','owner','Chat',0,1),('other-chat','other','Other',0,2)")
+            .execute(&db).await.unwrap();
+        sqlx::query("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<2000) INSERT INTO messages(id,conversation_id,author_type,content,revision) SELECT printf('m%04d',i),'chat','assistant',printf('text %d',i),i+1 FROM n")
+            .execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,parent_id,revision) VALUES('child','chat','assistant','branch','m0000',0),('foreign','other-chat','assistant','private',NULL,0)")
+            .execute(&db).await.unwrap();
+        for (id, message, time) in [
+            ("z", "m0000", "2026-01-01"),
+            ("b", "m0000", "2026-01-02"),
+            ("a", "m0000", "2026-01-02"),
+            ("outside", "m2000", "2026-01-01"),
+            ("branch", "child", "2026-01-01"),
+            ("private", "foreign", "2026-01-01"),
+        ] {
+            sqlx::query(
+                "INSERT INTO variants(id,message_id,content,created_at,revision) VALUES(?,?,?,?,7)",
+            )
+            .bind(id)
+            .bind(message)
+            .bind(id)
+            .bind(time)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE messages SET selected_variant_id='a' WHERE id='m0000'")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert!(
+            load_owned_conversation(&db, "chat", "other")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let view = load_owned_conversation(&db, "chat", "owner")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.messages.len(), 2000);
+        assert_eq!(view.messages[0].id, "m0000");
+        assert_eq!(view.messages[1999].id, "m1999");
+        assert_eq!(view.messages[0].selected_variant_id.as_deref(), Some("a"));
+        assert_eq!(
+            view.messages[0]
+                .variants
+                .iter()
+                .map(|v| v.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a", "b"]
+        );
+        assert!(view.messages[1..].iter().all(|m| m.variants.is_empty()));
+        sqlx::query("DELETE FROM conversations WHERE id='chat'")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('empty','owner','Empty',0,3)")
+            .execute(&db).await.unwrap();
+        assert!(
+            load_conversation(&db, "empty")
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+    }
 }
