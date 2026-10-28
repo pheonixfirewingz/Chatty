@@ -545,6 +545,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             Some(GenerationStatus::SelectingEmotion) => {
                 "AI is selecting an emotion portrait…".to_string()
             }
+            Some(GenerationStatus::Thinking) => format!("{typing_name} is thinking…"),
             None => format!("{typing_name} is typing…"),
         };
         message_list = message_list.push(

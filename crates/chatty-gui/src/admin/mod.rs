@@ -43,6 +43,7 @@ pub enum AdminMessage {
     SeedChanged(i64),
     KeepAliveChanged(String),
     EmotionModelChanged(String),
+    ReasoningChanged(chatty_protocol::ReasoningLevel),
     TogglePublicCharacters(bool),
     ToggleRegistration(bool),
 
@@ -327,6 +328,7 @@ impl Default for AdminState {
                 allow_self_registration: true,
                 image: Default::default(),
                 emotion_model: String::new(),
+                reasoning: Default::default(),
             },
             broker_monitor: None,
             ollama_state: None,
@@ -565,6 +567,10 @@ impl AdminState {
             }
             AdminMessage::EmotionModelChanged(path) => {
                 self.broker_config.emotion_model = path;
+                vec![]
+            }
+            AdminMessage::ReasoningChanged(level) => {
+                self.broker_config.reasoning = level;
                 vec![]
             }
             AdminMessage::TogglePublicCharacters(allow) => {

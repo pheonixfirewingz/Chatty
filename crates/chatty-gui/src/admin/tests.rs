@@ -291,6 +291,15 @@ fn test_admin_state_update() {
     );
     assert_eq!(state.broker_config.emotion_model, "/models/emotion.gguf");
 
+    state.update(
+        AdminMessage::ReasoningChanged(chatty_protocol::ReasoningLevel::Off),
+        token,
+    );
+    assert_eq!(
+        state.broker_config.reasoning,
+        chatty_protocol::ReasoningLevel::Off
+    );
+
     state.update(AdminMessage::TogglePublicCharacters(true), token);
     assert!(state.broker_config.allow_public_characters);
 

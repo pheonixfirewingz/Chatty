@@ -1358,7 +1358,12 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             repeat_penalty: Some(config.repeat_penalty),
             seed: Some(config.seed),
             keep_alive: Some(config.keep_alive.clone()),
-            disable_reasoning: false,
+            disable_reasoning: config.reasoning == ReasoningLevel::Off,
+            reasoning_effort: matches!(
+                config.reasoning,
+                ReasoningLevel::Low | ReasoningLevel::Medium | ReasoningLevel::High
+            )
+            .then(|| config.reasoning.as_str().to_owned()),
         },
         timeout_ms: None,
     });
@@ -1379,6 +1384,8 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     let mut deadline = Instant::now() + Duration::from_millis(60);
     let mut cancelled = false;
     let mut done = false;
+    // Hidden reasoning shows no text, so tell the client once while it runs.
+    let mut thinking_sent = false;
     let mut usage = TokenUsage::default();
     loop {
         enum Event<T> {
@@ -1401,6 +1408,19 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             }
             Event::Timeout => {}
             Event::Data(Some(update)) => {
+                if update.reasoning && !thinking_sent && complete.is_empty() {
+                    thinking_sent = true;
+                    tx.send((
+                        MessageType::Response,
+                        req_id,
+                        encode(&Response::GenerationStatus {
+                            message_id: mid.clone(),
+                            status: GenerationStatus::Thinking,
+                        })?
+                        .into(),
+                    ))
+                    .await?;
+                }
                 if pending.is_empty() {
                     // Silent upstreams need no timer. Start the flush window
                     // when output first arrives instead of ticking while idle.
@@ -1824,6 +1844,7 @@ mod prompt_budget_tests {
             allow_self_registration: false,
             image: Default::default(),
             emotion_model: String::new(),
+            reasoning: Default::default(),
         };
         assert_eq!(prompt_input_budget(&config), 3_072);
         config.num_predict = 512;
@@ -2089,7 +2110,7 @@ mod automatic_memory_tests {
                             let _ = responses_rx.recv().await;
                             continue;
                         }
-                        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"I will remember your jasmine tea.\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_owned();
+                        let body = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Recall the tea.\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"I will remember your jasmine tea.\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_owned();
                         let body = if report_usage {
                             body.replace("data: [DONE]", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":123,\"completion_tokens\":45}}\n\ndata: [DONE]")
                         } else {
@@ -2311,6 +2332,14 @@ mod automatic_memory_tests {
         for reported in [false, true] {
             let server = server_with_usage(reported).await;
             let app = app(&server.url).await;
+            sqlx::query("UPDATE broker_settings SET reasoning='low' WHERE singleton=1")
+                .execute(&app.db)
+                .await
+                .unwrap();
+            assert_eq!(
+                load_broker_config(&app.db).await.unwrap().reasoning,
+                ReasoningLevel::Low
+            );
             server.responses.send((200, "[]".into())).await.unwrap();
             let (tx, mut rx) = mpsc::channel(32);
             let (_cancel, cancel) = watch::channel(false);
@@ -2332,15 +2361,28 @@ mod automatic_memory_tests {
             .unwrap();
             let mut started = None;
             let mut finished = None;
+            let mut thinking_before_text = false;
+            let mut chunks = 0;
             while let Ok((kind, _, payload)) = rx.try_recv() {
+                if kind == MessageType::StreamChunk {
+                    chunks += 1;
+                }
                 if matches!(kind, MessageType::Response | MessageType::StreamEnd) {
                     match decode::<Response>(&payload).unwrap() {
                         Response::GenerationStarted { context, .. } => started = Some(context),
+                        Response::GenerationStatus {
+                            status: GenerationStatus::Thinking,
+                            ..
+                        } => {
+                            assert!(!thinking_before_text, "thinking is reported once");
+                            thinking_before_text = chunks == 0;
+                        }
                         Response::GenerationFinished { context, .. } => finished = Some(context),
                         _ => {}
                     }
                 }
             }
+            assert!(thinking_before_text);
             let started = started.unwrap();
             let finished = finished.unwrap();
             assert_eq!(started.conversation_id, "chat");

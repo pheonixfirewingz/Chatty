@@ -1,8 +1,8 @@
 use super::{Harness, png};
 use crate::network::Command;
 use chatty_protocol::{
-    CharacterImage, ChatMessage, DeltaOperation, DeltaPayload, MessageType, Request, StateDelta,
-    encode,
+    CharacterImage, ChatMessage, DeltaOperation, DeltaPayload, GenerationContext, GenerationStatus,
+    MessageType, Request, Response, StateDelta, StreamChunk, encode,
 };
 
 fn add_happy_image(app: &mut Harness) {
@@ -100,4 +100,43 @@ fn generation_delta_updates_the_emotion_panel_immediately() {
     );
     let portrait = app.emotion_portrait().unwrap();
     assert_eq!((portrait.1, portrait.2), ("happy", "demo-happy"));
+}
+
+#[test]
+fn thinking_status_shows_until_reply_text_streams() {
+    let mut app = Harness::demo();
+    app.respond(
+        7,
+        &Response::GenerationStarted {
+            message_id: "reply".into(),
+            character_id: "assistant".into(),
+            context: GenerationContext {
+                conversation_id: "demo".into(),
+                prompt_tokens: 10,
+                completion_tokens: 0,
+                context_tokens: 4096,
+                estimated: true,
+            },
+        },
+    );
+    app.respond(
+        7,
+        &Response::GenerationStatus {
+            message_id: "reply".into(),
+            status: GenerationStatus::Thinking,
+        },
+    );
+    assert_eq!(app.generation_status, Some(GenerationStatus::Thinking));
+
+    app.frame(
+        MessageType::StreamChunk,
+        7,
+        &StreamChunk {
+            message_id: "reply".into(),
+            sequence: 1,
+            text: "Hello".into(),
+        },
+    );
+    assert_eq!(app.generation_status, None);
+    assert_eq!(app.stream_text, "Hello");
 }

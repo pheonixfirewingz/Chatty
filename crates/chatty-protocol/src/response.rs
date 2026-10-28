@@ -10,6 +10,8 @@ use crate::memory::MemoryEntry;
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationStatus {
     SelectingEmotion,
+    /// The model is producing hidden reasoning before visible reply text.
+    Thinking,
 }
 
 /// Context consumed by the latest generation in one conversation.

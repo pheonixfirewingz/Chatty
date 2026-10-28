@@ -29,6 +29,8 @@ fn chat(base: &str, request: ChatRequest, stream: bool) -> HttpPlan {
     }
     if options.disable_reasoning {
         body["reasoning_effort"] = json!("none");
+    } else if let Some(effort) = options.reasoning_effort {
+        body["reasoning_effort"] = json!(effort);
     }
     let mut plan = HttpPlan::new(
         vec![HttpRequest::post(
@@ -127,6 +129,10 @@ pub fn translate(input: PluginInput) -> PluginResult {
                 if let Some(text) = value["choices"][0]["delta"]["content"].as_str() {
                     update.text.push_str(text);
                 }
+                let delta = &value["choices"][0]["delta"];
+                update.reasoning |= ["reasoning_content", "reasoning"]
+                    .iter()
+                    .any(|key| delta[*key].as_str().is_some_and(|text| !text.is_empty()));
             }
             PluginOutput::Stream(update)
         }

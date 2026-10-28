@@ -29,6 +29,59 @@ pub struct BrokerConfig {
     /// Broker-host path to the emotion classifier GGUF, run in-process after
     /// each reply to pick a portrait. Empty disables classification.
     pub emotion_model: String,
+    /// Hidden reasoning effort for chat replies. Auxiliary calls such as
+    /// memory extraction always disable reasoning.
+    pub reasoning: ReasoningLevel,
+}
+
+/// Reasoning effort requested for chat replies. Providers that support only
+/// on/off reasoning treat every level other than `Off` as on.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReasoningLevel {
+    /// Send no reasoning option, leaving the choice to the model and server.
+    #[default]
+    Default,
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningLevel {
+    pub const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+    ];
+
+    /// Stable storage name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|level| level.as_str() == name)
+    }
+}
+
+impl std::fmt::Display for ReasoningLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Default => "Model default",
+            Self::Off => "Off",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        })
+    }
 }
 
 /// Text-to-image service used for portraits and scene images. It is separate

@@ -31,6 +31,7 @@ pub(super) fn request() -> ChatRequest {
             seed: Some(7),
             keep_alive: Some("5m".into()),
             disable_reasoning: false,
+            reasoning_effort: None,
         },
         timeout_ms: Some(60_000),
     }
@@ -181,6 +182,63 @@ fn fragmented_ndjson_utf8_and_eof_pass_through_wasm() {
     assert_eq!(update.text, "!");
     assert!(update.done);
     assert_eq!(update.completion_tokens, Some(3));
+}
+#[test]
+fn reasoning_effort_maps_to_provider_options() {
+    let body = |id, options: &GenerationOptions| {
+        let mut chat = request();
+        chat.options = options.clone();
+        plan(id, AdapterRequest::Stream(chat)).requests[0]
+            .body
+            .clone()
+            .unwrap()
+    };
+    let mut options = request().options;
+    options.reasoning_effort = Some("low".into());
+    assert_eq!(body("ollama", &options)["think"], "low");
+    assert_eq!(
+        body("openai-compatible", &options)["reasoning_effort"],
+        "low"
+    );
+    options.disable_reasoning = true;
+    assert_eq!(body("ollama", &options)["think"], false);
+    assert_eq!(
+        body("openai-compatible", &options)["reasoning_effort"],
+        "none"
+    );
+    let options = GenerationOptions::default();
+    assert!(body("ollama", &options).get("think").is_none());
+    assert!(
+        body("openai-compatible", &options)
+            .get("reasoning_effort")
+            .is_none()
+    );
+}
+#[test]
+fn stream_updates_flag_hidden_reasoning_without_exposing_it() {
+    for (id, thinking, answer) in [
+        (
+            "ollama",
+            b"{\"message\":{\"content\":\"\",\"thinking\":\"hmm\"},\"done\":false}\n".as_slice(),
+            b"{\"message\":{\"content\":\"Hi\"},\"done\":false}\n".as_slice(),
+        ),
+        (
+            "openai-compatible",
+            b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n".as_slice(),
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n".as_slice(),
+        ),
+    ] {
+        let mut decoder = Decoder {
+            session: session(id),
+            buffer: Vec::new(),
+        };
+        let update = decoder.push(thinking, false).unwrap().unwrap();
+        assert!(update.reasoning, "{id}");
+        assert!(update.text.is_empty(), "{id}");
+        let update = decoder.push(answer, false).unwrap().unwrap();
+        assert!(!update.reasoning, "{id}");
+        assert_eq!(update.text, "Hi", "{id}");
+    }
 }
 #[test]
 fn streaming_provider_errors_remain_errors() {
@@ -793,6 +851,7 @@ fn management_and_inference_use_the_same_administrator_selection() {
         allow_self_registration: false,
         image: Default::default(),
         emotion_model: String::new(),
+        reasoning: Default::default(),
     };
     host.configuration_changed(&config).unwrap();
     let compatible = host.inference(&config).unwrap();

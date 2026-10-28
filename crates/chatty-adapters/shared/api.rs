@@ -33,6 +33,10 @@ pub struct GenerationOptions {
     pub seed: Option<i64>,
     pub keep_alive: Option<String>,
     pub disable_reasoning: bool,
+    /// Requested reasoning effort, such as `low`, `medium`, or `high`.
+    /// Ignored when `disable_reasoning` is set; older v1 hosts omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +243,9 @@ pub struct StreamUpdate {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub done: bool,
+    /// True when these records carried hidden reasoning. Older v1 guests omit it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

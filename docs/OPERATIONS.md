@@ -91,6 +91,10 @@ Enter that path in **Admin Portal → Models → Emotion classifier** and save. 
 
 The model loads on the first reply after saving and stays resident, using about 1 GB of RAM. Each classification uses half the CPU cores and runs after the reply is saved, so chat does not wait. Classifications run one at a time; at most eight replies wait, and later ones keep the default portrait. Migration 0016 adds the setting, and protocol 23 carries it; upgrade broker and GUI together.
 
+### Reasoning level
+
+**Admin Portal → Models → Reasoning** sets hidden reasoning effort for chat replies. **Model default** sends no option. **Off** disables reasoning. **Low**, **Medium**, and **High** are sent as Ollama `think` or OpenAI `reasoning_effort`; models with only on/off reasoning treat them all as on. Memory extraction, titles, and other auxiliary calls keep their own settings. While the model reasons, the chat shows "is thinking…". Reasoning text is never shown or stored. Migration 0017 adds the setting, and protocol 24 carries it; upgrade broker and GUI together.
+
 ### Image generation with ComfyUI
 
 Image generation is separate from text inference and disabled by default. It produces character portrait drafts and persisted scene images in chats. Migration 0014 adds its settings and the encrypted `message_images` table. Protocol 20 carries the settings and image requests; upgrade broker and GUI together.
@@ -138,7 +142,7 @@ Supported operations:
 
 - Discovery: `GET /v1/models`; IDs come from the server, including its `--served-model-name` override.
 - Completion and streaming: `POST /v1/chat/completions`; SSE requests include usage. Only assistant `content` enters final output. Separate `reasoning_content`, `reasoning`, and `thinking` fields are discarded, never promoted to final content. Reasoning-only responses therefore have no final text.
-- Options: model, messages, temperature, top-p, top-k, nonnegative max tokens, and `reasoning_effort=none` when reasoning is disabled. Negative max-token sentinels omit the limit and use the server default. Thinking control remains model/template dependent.
+- Options: model, messages, temperature, top-p, top-k, nonnegative max tokens, and `reasoning_effort` (`none` when reasoning is disabled, otherwise the admin reasoning level). Negative max-token sentinels omit the limit and use the server default. Thinking control remains model/template dependent.
 - State: `GET /health` reports the server version and the serving model when status is `ok` and maintenance is `serving`. Loading reports no running model; fatal health errors remain errors. Installed-model inventory is unavailable. Size, VRAM, and expiry metadata are unavailable and use zero/empty neutral defaults.
 
 Unsupported operations return explicit errors before HTTP: download, delete, load, unload, and catalogue search. FreeToken's separate daemon documents engine start/stop/switch and checkpoint conversion, but those use another control endpoint and authentication scheme; this adapter does not manage that daemon. Neither the serve API nor documented daemon API provides an installed-weight download/delete contract matching Chatty's operations. Manage models on the inference machine. Seed, repetition penalty, context size, and keep-alive are not consumed by FreeToken's chat sampler and are omitted. Tool calls, multimodal inputs, cached-token detail, and reasoning display are outside Chatty's current neutral chat contract.

@@ -98,6 +98,16 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
             .spacing(12)
             .align_y(Alignment::Center)
         ),
+        field(
+            "Reasoning",
+            "Hidden thinking before chat replies. Lower levels answer sooner. Models with only on/off thinking treat every level except Off as on.",
+            pick_list(
+                chatty_protocol::ReasoningLevel::ALL,
+                Some(config.reasoning),
+                |level| Message::from(AdminMessage::ReasoningChanged(level))
+            )
+            .width(Length::Fixed(160.0))
+        ),
         sampling(
             "Temperature",
             "Higher values increase variation.",

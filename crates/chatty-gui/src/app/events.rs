@@ -8,8 +8,8 @@ use crate::worlds::WorldDialogState;
 use crate::{admin, characters, conversation};
 use chatty_protocol::{
     BrokerLog, ChatMessage, ConversationKind, DeltaOperation, DeltaPayload, ErrorCode, Frame,
-    GenerationContext, MessageType, Request, Response, Role, StateDelta, StreamChunk, Variant,
-    WireError, decode,
+    GenerationContext, GenerationStatus, MessageType, Request, Response, Role, StateDelta,
+    StreamChunk, Variant, WireError, decode,
 };
 
 impl ChattyApp {
@@ -505,6 +505,10 @@ impl ChattyApp {
             MessageType::StreamChunk => {
                 if let Ok(c) = decode::<StreamChunk>(&frame.payload) {
                     self.stream_text.push_str(&c.text);
+                    // Visible text ends the hidden reasoning phase.
+                    if self.generation_status == Some(GenerationStatus::Thinking) {
+                        self.generation_status = None;
+                    }
                 }
             }
             MessageType::StreamEnd => {
