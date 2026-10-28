@@ -24,6 +24,7 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+llama-cpp-2 = { version = "0.1.160", default-features = false }
 
 [dev-dependencies]
 wat = "1"

@@ -792,6 +792,7 @@ fn management_and_inference_use_the_same_administrator_selection() {
         allow_public_characters: false,
         allow_self_registration: false,
         image: Default::default(),
+        emotion_model: String::new(),
     };
     host.configuration_changed(&config).unwrap();
     let compatible = host.inference(&config).unwrap();

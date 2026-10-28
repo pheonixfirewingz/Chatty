@@ -39,6 +39,8 @@ mod admin;
 mod auth;
 #[path = "systems/conversations.rs"]
 mod conversations;
+#[path = "systems/emotion.rs"]
+mod emotion;
 #[path = "systems/images.rs"]
 mod images;
 #[path = "systems/inference.rs"]
@@ -53,6 +55,7 @@ use adapters::*;
 use admin::*;
 use auth::*;
 use conversations::*;
+use emotion::*;
 use images::*;
 use inference::*;
 use memory::*;
@@ -731,14 +734,18 @@ async fn dispatch(
             config.image.url = config.image.url.trim().trim_end_matches('/').to_owned();
             config.image.model = config.image.model.trim().to_owned();
             config.image.negative_prompt = config.image.negative_prompt.trim().to_owned();
+            config.emotion_model = config.emotion_model.trim().to_owned();
             if !config.adapter_url.starts_with("http://")
                 && !config.adapter_url.starts_with("https://")
             {
                 bail!("adapter URL must use http or https")
             }
             validate_broker_config(&config)?;
+            if !config.emotion_model.is_empty() && !Path::new(&config.emotion_model).is_file() {
+                bail!("emotion model must be a GGUF file path on the broker host")
+            }
             app.adapters.validate_selection(&config)?;
-            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,adapter_plugin=?,use_ollama_api=?,model=?,temperature=?,top_p=?,top_k=?,num_ctx=?,num_predict=?,repeat_penalty=?,seed=?,keep_alive=?,allow_public_characters=?,allow_self_registration=?,image_enabled=?,image_url=?,image_plugin=?,image_model=?,image_width=?,image_height=?,image_steps=?,image_guidance=?,image_negative_prompt=?,image_workflow=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
+            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,adapter_plugin=?,use_ollama_api=?,model=?,temperature=?,top_p=?,top_k=?,num_ctx=?,num_predict=?,repeat_penalty=?,seed=?,keep_alive=?,allow_public_characters=?,allow_self_registration=?,image_enabled=?,image_url=?,image_plugin=?,image_model=?,image_width=?,image_height=?,image_steps=?,image_guidance=?,image_negative_prompt=?,image_workflow=?,emotion_model=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
                 .bind(config.adapter_enabled)
                 .bind(&config.adapter_url)
                 .bind(&config.adapter_plugin)
@@ -764,6 +771,7 @@ async fn dispatch(
                 .bind(config.image.guidance)
                 .bind(&config.image.negative_prompt)
                 .bind(&config.image.workflow)
+                .bind(&config.emotion_model)
                 .execute(&app.db)
                 .await?;
             app.adapters.configuration_changed(&config)?;

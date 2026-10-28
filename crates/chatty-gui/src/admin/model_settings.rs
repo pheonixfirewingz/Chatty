@@ -76,6 +76,9 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
         field("Chat model", "Use a model from Installed, or enter a custom model ID. Empty selects the first available model.",
             text_input("Automatic", &config.model)
                 .on_input(|value| Message::from(AdminMessage::SelectAdapterModel(value)))),
+        field("Emotion classifier", "GGUF path on the broker host, run inside the broker after each reply to pick a portrait. Empty disables it.",
+            text_input("/var/lib/chatty/EmotionTextClassifierLLM.gguf", &config.emotion_model)
+                .on_input(|value| Message::from(AdminMessage::EmotionModelChanged(value)))),
     ].spacing(12);
 
     let mut generation = column![

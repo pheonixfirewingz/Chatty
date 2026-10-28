@@ -22,7 +22,8 @@ Resolve conflicts in this order:
   revisions, and synchronization. Keep it free of GUI dependencies.
 - `chatty-protocol`: shared domain/wire types, framing, bincode 2, and bounded zstd.
 - Keep model inference external through OpenAI-compatible HTTP or Ollama. Local
-  GUI speech synthesis is separate from roleplay inference.
+  GUI speech synthesis is separate from roleplay inference. The broker's in-process
+  emotion classifier (ADR 0006) is the only embedded model.
 - Do not add a browser, Electron, or Node.js client runtime.
 - Keep clients away from SQLite and inference endpoints. Enforce roles and ownership
   in the broker, including admin requests; never trust client claims.
@@ -44,7 +45,7 @@ Resolve conflicts in this order:
 
 Use an edition-2024-compatible Rust toolchain and the locked dependencies. Native
 Linux builds need Wayland, WGPU, SQLite, audio/speech dependencies, and the XDG file
-portal; OpenSSL is needed for development certificates. Broker builds also require
+portal; broker builds need CMake and a C++ compiler for llama.cpp. OpenSSL is needed for development certificates. Broker builds also require
 the Rust `wasm32-unknown-unknown` target. Generated adapter modules belong only
 in Cargo target directories. Use `--offline` once dependencies
 are cached. An inference server is needed only for live generation tests.

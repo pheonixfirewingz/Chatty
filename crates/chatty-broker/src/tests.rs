@@ -1159,6 +1159,7 @@ async fn cross_tenant_character_update_is_forbidden() {
                 allow_public_characters: false,
                 allow_self_registration: false,
                 image: Default::default(),
+                emotion_model: String::new(),
             },
         },
     )

@@ -78,6 +78,19 @@ Installing new plugin IDs requires a broker restart. Changes to an already disco
 
 Plugin development and limits are documented in [Adapter contract](architecture/ADAPTERS.md). Rebuilding bundled modules is documented in [Release](RELEASE.md#adapter-artifacts).
 
+### Emotion classifier
+
+Reply portraits are picked by [JusteLeo/emotion-text-classifier-LLM](https://huggingface.co/JusteLeo/emotion-text-classifier-LLM), run inside the broker process. It is disabled until configured. Download the GGUF to the broker host:
+
+```sh
+curl -L -o /var/lib/chatty/EmotionTextClassifierLLM.gguf \
+  https://huggingface.co/JusteLeo/emotion-text-classifier-LLM/resolve/main/EmotionTextClassifierLLM.gguf
+```
+
+Enter that path in **Admin Portal → Models → Emotion classifier** and save. The broker user must be able to read the file. Clear the field to disable classification; replies then keep the character's default portrait.
+
+The model loads on the first reply after saving and stays resident, using about 1 GB of RAM. Each classification uses half the CPU cores and runs after the reply is saved, so chat does not wait. Classifications run one at a time; at most eight replies wait, and later ones keep the default portrait. Migration 0016 adds the setting, and protocol 23 carries it; upgrade broker and GUI together.
+
 ### Image generation with ComfyUI
 
 Image generation is separate from text inference and disabled by default. It produces character portrait drafts and persisted scene images in chats. Migration 0014 adds its settings and the encrypted `message_images` table. Protocol 20 carries the settings and image requests; upgrade broker and GUI together.

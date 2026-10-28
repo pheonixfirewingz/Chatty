@@ -26,6 +26,9 @@ pub struct BrokerConfig {
     pub allow_public_characters: bool,
     pub allow_self_registration: bool,
     pub image: ImageConfig,
+    /// Broker-host path to the emotion classifier GGUF, run in-process after
+    /// each reply to pick a portrait. Empty disables classification.
+    pub emotion_model: String,
 }
 
 /// Text-to-image service used for portraits and scene images. It is separate

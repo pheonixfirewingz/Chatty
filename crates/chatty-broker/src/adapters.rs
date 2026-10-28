@@ -206,7 +206,7 @@ impl AdapterHost {
     }
     pub fn config_response(&self, config: BrokerConfig) -> Response {
         Response::BrokerConfig {
-            config,
+            config: Box::new(config),
             adapter_plugins: self.registry.inference_plugin_ids(),
             adapter_override: self.selected_plugin.clone(),
             image_plugins: self.registry.image_plugin_ids(),

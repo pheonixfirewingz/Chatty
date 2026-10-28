@@ -49,7 +49,7 @@ pub enum Response {
     },
     Users(Vec<UserAccount>),
     BrokerConfig {
-        config: crate::admin::BrokerConfig,
+        config: Box<crate::admin::BrokerConfig>,
         /// Installed inference plugins; catalogue-only adapters are excluded.
         adapter_plugins: Vec<String>,
         /// Operator override, which takes precedence over persisted selection.

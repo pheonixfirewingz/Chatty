@@ -285,6 +285,12 @@ fn test_admin_state_update() {
     state.update(AdminMessage::KeepAliveChanged("15m".into()), token);
     assert_eq!(state.broker_config.keep_alive, "15m");
 
+    state.update(
+        AdminMessage::EmotionModelChanged("/models/emotion.gguf".into()),
+        token,
+    );
+    assert_eq!(state.broker_config.emotion_model, "/models/emotion.gguf");
+
     state.update(AdminMessage::TogglePublicCharacters(true), token);
     assert!(state.broker_config.allow_public_characters);
 

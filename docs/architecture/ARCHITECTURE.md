@@ -54,6 +54,7 @@ Broker source is split along runtime boundaries:
 - `adapters.rs` selects WASM adapters and maps neutral results to existing broker types.
 - `systems/admin.rs` owns monitoring, broker configuration, and authorized model administration.
 - `systems/conversations.rs` owns conversation persistence, snapshots, world loading, and automatic titles.
+- `systems/emotion.rs` runs the in-process emotion classifier and applies reply portraits after persistence.
 - `systems/images.rs` owns image prompt validation, scene descriptions, PNG normalization, and image message persistence.
 - `systems/inference.rs` owns prompt assembly, typed inference requests, client stream batching, persistence of generated output, and speaker selection.
 - `workload.rs` serializes text and image models on a shared GPU host.
@@ -95,7 +96,7 @@ Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 The broker first sends a JSON handshake:
 
 ```json
-{"protocol":22,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+{"protocol":23,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
 ```
 
 All later messages use a 14-byte header:
@@ -108,13 +109,15 @@ Payloads are bincode 2. Stream chunks and deltas are always zstd-compressed; oth
 
 Client message types are requests and cancellation. Broker message types include responses, errors, deltas, stream chunks, and stream completion. Request IDs correlate direct responses and generation cancellation.
 
-Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 19 includes persisted runtime adapter selection, installed inference plugin IDs and operator overrides, request-scoped download progress and terminal cancellation/completion responses, scoped memory condensation, and conversation-scoped generation context usage in start/end responses. Broker and GUI must upgrade together. Protocol 20 adds image service settings, the image capability flag, unsaved portrait generation, scene image messages, and on-demand message image fetches. Protocol 21 adds an optional seed to `GenerateImage` for consistent emotion sets. Protocol 22 adds the administrator's image workflow template to the image settings.
+Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 19 includes persisted runtime adapter selection, installed inference plugin IDs and operator overrides, request-scoped download progress and terminal cancellation/completion responses, scoped memory condensation, and conversation-scoped generation context usage in start/end responses. Broker and GUI must upgrade together. Protocol 20 adds image service settings, the image capability flag, unsaved portrait generation, scene image messages, and on-demand message image fetches. Protocol 21 adds an optional seed to `GenerateImage` for consistent emotion sets. Protocol 22 adds the administrator's image workflow template to the image settings. Protocol 23 adds the emotion classifier path to broker settings.
 
 ### Image generation
 
-Image generation uses a separately configured image adapter; see [ADR 0005](adr/0005-image-generation-adapters.md). `GenerateImage` returns an unsaved PNG for review, used for character portrait drafts. An optional seed keeps a series consistent: the editor's emotion set requests 12 labelled expressions with one seed, one at a time, saves them at 384 px so a full set fits the 32-image/5 MiB character limit, and skips labels the character already has. `GenerateSceneImage` persists a message with `author_type` `image` and the prompt as content. An empty prompt asks the text model to describe the latest six non-image messages and participant appearance. Image bytes are encrypted in `message_images` and fetched with `GetMessageImage` after an owner check; snapshots and deltas carry only the message. Text prompts exclude image messages entirely, so captions spend no model context: reply history, portrait selection, automatic speaker choice, scene descriptions, and memory extraction all skip them. They are also never sent as mid-history system messages, which many chat templates reject. Image messages cannot be regenerated as variants. The GUI keeps bytes for at most the 12 newest image messages in the open chat.
+Image generation uses a separately configured image adapter; see [ADR 0005](adr/0005-image-generation-adapters.md). `GenerateImage` returns an unsaved PNG for review, used for character portrait drafts. An optional seed keeps a series consistent: the editor's emotion set requests 12 labelled expressions with one seed, one at a time, saves them at 384 px so a full set fits the 32-image/5 MiB character limit, and skips labels the character already has. `GenerateSceneImage` persists a message with `author_type` `image` and the prompt as content. An empty prompt asks the text model to describe the latest six non-image messages and participant appearance. Image bytes are encrypted in `message_images` and fetched with `GetMessageImage` after an owner check; snapshots and deltas carry only the message. Text prompts exclude image messages entirely, so captions spend no model context: reply history, automatic speaker choice, scene descriptions, and memory extraction all skip them. They are also never sent as mid-history system messages, which many chat templates reject. Image messages cannot be regenerated as variants. The GUI keeps bytes for at most the 12 newest image messages in the open chat.
 
-When the inference and image URLs share a host, `workload.rs` admits text and image work one kind at a time. Each model-backed call holds a guard for its lifetime, including a reply stream. The first holder of a new kind unloads the other kind: running Ollama models for images, or the image adapter's `ImageUnload` for text. Image work starts only after the runtime confirms no chat model is running; text work frees image memory on a best-effort basis. Waiting work of the other kind blocks new arrivals of the loaded kind. Guards are dropped before follow-up calls, such as portrait selection after a reply, so no task waits on itself.
+When the inference and image URLs share a host, `workload.rs` admits text and image work one kind at a time. Each model-backed call holds a guard for its lifetime, including a reply stream. The first holder of a new kind unloads the other kind: running Ollama models for images, or the image adapter's `ImageUnload` for text. Image work starts only after the runtime confirms no chat model is running; text work frees image memory on a best-effort basis. Waiting work of the other kind blocks new arrivals of the loaded kind. Guards are dropped before follow-up calls, such as memory extraction after a reply, so no task waits on itself.
+
+Reply portraits come from an in-process llama.cpp emotion classifier, not the inference service. Replies persist with the default portrait; a bounded background task later publishes a message update. See [ADR 0006](adr/0006-in-process-emotion-classifier.md).
 
 ### Synchronization
 
@@ -187,3 +190,4 @@ Horizontal broker scaling is not supported: live broadcasts, cancellation owners
 - [ADR 0004: Build bundled adapters from source](adr/0004-source-built-bundled-adapters.md)
 
 - [ADR 0005: Image generation adapters](adr/0005-image-generation-adapters.md)
+- [ADR 0006: In-process emotion classifier](adr/0006-in-process-emotion-classifier.md)

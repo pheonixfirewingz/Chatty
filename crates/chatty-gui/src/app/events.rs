@@ -426,7 +426,7 @@ impl ChattyApp {
                             self.admin.adapter_override = adapter_override;
                             self.admin.models.saved_adapter_url = Some(v.adapter_url.clone());
                             self.admin.models.saved_model = v.model.clone();
-                            self.admin.set_broker_config(v);
+                            self.admin.set_broker_config(*v);
                         }
                         Response::BrokerMonitor(v) => self.admin.broker_monitor = Some(v),
                         Response::BrokerLog(v) => self.admin.admin_log = v,

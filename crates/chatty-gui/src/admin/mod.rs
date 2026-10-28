@@ -42,6 +42,7 @@ pub enum AdminMessage {
     RepeatPenaltyChanged(f32),
     SeedChanged(i64),
     KeepAliveChanged(String),
+    EmotionModelChanged(String),
     TogglePublicCharacters(bool),
     ToggleRegistration(bool),
 
@@ -325,6 +326,7 @@ impl Default for AdminState {
                 allow_public_characters: false,
                 allow_self_registration: true,
                 image: Default::default(),
+                emotion_model: String::new(),
             },
             broker_monitor: None,
             ollama_state: None,
@@ -559,6 +561,10 @@ impl AdminState {
             }
             AdminMessage::KeepAliveChanged(dur) => {
                 self.broker_config.keep_alive = dur;
+                vec![]
+            }
+            AdminMessage::EmotionModelChanged(path) => {
+                self.broker_config.emotion_model = path;
                 vec![]
             }
             AdminMessage::TogglePublicCharacters(allow) => {
