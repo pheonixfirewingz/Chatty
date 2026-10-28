@@ -273,7 +273,6 @@ pub struct ChattyApp {
     state: HashMap<(String, String), DeltaPayload>,
     characters: Vec<Character>,
     character_image_requests: HashSet<(String, String)>,
-    received_character_images: Vec<(String, Vec<u8>)>,
     character_search: String,
     worlds: Vec<World>,
     world_state: WorldDialogState,
@@ -404,7 +403,6 @@ impl ChattyApp {
             state: HashMap::new(),
             characters: Vec::new(),
             character_image_requests: HashSet::new(),
-            received_character_images: Vec::new(),
             character_search: String::new(),
             worlds: Vec::new(),
             world_state: WorldDialogState::default(),
@@ -890,6 +888,7 @@ impl ChattyApp {
                         self.draft = DraftCharacter::default();
                         self.draft_world_ids.clear();
                     }
+                    CharacterMessage::Save if self.portrait_image.pending => {}
                     CharacterMessage::Save => {
                         let input = CharacterInput::from(&self.draft);
                         self.send(Request::UpsertCharacter {
@@ -2230,7 +2229,6 @@ impl ChattyApp {
                 self.token.clear();
                 self.context_usage.clear();
                 self.character_image_requests.clear();
-                self.received_character_images.clear();
                 self.clear_image_jobs();
                 self.generation_status = None;
                 self.role = None;
@@ -2260,7 +2258,6 @@ impl ChattyApp {
                 self.token.clear();
                 self.context_usage.clear();
                 self.character_image_requests.clear();
-                self.received_character_images.clear();
                 self.clear_image_jobs();
                 self.generation_status = None;
                 self.role = None;
@@ -2378,10 +2375,7 @@ impl ChattyApp {
                             self.char_import_started = None;
                             self.draft_character_open = true;
                         }
-                        Response::Characters(v) => {
-                            self.character_image_requests.clear();
-                            self.characters = v;
-                        }
+                        Response::Characters(v) => self.set_characters(v),
                         Response::Memories(v) => self.memories = v,
                         Response::MemoriesCondensed { before, after } => {
                             self.memory_state.condensing = false;
@@ -2401,9 +2395,7 @@ impl ChattyApp {
                             image_id,
                             data,
                         } => {
-                            self.character_image_requests
-                                .remove(&(character_id, image_id.clone()));
-                            self.received_character_images.push((image_id, data));
+                            self.store_character_image(&character_id, &image_id, data);
                         }
                         Response::Conversations(v) => {
                             self.conversations = v
@@ -2684,6 +2676,82 @@ impl ChattyApp {
                     message_id: id,
                 });
             }
+        }
+    }
+
+    /// Replace the roster. Listings carry image metadata only, so keep bytes
+    /// already held for unchanged images and fetch the rest once.
+    fn set_characters(&mut self, mut characters: Vec<Character>) {
+        let mut known: HashMap<(String, String), Vec<u8>> = HashMap::new();
+        for character in self.characters.drain(..) {
+            for image in character.images {
+                if !image.data.is_empty() {
+                    known.insert((character.id.clone(), image.id), image.data);
+                }
+            }
+        }
+        // A just-saved draft holds bytes for images the old roster never had.
+        if let Some(id) = &self.draft.id {
+            for image in &self.draft.images {
+                if !image.data.is_empty() {
+                    known
+                        .entry((id.clone(), image.id.clone()))
+                        .or_insert_with(|| image.data.clone());
+                }
+            }
+        }
+        let mut wanted = HashSet::new();
+        for character in &mut characters {
+            for image in &mut character.images {
+                let key = (character.id.clone(), image.id.clone());
+                if image.data.is_empty() {
+                    match known.remove(&key) {
+                        Some(data) => image.data = data,
+                        None => {
+                            wanted.insert(key);
+                        }
+                    }
+                }
+            }
+        }
+        self.characters = characters;
+        // Forget requests for images that no longer exist; keep in-flight ones.
+        self.character_image_requests
+            .retain(|key| wanted.contains(key));
+        for (character_id, image_id) in wanted {
+            if self
+                .character_image_requests
+                .insert((character_id.clone(), image_id.clone()))
+            {
+                self.send(Request::GetCharacterImage {
+                    session_token: self.token.clone(),
+                    character_id,
+                    image_id,
+                });
+            }
+        }
+    }
+
+    fn store_character_image(&mut self, character_id: &str, image_id: &str, data: Vec<u8>) {
+        self.character_image_requests
+            .remove(&(character_id.to_owned(), image_id.to_owned()));
+        if self.draft.id.as_deref() == Some(character_id)
+            && let Some(image) = self
+                .draft
+                .images
+                .iter_mut()
+                .find(|image| image.id == image_id && image.data.is_empty())
+        {
+            image.data.clone_from(&data);
+        }
+        if let Some(image) = self
+            .characters
+            .iter_mut()
+            .filter(|character| character.id == character_id)
+            .flat_map(|character| character.images.iter_mut())
+            .find(|image| image.id == image_id)
+        {
+            image.data = data;
         }
     }
 
@@ -4080,5 +4148,64 @@ mod tests {
                 .any(|command| matches!(command, Command::Cancel(9))),
             "the running job is cancelled on the broker"
         );
+    }
+
+    #[test]
+    fn listed_character_images_are_fetched_and_kept() {
+        let (commands, mut rx) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.load_inspection_demo();
+        app.token = "token".into();
+        let mut base = app.characters[0].clone();
+        base.id = "c1".into();
+        base.images[0].id = "happy".into();
+        base.images[0].data.clear();
+        base.default_image_id = Some("happy".into());
+        let listed = |data: Vec<u8>| {
+            let mut character = base.clone();
+            character.images[0].data = data;
+            character
+        };
+        let fetches = |rx: &mut mpsc::UnboundedReceiver<Command>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|command| {
+                    matches!(command, Command::Request(request)
+                        if matches!(**request, Request::GetCharacterImage { .. }))
+                })
+                .count()
+        };
+
+        app.set_characters(vec![listed(Vec::new())]);
+        assert_eq!(fetches(&mut rx), 1, "metadata-only listings fetch bytes");
+        app.set_characters(vec![listed(Vec::new())]);
+        assert_eq!(fetches(&mut rx), 0, "in-flight fetches are not repeated");
+
+        app.draft = DraftCharacter::from(&app.characters[0]);
+        let png = generated_png(128);
+        app.store_character_image("c1", "happy", png.clone());
+        assert_eq!(app.characters[0].images[0].data, png);
+        assert_eq!(app.draft.images[0].data, png, "an open editor shows it too");
+
+        // A post-save refresh keeps the bytes instead of blanking the image.
+        app.set_characters(vec![listed(Vec::new())]);
+        assert_eq!(fetches(&mut rx), 0);
+        assert_eq!(app.characters[0].images[0].data, png);
+    }
+
+    #[test]
+    fn save_waits_for_running_image_generation() {
+        let (commands, mut rx) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.token = "token".into();
+        app.image_generation = true;
+        app.draft.name = "Fel".into();
+        app.draft_character_open = true;
+        let _ = app.update(Message::Character(CharacterMessage::GeneratePortrait));
+        next_image_request(&mut rx);
+        let _ = app.update(Message::Character(CharacterMessage::Save));
+        assert!(app.draft_character_open);
+        assert!(rx.try_recv().is_err(), "no save is sent mid-generation");
     }
 }

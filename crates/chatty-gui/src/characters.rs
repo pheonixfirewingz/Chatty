@@ -874,10 +874,15 @@ fn character_editor_at_width<'a>(
                 .label("Public")
                 .on_toggle(CharacterMessage::TogglePublic),
         );
+        // Images still generating would land after the save and be lost.
+        let generating = matches!(
+            portrait,
+            ImageGeneration::Pending | ImageGeneration::Batch { .. }
+        );
         actions = actions.push(
             button(text("Save").size(13))
                 .padding(Padding::from([5, 12]))
-                .on_press(CharacterMessage::Save),
+                .on_press_maybe((!generating).then_some(CharacterMessage::Save)),
         );
         actions = actions.push(
             button(text("Export").size(13))
