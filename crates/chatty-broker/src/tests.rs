@@ -1684,7 +1684,10 @@ async fn scene_images_are_generated_encrypted_and_owner_scoped() {
         "portraits are square"
     );
     assert_eq!(workflows[1]["3"]["inputs"]["text"], "blurry");
-    assert_eq!(workflows[1]["5"]["inputs"]["seed"], 42, "a requested seed is kept");
+    assert_eq!(
+        workflows[1]["5"]["inputs"]["seed"], 42,
+        "a requested seed is kept"
+    );
     assert_eq!(
         workflows[1]["1"]["inputs"]["ckpt_name"],
         "model.safetensors"
@@ -1726,7 +1729,9 @@ async fn shared_gpu_host_unloads_the_other_model_kind_before_switching() {
             .map(|(request, body)| (request.clone(), body.clone()))
             .collect::<Vec<_>>()
     };
-    generate_png(&app, "a harbour", "", false, None).await.unwrap();
+    generate_png(&app, "a harbour", "", false, None)
+        .await
+        .unwrap();
     let log = requests(&seen);
     let unload = log
         .iter()
@@ -1799,7 +1804,9 @@ async fn separate_hosts_do_not_unload_models() {
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
         image_key: Arc::new([7; 32]),
     };
-    generate_png(&app, "a harbour", "", false, None).await.unwrap();
+    generate_png(&app, "a harbour", "", false, None)
+        .await
+        .unwrap();
     assert!(
         !seen
             .lock()

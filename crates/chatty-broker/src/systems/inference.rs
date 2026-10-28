@@ -1200,6 +1200,20 @@ pub(super) async fn probe_backend(app: &App) -> Result<Vec<String>> {
         .await?)
 }
 
+/// Recent root messages for reply prompts, newest first. Image messages are
+/// excluded: their prompt is only a caption for the user and would spend context.
+const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.revision DESC LIMIT 23";
+
+/// Map a stored message to a chat role.
+fn history_message(author_type: &str, content: String) -> (String, String) {
+    let role = match author_type {
+        "user" => "user",
+        "system" => "system",
+        _ => "assistant",
+    };
+    (role.to_owned(), content)
+}
+
 pub(super) async fn selected_model(app: &App) -> Result<String> {
     let config = load_broker_config(&app.db).await?;
     let models = probe_backend(app).await?;
@@ -1235,7 +1249,10 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         .iter()
         .find(|r| r.get::<String, _>("id") == sid)
         .context("speaker is not a participant")?;
-    let recent=sqlx::query("SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 23").bind(cid).fetch_all(&app.db).await?;
+    let recent = sqlx::query(PROMPT_HISTORY)
+        .bind(cid)
+        .fetch_all(&app.db)
+        .await?;
     let immediate = recent
         .iter()
         .take(6)
@@ -1293,18 +1310,10 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     );
     let prioritized_memory = format!("Long-term memory:\n{}", memory_prompt(&memories));
     let history = recent.iter().map(|r| {
-        let author_type = r.get::<String, _>("author_type");
-        let content = r.get::<String, _>("content");
-        match author_type.as_str() {
-            "user" => ("user".to_owned(), content),
-            "system" => ("system".to_owned(), content),
-            // Models see only the image prompt, never image bytes.
-            "image" => (
-                "system".to_owned(),
-                format!("[Scene image shown: {content}]"),
-            ),
-            _ => ("assistant".to_owned(), content),
-        }
+        history_message(
+            &r.get::<String, _>("author_type"),
+            r.get::<String, _>("content"),
+        )
     });
     let messages = budget_chat_messages(
         &system,
@@ -1912,6 +1921,44 @@ mod prompt_budget_tests {
         assert!(estimated_message_tokens(sent_system) <= 512);
     }
 
+    #[tokio::test]
+    async fn prompt_history_skips_image_messages() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username,password_hash) VALUES('u','u','x')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('chat','u','Chat',0,1)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,revision) VALUES('a','chat','user','hello',1),('b','chat','image','a long image prompt',2),('c','chat','character','hi',3)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let rows = sqlx::query(PROMPT_HISTORY)
+            .bind("chat")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        let history: Vec<_> = rows
+            .iter()
+            .map(|row| history_message(&row.get::<String, _>("author_type"), row.get("content")))
+            .collect();
+        assert_eq!(
+            history,
+            [
+                ("assistant".to_owned(), "hi".to_owned()),
+                ("user".to_owned(), "hello".to_owned())
+            ]
+        );
+    }
+
     #[test]
     fn prompt_budget_reserves_output_space() {
         let mut config = BrokerConfig {
@@ -2282,7 +2329,7 @@ pub(super) async fn select_speaker(
             .iter()
             .map(|r| r.get::<String, _>("name"))
             .collect::<Vec<_>>();
-        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY revision DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
+        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL AND author_type<>'image' ORDER BY revision DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
         let choice = async {
             let model = selected_model(app).await.ok()?;
             let messages = vec![
