@@ -1,9 +1,9 @@
 # GUI design rules
 
 Rules for building `chatty-gui` screens and dialogs with `iced`. Shared styles,
-icons, and widget helpers live in `crates/chatty-gui/src/ui.rs`; reuse them
+icons, and widget helpers live in `crates/chatty-gui/src/ui/`; reuse them
 instead of styling widgets inline. The Characters dialog
-(`crates/chatty-gui/src/characters.rs`) is the reference implementation.
+(`crates/chatty-gui/src/characters/view.rs`) is the reference implementation.
 
 ## Wiring
 
@@ -14,7 +14,7 @@ instead of styling widgets inline. The Characters dialog
   hidden state. File dialogs and file reads belong in `update`.
 - The app has one appearance: the dark glass theme. Do not add a light theme
   or theme switches. Pass `glass_mode` into views that draw surfaces and take
-  colours from `ui.rs` (`PALETTE`, `SECONDARY_TEXT`, `ACCENT_TEXT`, surface
+  colours from `ui` (`PALETTE`, `SECONDARY_TEXT`, `ACCENT_TEXT`, surface
   helpers) rather than hard-coding them.
 - Disable an action with `on_press_maybe(None)` when it cannot run, and say why
   in its tooltip or nearby text. Do not hide controls that move the layout.
@@ -58,7 +58,7 @@ An icon replaces a label when its meaning is clear from the icon and tooltip.
 - Text that can exceed one line (descriptions, prompts, dialogue) uses
   `text_editor`, never `text_input`. Keep its `text_editor::Content` beside the
   domain draft, reload it whenever the draft is replaced, and copy edits back
-  only for `Action::Edit`. See `DraftEditors` in `characters.rs`.
+  only for `Action::Edit`. See `DraftEditors` in `characters/mod.rs`.
 - `text_editor` has no scrollbar. To cap its height, place it in a
   `scrollable` with a stable `Id` inside a container with `max_height`, draw the
   input plate on the container, and snap the scrollable to keep the cursor

@@ -13,6 +13,7 @@
 .chatty/
 broker.log
 *.log
+__pycache__/
 
 # Legacy adapter build outputs; current builds use Cargo target directories.
 /crates/chatty-adapters/*/adapter.wasm

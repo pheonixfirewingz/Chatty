@@ -25,6 +25,13 @@ Responsibilities:
 
 The GUI does not read SQLite or contact the inference service. The `iced` client receives asynchronous network events through subscriptions instead of polling. Visual and interaction rules for its views are in [GUI design rules](../UI.md).
 
+GUI source is one directory module per feature; each keeps state and messages in `mod.rs`, views in `view.rs`, and tests in `tests.rs`:
+
+- `app/` owns application state, update dispatch, network event and delta handling, subscriptions, the inspection harness, and the root views.
+- `network/` owns the broker connection task, TLS trust, broker addresses, and on-disk session and preferences.
+- `characters/`, `conversation/`, `worlds/`, `memories/`, and `admin/` own their feature dialogs.
+- `ui/` owns the theme, vector icons, and shared widgets; `tts/` owns local speech.
+
 ### Broker (`chatty-broker`)
 
 Responsibilities:
@@ -166,7 +173,7 @@ Horizontal broker scaling is not supported: live broadcasts, cancellation owners
 - The GUI exposes only a subset of the broker's RP domain.
 - Bincode request layouts couple client and broker releases tightly.
 - Some update deltas send more data than a minimal changed-field representation.
-- The main broker dispatch and GUI application files are large and carry many responsibilities.
+- The main broker dispatch file is large and carries many responsibilities.
 - Monitoring is process-local and visible only through the admin request path; there is no metrics export.
 - The delta log has no documented retention/compaction policy.
 

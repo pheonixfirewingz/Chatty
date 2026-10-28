@@ -1,9 +1,9 @@
 //! Deterministic OpenAI-compatible test server for transport/streaming soaks.
 //! This executable is test support, never embedded in the broker or client.
 
-use chatty_protocol::util::args::ParsedArgs;
-use chatty_protocol::util::{bail, Context, Result};
 use chatty_protocol::current_utc_timestamp;
+use chatty_protocol::util::args::ParsedArgs;
+use chatty_protocol::util::{Context, Result, bail};
 use serde_json::json;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},

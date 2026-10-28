@@ -20,3 +20,6 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+serde.workspace = true

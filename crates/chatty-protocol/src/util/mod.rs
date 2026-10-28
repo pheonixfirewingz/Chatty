@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // The macros are declared with #[macro_export] at the crate root; re-export
 // them here so callers can `use chatty_protocol::util::{bail, format_err}`.
-pub use errors::{Context, Error, Result};
 pub use crate::bail;
 pub use crate::format_err;
+pub use errors::{Context, Error, Result};
 pub use ids::new_uuid;
 
 pub fn current_utc_timestamp() -> String {

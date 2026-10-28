@@ -28,8 +28,7 @@ impl ParsedArgs {
             }
             let value = match name.split_once('=') {
                 Some((_, inline)) => Some(inline.to_owned()),
-                None => arguments
-                    .next_if(|next| !next.starts_with("--")),
+                None => arguments.next_if(|next| !next.starts_with("--")),
             };
             values.insert(name.split('=').next().unwrap().to_owned(), value);
         }
@@ -64,6 +63,8 @@ impl ParsedArgs {
     /// Like [`Self::string`] but parsed as a number, falling back to
     /// `default` when absent or malformed.
     pub fn number<T: std::str::FromStr>(&self, name: &str, default: T) -> T {
-        self.value(name).and_then(|v| v.parse().ok()).unwrap_or(default)
+        self.value(name)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 }

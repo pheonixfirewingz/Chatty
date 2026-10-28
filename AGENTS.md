@@ -70,13 +70,13 @@ for functional and packaging checks.
 - Protocol checks cover framing, fragmentation, compression, decompression bounds,
   and stress. Broker checks cover authorization, tenant isolation, cancellation,
   sessions, adapter parsing, and persistence. GUI checks cover sessions and app behavior.
+- GUI tests live in a `tests.rs` (or `tests/`) file beside each module. App-level tests
+  use the `Harness` in `crates/chatty-gui/src/app/tests/mod.rs`: drive it with messages
+  and broker frames, then assert on state and on the requests it sent.
 - For visual inspection, use `./chatty-gui-inspect.sh start [width height]`, then its
   resize/screenshot commands. Save captures under `/tmp`; do not assume old egui
   accessibility or screenshot tests still apply after the move to `iced`.
-- `scripts/multiclient-test.sh`, `scripts/network-namespace-test.sh`,
-  `scripts/stream-soak-test.sh`, and `scripts/userspace-network-test.sh` invoke removed
-  `chatty-client`/`chatty-net-proxy` binaries. Repair before using as verification evidence.
-  `scripts/network-test.sh` is a privileged shaping wrapper; supply an existing command.
+- `scripts/network-test.sh` is a privileged shaping wrapper; supply an existing command.
 
 ## Local setup and documentation
 
