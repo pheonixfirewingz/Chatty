@@ -361,18 +361,17 @@ impl ChattyApp {
                             self.messages = v.messages;
                             self.stream_text.clear();
                             self.request_message_images();
-                            if self.tts_auto_speak
+                            if self.speech.auto_speak
                                 && let Some(message_id) = self.pending_tts_message_id.take()
                                 && let Some(message) = self
                                     .messages
                                     .iter()
                                     .find(|message| message.id == message_id)
                             {
-                                let text =
-                                    conversation::displayed_message_content(message).to_owned();
-                                if let Err(error) =
-                                    self.tts.speak(&text, message.author_id.as_deref())
-                                {
+                                let text = self
+                                    .spoken_text(conversation::displayed_message_content(message));
+                                let female = self.speaker_is_female(message.author_id.as_deref());
+                                if let Err(error) = self.tts.speak(&text, female) {
                                     self.set_error(error);
                                 }
                             }

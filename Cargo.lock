@@ -875,6 +875,7 @@ dependencies = [
  "iced_dialog",
  "image",
  "kittentts",
+ "ort",
  "rfd",
  "rodio",
  "rustls",

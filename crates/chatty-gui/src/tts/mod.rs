@@ -1,16 +1,23 @@
-//! Local KittenTTS speech synthesis on a dedicated worker thread.
+//! Local Kokoro-82M speech synthesis on a dedicated worker thread.
 
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
 
-const MODEL: &str = "KittenML/kitten-tts-nano-0.8-int8";
-const VOICES: [&str; 8] = [
-    "Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo",
-];
+const MODEL_REPO: &str = "onnx-community/Kokoro-82M-v1.0-ONNX";
+// Full precision: on desktop CPUs the quantized exports run slower than real time.
+const MODEL_FILE: &str = "onnx/model.onnx";
+const FEMALE_VOICE: &str = "af_heart";
+const MALE_VOICE: &str = "am_michael";
+const SAMPLE_RATE: u32 = 24_000;
+const STYLE_DIM: usize = 256;
+/// Voice files hold 510 style rows indexed by phoneme count, so at most 509
+/// phonemes fit; with the two boundary pads this stays inside Kokoro's context.
+const MAX_PHONEME_TOKENS: usize = 509;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TtsEvent {
@@ -24,6 +31,54 @@ struct Command {
     id: u64,
     text: String,
     voice: &'static str,
+}
+
+struct Kokoro {
+    session: ort::session::Session,
+    vocab: HashMap<char, i64>,
+    /// Per-voice style table: one 256-value row per phoneme count.
+    voices: HashMap<&'static str, Vec<f32>>,
+}
+
+impl Kokoro {
+    fn generate(&mut self, text: &str, voice: &str) -> Result<Vec<f32>, String> {
+        use ort::value::Tensor;
+        let ipa = kittentts::phonemize::phonemize(text)
+            .map_err(|error| format!("Cannot convert text to phonemes: {error:#}"))?;
+        let mut ids: Vec<i64> = ipa
+            .chars()
+            .filter_map(|character| self.vocab.get(&character).copied())
+            .collect();
+        ids.truncate(MAX_PHONEME_TOKENS);
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let styles = self.voices.get(voice).ok_or("Unknown speech voice")?;
+        let style = styles
+            .get(ids.len() * STYLE_DIM..(ids.len() + 1) * STYLE_DIM)
+            .ok_or("The voice file is incomplete. Delete the speech cache and retry.")?
+            .to_vec();
+        let mut tokens = Vec::with_capacity(ids.len() + 2);
+        tokens.push(0);
+        tokens.extend(ids);
+        tokens.push(0);
+        let inputs = (|| {
+            Ok::<_, ort::Error>(ort::inputs![
+                Tensor::<i64>::from_array(([1usize, tokens.len()], tokens))?,
+                Tensor::<f32>::from_array(([1usize, STYLE_DIM], style))?,
+                Tensor::<f32>::from_array(([1usize], vec![1.0_f32]))?,
+            ])
+        })()
+        .map_err(|error| format!("Cannot prepare speech input: {error}"))?;
+        let outputs = self
+            .session
+            .run(inputs)
+            .map_err(|error| format!("Speech inference failed: {error}"))?;
+        let (_, samples) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|error| format!("Speech model returned no audio: {error}"))?;
+        Ok(samples.to_vec())
+    }
 }
 
 #[derive(Default)]
@@ -147,7 +202,8 @@ impl LocalTts {
         self.state.lock().unwrap().error.take()
     }
 
-    pub(crate) fn speak(&mut self, text: &str, character_id: Option<&str>) -> Result<(), String> {
+    /// Read `text` aloud with the female or male voice.
+    pub(crate) fn speak(&mut self, text: &str, female: bool) -> Result<(), String> {
         let text = speech_text(text);
         if text.is_empty() {
             return Ok(());
@@ -162,7 +218,7 @@ impl LocalTts {
             .send(Command {
                 id: state.id,
                 text,
-                voice: voice_for(character_id),
+                voice: if female { FEMALE_VOICE } else { MALE_VOICE },
             })
             .is_err()
         {
@@ -231,13 +287,7 @@ fn run(commands: mpsc::Receiver<Command>, state: &Mutex<State>) {
                 })?);
             }
             if model.is_none() {
-                let loaded = load_model(|progress| {
-                    use kittentts::download::LoadProgress;
-                    let status = match progress {
-                        LoadProgress::Fetching { step, total, file } =>
-                            format!("Preparing voice model ({step}/{total}): {file}. First use needs internet."),
-                        LoadProgress::Loading => "Loading local voice model…".into(),
-                    };
+                let loaded = load_model(|status| {
                     update_state(state, id, |state| state.set_status(status));
                 }).map_err(|error| format!("Cannot load the local voice model: {error:#}. Connect to the internet and try Test voice again."))?;
                 model = Some(loaded);
@@ -257,18 +307,19 @@ fn run(commands: mpsc::Receiver<Command>, state: &Mutex<State>) {
                     return Ok(());
                 }
                 let samples = model
-                    .as_ref()
+                    .as_mut()
                     .unwrap()
-                    .generate(&chunk, command.voice, 1.0, true)
-                    .map_err(|error| {
-                        format!("Cannot generate local speech: {error:#}. Try Test voice again.")
-                    })?;
-                if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
+                    .generate(&chunk, command.voice)
+                    .map_err(|error| format!("{error}. Try Test voice again."))?;
+                if samples.is_empty() {
+                    continue;
+                }
+                if samples.iter().any(|sample| !sample.is_finite()) {
                     return Err("The voice model returned invalid audio. Try another reply.".into());
                 }
                 // Check and append under the same lock so Stop cannot race playback.
                 if !update_state(state, id, |state| {
-                    sink.append(rodio::buffer::SamplesBuffer::new(1, 24_000, samples));
+                    sink.append(rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, samples));
                     state.set_status("Speaking locally…".into());
                 }) {
                     return Ok(());
@@ -309,12 +360,9 @@ fn speech_chunks(text: &str) -> Vec<String> {
     chunks
 }
 
-fn load_model(
-    mut progress: impl FnMut(kittentts::download::LoadProgress),
-) -> Result<kittentts::model::KittenTtsOnnx, String> {
-    use kittentts::download::{LoadProgress, ModelConfig};
-    // KittenTTS's convenience downloader uses Api::new(), which ignores HF_HOME
-    // and XDG_CACHE_HOME. In Flatpak that puts models in an ephemeral home folder.
+fn load_model(mut progress: impl FnMut(String)) -> Result<Kokoro, String> {
+    // hf-hub's default Api ignores HF_HOME and XDG_CACHE_HOME. In Flatpak that
+    // would put models in an ephemeral home folder.
     let mut builder = hf_hub::api::sync::ApiBuilder::from_env().with_progress(false);
     if std::env::var_os("HF_HOME").is_none()
         && let Some(cache) = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
@@ -325,43 +373,64 @@ fn load_model(
     let api = builder
         .build()
         .map_err(|error| format!("Cannot initialize model download: {error}"))?;
-    let repo = api.model(MODEL.into());
-    let mut fetch = |file: &str, step| {
-        progress(LoadProgress::Fetching {
-            step,
-            total: 4,
-            file: file.into(),
-        });
-        repo.get(file)
-            .map_err(|error| format!("Cannot fetch {file}: {error}"))
-    };
-    let config_path = fetch("config.json", 1)?;
-    let config: ModelConfig = serde_json::from_slice(
-        &std::fs::read(config_path)
-            .map_err(|error| format!("Cannot read model configuration: {error}"))?,
-    )
-    .map_err(|error| format!("Invalid model configuration: {error}"))?;
-    if !matches!(config.model_type.as_str(), "ONNX1" | "ONNX2") {
-        return Err(format!(
-            "Unsupported speech model type: {}",
-            config.model_type
+    let repo = api.model(MODEL_REPO.into());
+    let files = [
+        "tokenizer.json".to_owned(),
+        format!("voices/{FEMALE_VOICE}.bin"),
+        format!("voices/{MALE_VOICE}.bin"),
+        MODEL_FILE.to_owned(),
+    ];
+    let mut paths = Vec::with_capacity(files.len());
+    for (step, file) in files.iter().enumerate() {
+        progress(format!(
+            "Preparing voice model ({}/{}): {file}. First use downloads about 330 MB.",
+            step + 1,
+            files.len()
         ));
+        paths.push(
+            repo.get(file)
+                .map_err(|error| format!("Cannot fetch {file}: {error}"))?,
+        );
     }
-    let model_path = fetch(&config.model_file, 2)?;
-    let voices_path = fetch(&config.voices, 3)?;
-    progress(LoadProgress::Loading);
-    kittentts::model::KittenTtsOnnx::load(
-        &model_path,
-        &voices_path,
-        config.speed_priors,
-        config.voice_aliases,
-    )
-    .map_err(|error| format!("Cannot initialize local speech model: {error:#}"))
+    progress("Loading local voice model…".into());
+    let read = |path: &std::path::Path| {
+        std::fs::read(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))
+    };
+    let tokenizer: serde_json::Value = serde_json::from_slice(&read(&paths[0])?)
+        .map_err(|error| format!("Invalid speech tokenizer: {error}"))?;
+    let vocab: HashMap<char, i64> = tokenizer["model"]["vocab"]
+        .as_object()
+        .ok_or("Speech tokenizer has no vocabulary")?
+        .iter()
+        .filter_map(|(symbol, id)| {
+            let mut chars = symbol.chars();
+            let character = chars.next()?;
+            chars.next().is_none().then_some((character, id.as_i64()?))
+        })
+        .collect();
+    let mut voices = HashMap::new();
+    for (voice, path) in [(FEMALE_VOICE, &paths[1]), (MALE_VOICE, &paths[2])] {
+        let bytes = read(path)?;
+        if bytes.len() < (MAX_PHONEME_TOKENS + 1) * STYLE_DIM * 4 {
+            return Err(format!("Voice file {voice} is incomplete"));
+        }
+        let (styles, _) = bytes.as_chunks::<4>();
+        let styles = styles.iter().copied().map(f32::from_le_bytes).collect();
+        voices.insert(voice, styles);
+    }
+    let session = ort::session::Session::builder()
+        .and_then(|builder| builder.commit_from_file(&paths[3]))
+        .map_err(|error| format!("Cannot initialize local speech model: {error}"))?;
+    Ok(Kokoro {
+        session,
+        vocab,
+        voices,
+    })
 }
 
 pub(crate) fn test_speech() -> Result<(), String> {
     let mut tts = LocalTts::new();
-    tts.speak("Hello! Chatty's local speech is working.", None)?;
+    tts.speak("Hello! Chatty's local speech is working.", true)?;
     let started = std::time::Instant::now();
     let mut last_status = String::new();
     loop {
@@ -389,29 +458,74 @@ pub(crate) fn test_speech() -> Result<(), String> {
     }
 }
 
-fn voice_for(character_id: Option<&str>) -> &'static str {
-    let hash = character_id
-        .unwrap_or_default()
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
-        });
-    VOICES[hash as usize % VOICES.len()]
+/// Whether a character's free-text gender selects the female voice. Anything
+/// else, including an empty field, uses the male voice.
+pub(crate) fn is_female(gender: &str) -> bool {
+    let gender = gender.trim().to_lowercase();
+    matches!(
+        gender.as_str(),
+        "f" | "female" | "woman" | "girl" | "lady" | "mare" | "filly" | "feminine" | "she"
+    ) || gender.starts_with("she/")
+        || gender.starts_with("female")
 }
 
-fn speech_text(markdown: &str) -> String {
-    markdown
-        .lines()
-        .map(|line| {
-            line.trim_start_matches(|character: char| {
-                character.is_whitespace() || matches!(character, '#' | '>' | '-' | '*' | '`')
-            })
-        })
+/// Quoted dialogue in a roleplay reply, joined in order. Narration and
+/// actions outside straight or curly double quotes are skipped; an unclosed
+/// quote runs to the end of the reply.
+pub(crate) fn dialogue(text: &str) -> String {
+    let mut spoken = Vec::new();
+    let mut current = String::new();
+    let mut closing = None;
+    for character in text.chars() {
+        match (closing, character) {
+            (None, '"') => closing = Some('"'),
+            (None, '\u{201c}') => closing = Some('\u{201d}'),
+            (None, _) => {}
+            (Some(close), character) if character == close => {
+                spoken.push(std::mem::take(&mut current));
+                closing = None;
+            }
+            (Some(_), character) => current.push(character),
+        }
+    }
+    spoken.push(current);
+    spoken
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
-        .replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
-        .trim()
-        .to_owned()
+}
+
+/// Plain text for speech. Punctuation is kept because it drives pauses and
+/// intonation; markdown emphasis, roleplay action asterisks, and typographic
+/// quotes and dashes are reduced to forms the phonemizer reads naturally.
+fn speech_text(markdown: &str) -> String {
+    let mut text = String::with_capacity(markdown.len());
+    for line in markdown.lines() {
+        let line = line.trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '#' | '>' | '-' | '*' | '`')
+        });
+        if line.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        for character in line.chars() {
+            match character {
+                '*' | '`' => {}
+                '\u{2018}' | '\u{2019}' => text.push('\''),
+                '\u{201c}' | '\u{201d}' => text.push('"'),
+                '\u{2013}' | '\u{2014}' => text.push_str(", "),
+                '\u{2026}' => text.push_str("..."),
+                character => text.push(character),
+            }
+        }
+    }
+    text.replace("__", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" ,", ",")
 }

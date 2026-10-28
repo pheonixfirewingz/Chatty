@@ -76,11 +76,15 @@ Downloads are stored on the inference server, not the desktop client or broker. 
 
 Open **Settings → Speech → Test voice** to check speech and your audio output.
 Use the speaker action on a character reply to read it aloud, or enable
-**Automatically read new replies**. **Stop speaking** cancels playback and pending
+**Automatically read new replies**. **Read only quoted dialogue** (on by default)
+skips narration and actions outside double quotes; the speaker action reads the whole
+reply when it has no quoted dialogue. **Stop speaking** cancels playback and pending
 speech. Model preparation, synthesis, and audio errors are shown in the app.
 
-Speech uses the small KittenTTS Nano model on your CPU. The model and voices download
-on first use (about 28 MB combined), then stay cached for offline use. No reply text
+Speech uses the Kokoro-82M model on your CPU. Characters whose gender is female
+(for example "female", "mare", or "she/her") use the `af_heart` voice; all others use
+`am_michael`. The model and voices download on first use (about 330 MB combined), then
+stay cached for offline use. No reply text
 is sent to a speech service. The Flatpak includes ONNX Runtime and requests audio
 server access; no host Python installation or speech packages are required.
 

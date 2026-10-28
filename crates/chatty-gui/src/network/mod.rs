@@ -8,8 +8,8 @@ mod tls;
 
 pub(crate) use address::{ConnectionTarget, connection_target};
 pub(crate) use session::{
-    last_server_path, load_last_server, load_session, load_tts_auto_speak, preferences_path,
-    save_preferences, session_path,
+    SpeechPreferences, last_server_path, load_last_server, load_session, load_speech_preferences,
+    preferences_path, save_preferences, session_path,
 };
 pub(crate) use tls::PendingCertificate;
 

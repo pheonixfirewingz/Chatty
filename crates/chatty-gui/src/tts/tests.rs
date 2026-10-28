@@ -26,10 +26,10 @@ fn long_replies_start_with_a_short_chunk_without_losing_words() {
 #[test]
 #[ignore = "loads the local neural model; may download model files"]
 fn local_model_generates_audible_audio() {
-    let model = load_model(|_| {}).expect("load local model");
-    for voice in VOICES {
+    let mut model = load_model(|_| {}).expect("load local model");
+    for voice in [FEMALE_VOICE, MALE_VOICE] {
         let samples = model
-            .generate("Hello, this is Chatty speaking locally.", voice, 1.0, true)
+            .generate("Hello, this is Chatty speaking locally.", voice)
             .expect("generate local speech");
         assert!(samples.len() > 2_400);
         assert!(samples.iter().all(|sample| sample.is_finite()));
@@ -43,12 +43,32 @@ fn strips_common_markdown_before_speaking() {
 }
 
 #[test]
-fn character_voice_assignment_is_stable() {
+fn dialogue_keeps_only_quoted_speech() {
     assert_eq!(
-        voice_for(Some("character-one")),
-        voice_for(Some("character-one"))
+        dialogue(
+            "*He nods.* \"Alex the human?\" he repeats. \u{201c}Stay close.\u{201d} *He turns.* \"Come"
+        ),
+        "Alex the human? Stay close. Come"
     );
-    assert!(VOICES.contains(&voice_for(Some("character-one"))));
+    assert_eq!(dialogue("*He nods silently.*"), "");
+}
+
+#[test]
+fn roleplay_text_keeps_punctuation_for_natural_prosody() {
+    assert_eq!(
+        speech_text("*He nods.* \u{201c}Wait \u{2014} you\u{2019}re human?\u{201d}\u{2026}"),
+        "He nods. \"Wait, you're human?\"..."
+    );
+}
+
+#[test]
+fn female_characters_get_the_female_voice() {
+    for gender in ["Female", " mare ", "she/her", "F", "female (bat pony)"] {
+        assert!(is_female(gender), "{gender}");
+    }
+    for gender in ["Male", "stallion", "", "non-binary"] {
+        assert!(!is_female(gender), "{gender}");
+    }
 }
 
 #[test]
@@ -58,7 +78,7 @@ fn tts_channel_emits_speaking_and_status_events() {
     assert_eq!(tts.status(), "Ready. The voice model loads on first use.");
     assert!(rx.try_recv().is_err());
 
-    tts.speak("Test sentence", None).expect("speak");
+    tts.speak("Test sentence", false).expect("speak");
     assert!(tts.is_speaking());
 
     // Speak sets busy = true and status = "Preparing local speech…"

@@ -118,7 +118,7 @@ pub struct ChattyApp {
     glass_mode: bool,
     preferences_path: Option<PathBuf>,
     tts: LocalTts,
-    tts_auto_speak: bool,
+    speech: network::SpeechPreferences,
     pending_tts_message_id: Option<String>,
 }
 
@@ -236,7 +236,7 @@ impl ChattyApp {
             glass_mode: true,
             preferences_path: None,
             tts,
-            tts_auto_speak: false,
+            speech: Default::default(),
             pending_tts_message_id: None,
         }
     }
@@ -250,7 +250,7 @@ impl ChattyApp {
         let preferences_path = network::preferences_path(&session_path);
         let last_server_path = network::last_server_path(&session_path);
 
-        let tts_auto_speak = network::load_tts_auto_speak(&preferences_path);
+        let speech = network::load_speech_preferences(&preferences_path);
 
         let initial_server = if !args.broker.trim().is_empty() {
             args.broker.clone()
@@ -267,7 +267,7 @@ impl ChattyApp {
         app.fifo_path = args.inspect_control;
         app.preferences_path = Some(preferences_path);
         app.server_address = initial_server;
-        app.tts_auto_speak = tts_auto_speak;
+        app.speech = speech;
         app.admin.glass_mode = true;
 
         if args.inspect {

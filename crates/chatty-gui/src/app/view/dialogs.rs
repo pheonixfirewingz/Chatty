@@ -1,7 +1,6 @@
 //! Settings, certificate trust, and notice dialogs.
 
 use crate::app::{ChattyApp, Message, UiNotice};
-use crate::conversation::ConversationMessage;
 use crate::network::PendingCertificate;
 use crate::ui;
 use iced::widget::{Space, button, column, container, row, text, toggler};
@@ -12,15 +11,15 @@ impl ChattyApp {
         let title = text("Settings").size(22).font(ui::BOLD);
 
         let speech_header = text("Local Speech (TTS)").size(14).font(ui::SEMIBOLD);
-        let auto_speak_toggle = toggler(self.tts_auto_speak)
+        let auto_speak_toggle = toggler(self.speech.auto_speak)
             .label("Automatically read new replies")
             .on_toggle(Message::SetTtsAutoSpeak);
+        let dialogue_only_toggle = toggler(self.speech.dialogue_only)
+            .label("Read only quoted dialogue")
+            .on_toggle(Message::SetTtsDialogueOnly);
 
         let test_voice_btn = button(text("Test voice").size(13))
-            .on_press(Message::Conversation(ConversationMessage::SpeakMessage {
-                text: "Chatty local speech synthesis is working properly.".into(),
-                author_id: None,
-            }))
+            .on_press(Message::TestVoice)
             .padding([6, 12])
             .style(ui::secondary_button_style());
 
@@ -43,6 +42,7 @@ impl ChattyApp {
             Space::new().height(10),
             speech_header,
             auto_speak_toggle,
+            dialogue_only_toggle,
             test_voice_btn,
             Space::new().height(12),
             usage_header,

@@ -1,7 +1,7 @@
 use super::address::{broker_host, connection_target};
 use super::session::{
-    SavedSession, default_session_path, last_server_path, load_last_server, load_session,
-    load_tts_auto_speak, save_last_server, save_preferences, save_session,
+    SavedSession, SpeechPreferences, default_session_path, last_server_path, load_last_server,
+    load_session, load_speech_preferences, save_last_server, save_preferences, save_session,
 };
 use super::tls::{
     CertificateVerifier, PendingCertificate, certificate_fingerprint, default_server_ca_path,
@@ -234,10 +234,21 @@ fn unauthorized_from_pre_logout_request_is_expected() {
 fn speech_preferences_round_trip() {
     let path =
         std::env::temp_dir().join(format!("chatty-speech-preferences-{}", std::process::id()));
-    save_preferences(&path, true);
-    assert!(load_tts_auto_speak(&path));
-    save_preferences(&path, false);
-    assert!(!load_tts_auto_speak(&path));
+    assert_eq!(load_speech_preferences(&path), SpeechPreferences::default());
+    assert!(SpeechPreferences::default().dialogue_only);
+    for speech in [
+        SpeechPreferences {
+            auto_speak: true,
+            dialogue_only: false,
+        },
+        SpeechPreferences {
+            auto_speak: false,
+            dialogue_only: true,
+        },
+    ] {
+        save_preferences(&path, speech);
+        assert_eq!(load_speech_preferences(&path), speech);
+    }
     let _ = std::fs::remove_file(path);
 }
 
@@ -250,12 +261,12 @@ fn legacy_appearance_preferences_preserve_speech_setting() {
         "theme=light\nsurface=solid\ntransparency=80\ntts_auto_speak=true\n",
     )
     .unwrap();
-    let speech = load_tts_auto_speak(&path);
-    assert!(speech);
+    let speech = load_speech_preferences(&path);
+    assert!(speech.auto_speak && speech.dialogue_only);
     save_preferences(&path, speech);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "tts_auto_speak=true\n"
+        "tts_auto_speak=true\ntts_dialogue_only=true\n"
     );
     let _ = std::fs::remove_file(path);
 }

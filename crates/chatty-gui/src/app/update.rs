@@ -146,8 +146,22 @@ impl ChattyApp {
                 Task::none()
             }
             Message::SetTtsAutoSpeak(speak) => {
-                self.tts_auto_speak = speak;
+                self.speech.auto_speak = speak;
                 self.save_preferences();
+                Task::none()
+            }
+            Message::SetTtsDialogueOnly(dialogue_only) => {
+                self.speech.dialogue_only = dialogue_only;
+                self.save_preferences();
+                Task::none()
+            }
+            Message::TestVoice => {
+                if let Err(error) = self
+                    .tts
+                    .speak("Chatty local speech synthesis is working properly.", true)
+                {
+                    self.set_error(error);
+                }
                 Task::none()
             }
             Message::SignOut => {
@@ -347,9 +361,25 @@ impl ChattyApp {
         }
     }
 
+    /// Female voice for characters whose gender field says so.
+    pub(super) fn speaker_is_female(&self, author_id: Option<&str>) -> bool {
+        author_id
+            .and_then(|id| self.characters.iter().find(|character| character.id == id))
+            .is_some_and(|character| crate::tts::is_female(&character.gender))
+    }
+
+    /// Text read aloud for a reply, honouring the dialogue-only preference.
+    pub(super) fn spoken_text(&self, text: &str) -> String {
+        if self.speech.dialogue_only {
+            crate::tts::dialogue(text)
+        } else {
+            text.to_owned()
+        }
+    }
+
     pub(super) fn save_preferences(&self) {
         if let Some(path) = &self.preferences_path {
-            save_preferences(path, self.tts_auto_speak);
+            save_preferences(path, self.speech);
         }
     }
 
@@ -521,7 +551,15 @@ impl ChattyApp {
                 }
             }
             ConversationMessage::SpeakMessage { text, author_id } => {
-                if let Err(e) = self.tts.speak(&text, author_id.as_deref()) {
+                // A reply without quoted dialogue is read in full on request.
+                let spoken = self.spoken_text(&text);
+                let spoken = if spoken.trim().is_empty() {
+                    text
+                } else {
+                    spoken
+                };
+                let female = self.speaker_is_female(author_id.as_deref());
+                if let Err(e) = self.tts.speak(&spoken, female) {
                     self.set_error(e);
                 }
             }

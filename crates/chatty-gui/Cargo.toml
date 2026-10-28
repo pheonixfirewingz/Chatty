@@ -10,7 +10,9 @@ iced.workspace = true
 iced_dialog = "0.14.0"
 image.workspace = true
 hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
+# Kokoro speech uses KittenTTS's espeak phonemizer and the same ONNX Runtime.
 kittentts = { version = "0.3.0", features = ["espeak"] }
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std"] }
 rfd.workspace = true
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
 rustls.workspace = true

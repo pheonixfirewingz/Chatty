@@ -124,17 +124,43 @@ pub(super) fn save_last_server(path: &Path, server: &str) {
     );
 }
 
-pub(crate) fn load_tts_auto_speak(path: &Path) -> bool {
-    fs::read_to_string(path).ok().is_some_and(|value| {
-        value
-            .lines()
-            .any(|line| line.trim() == "tts_auto_speak=true")
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpeechPreferences {
+    pub(crate) auto_speak: bool,
+    /// Read only quoted dialogue, skipping roleplay narration.
+    pub(crate) dialogue_only: bool,
 }
 
-pub(crate) fn save_preferences(path: &Path, tts_auto_speak: bool) {
+impl Default for SpeechPreferences {
+    fn default() -> Self {
+        Self {
+            auto_speak: false,
+            dialogue_only: true,
+        }
+    }
+}
+
+pub(crate) fn load_speech_preferences(path: &Path) -> SpeechPreferences {
+    let mut preferences = SpeechPreferences::default();
+    for line in fs::read_to_string(path).unwrap_or_default().lines() {
+        match line.trim() {
+            "tts_auto_speak=true" => preferences.auto_speak = true,
+            "tts_dialogue_only=false" => preferences.dialogue_only = false,
+            _ => {}
+        }
+    }
+    preferences
+}
+
+pub(crate) fn save_preferences(path: &Path, speech: SpeechPreferences) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(path, format!("tts_auto_speak={tts_auto_speak}\n"));
+    let _ = fs::write(
+        path,
+        format!(
+            "tts_auto_speak={}\ntts_dialogue_only={}\n",
+            speech.auto_speak, speech.dialogue_only
+        ),
+    );
 }

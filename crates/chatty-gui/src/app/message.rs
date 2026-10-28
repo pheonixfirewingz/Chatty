@@ -41,6 +41,8 @@ pub(crate) enum Message {
     OpenSettingsDialog,
     CloseSettingsDialog,
     SetTtsAutoSpeak(bool),
+    SetTtsDialogueOnly(bool),
+    TestVoice,
     SignOut,
     ToggleSidebar,
     ToggleCompactSidebar,
