@@ -771,6 +771,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chatty-adapter-comfyui"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chatty-adapter-freetoken"
 version = "0.1.0"
 dependencies = [
@@ -807,6 +815,7 @@ name = "chatty-broker"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "base64 0.22.1",
  "bytes",
  "chacha20poly1305",
  "chatty-protocol",

@@ -54,6 +54,8 @@ pub enum Response {
         adapter_plugins: Vec<String>,
         /// Operator override, which takes precedence over persisted selection.
         adapter_override: Option<String>,
+        /// Installed text-to-image plugins.
+        image_plugins: Vec<String>,
     },
     BrokerMonitor(crate::admin::BrokerMonitor),
     BrokerLog(crate::admin::BrokerLog),
@@ -61,6 +63,7 @@ pub enum Response {
     AdminDatabase(Vec<crate::admin::AdminDataRow>),
     ServerCapabilities {
         registration_enabled: bool,
+        image_generation: bool,
     },
     Permissions(Vec<Permission>),
     Conversations(Vec<Conversation>),
@@ -101,4 +104,15 @@ pub enum Response {
     WorldImportPreview(crate::world::World),
     /// AI-inferred character fields returned for review; the broker has not persisted it.
     CharacterImportPreview(Box<CharacterInput>),
+    ImageModels(Vec<String>),
+    /// Unsaved PNG returned for review.
+    GeneratedImage {
+        #[serde(with = "crate::byte_vec")]
+        data: Vec<u8>,
+    },
+    MessageImage {
+        message_id: String,
+        #[serde(with = "crate::byte_vec")]
+        data: Vec<u8>,
+    },
 }

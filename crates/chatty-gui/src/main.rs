@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use admin_monitor::{AdminMessage, AdminState, admin_dialog_view, admin_subscription};
-use characters::{CharacterMessage, DraftCharacter, character_dialog_view};
+use characters::{CharacterMessage, DraftCharacter, ImageGeneration, character_dialog_view};
 use conversation::{
     ConversationMessage, ConversationViewState, NewChatViewState, conversation_view,
     new_chat_dialog_view,
@@ -264,6 +264,11 @@ pub struct ChattyApp {
     password: String,
     role: Option<Role>,
     registration_enabled: bool,
+    image_generation: bool,
+    scene_image: ImageJob,
+    portrait_image: ImageJob,
+    message_images: HashMap<String, Vec<u8>>,
+    message_image_requests: HashSet<String>,
     state: HashMap<(String, String), DeltaPayload>,
     characters: Vec<Character>,
     character_image_requests: HashSet<(String, String)>,
@@ -313,6 +318,31 @@ pub struct ChattyApp {
     pending_tts_message_id: Option<String>,
 }
 
+/// Most recent image messages whose PNG bytes stay loaded for the open chat.
+const MAX_LOADED_MESSAGE_IMAGES: usize = 12;
+
+/// A broker image job. The request ID arrives after the request is written.
+#[derive(Debug, Default, Clone, Copy)]
+struct ImageJob {
+    pending: bool,
+    request_id: Option<u64>,
+}
+
+impl ImageJob {
+    fn state(self, available: bool) -> ImageGeneration {
+        if self.pending {
+            ImageGeneration::Pending
+        } else if available {
+            ImageGeneration::Ready
+        } else {
+            ImageGeneration::Unavailable
+        }
+    }
+    fn owns(self, request_id: u64) -> bool {
+        self.pending && self.request_id == Some(request_id)
+    }
+}
+
 #[derive(Clone)]
 pub struct Args {
     pub broker: String,
@@ -353,6 +383,11 @@ impl ChattyApp {
             password: String::new(),
             role: None,
             registration_enabled: true,
+            image_generation: false,
+            scene_image: ImageJob::default(),
+            portrait_image: ImageJob::default(),
+            message_images: HashMap::new(),
+            message_image_requests: HashSet::new(),
             state: HashMap::new(),
             characters: Vec::new(),
             character_image_requests: HashSet::new(),
@@ -527,6 +562,9 @@ impl ChattyApp {
                     }
                     "settings" => {
                         self.screen = Screen::Settings;
+                    }
+                    "connect" => {
+                        return self.update_message(Message::TryConnect);
                     }
                     "new_chat" => {
                         self.new_chat_open = true;
@@ -875,6 +913,17 @@ impl ChattyApp {
                         self.draft_character_open = false;
                         self.open_memory_manager(Some(id), None);
                     }
+                    CharacterMessage::GeneratePortrait => {
+                        if self.image_generation && !self.portrait_image.pending {
+                            self.portrait_image.pending = true;
+                            self.send(Request::GenerateImage {
+                                session_token: self.token.clone(),
+                                prompt: characters::portrait_prompt(&self.draft),
+                                negative_prompt: String::new(),
+                                square: true,
+                            });
+                        }
+                    }
                     other => {
                         self.draft.update(&other);
                     }
@@ -1067,6 +1116,25 @@ impl ChattyApp {
                     ConversationMessage::HoverMessage(id) => {
                         self.hovered_message_id = id;
                     }
+                    ConversationMessage::GenerateSceneImage => {
+                        if let Some(conversation_id) = self.selected_conversation.clone()
+                            && self.image_generation
+                            && !self.scene_image.pending
+                        {
+                            self.scene_image.pending = true;
+                            let prompt = std::mem::take(&mut self.input).trim().to_owned();
+                            self.send(Request::GenerateSceneImage {
+                                session_token: self.token.clone(),
+                                conversation_id,
+                                prompt,
+                            });
+                        }
+                    }
+                    ConversationMessage::CancelSceneImage => {
+                        if let Some(id) = self.scene_image.request_id {
+                            let _ = self.commands.send(Command::Cancel(id));
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -1187,6 +1255,7 @@ impl ChattyApp {
                 &self.worlds,
                 &self.character_search,
                 self.char_import_pending,
+                self.portrait_image.state(self.image_generation),
                 self.light_mode,
                 self.glass_mode,
                 size.width < 800.0,
@@ -1711,11 +1780,7 @@ impl ChattyApp {
                 Some("Open settings"),
                 Message::OpenSettingsDialog,
             ),
-            (
-                FooterIcon::SignOut,
-                Some("Sign out"),
-                Message::SignOut,
-            ),
+            (FooterIcon::SignOut, Some("Sign out"), Message::SignOut),
         ]);
 
         let icons = responsive(move |size| {
@@ -1805,6 +1870,8 @@ impl ChattyApp {
             ),
             light_mode: self.light_mode,
             glass_mode: self.glass_mode,
+            message_images: &self.message_images,
+            scene_image: self.scene_image.state(self.image_generation),
         };
 
         let chat_area = conversation_view(&conv_state, move |message| {
@@ -2054,8 +2121,22 @@ impl ChattyApp {
                 self.admin.models.request_id = Some(id);
                 self.admin.models.busy = true;
             }
+            Event::ImageRequestStarted { request_id, scene } => {
+                let job = if scene {
+                    &mut self.scene_image
+                } else {
+                    &mut self.portrait_image
+                };
+                if job.pending && job.request_id.is_none() {
+                    job.request_id = Some(request_id);
+                }
+            }
             Event::Status(status) => {
                 if status.contains("Offline:") || status.contains("Idle · offline:") {
+                    // The broker cancels image jobs when their connection closes.
+                    self.scene_image = ImageJob::default();
+                    self.portrait_image = ImageJob::default();
+                    self.message_image_requests.clear();
                     self.memory_state.condensing = false;
                     self.admin.models.interrupt_downloads();
                     self.admin.models.busy = false;
@@ -2118,6 +2199,7 @@ impl ChattyApp {
                 self.context_usage.clear();
                 self.character_image_requests.clear();
                 self.received_character_images.clear();
+                self.clear_image_jobs();
                 self.generation_status = None;
                 self.role = None;
                 self.status = "Enter the server IP to begin.".into();
@@ -2147,6 +2229,7 @@ impl ChattyApp {
                 self.context_usage.clear();
                 self.character_image_requests.clear();
                 self.received_character_images.clear();
+                self.clear_image_jobs();
                 self.generation_status = None;
                 self.role = None;
                 self.set_error("Saved session expired. Sign in again.");
@@ -2156,6 +2239,24 @@ impl ChattyApp {
     }
 
     pub(crate) fn handle_frame(&mut self, frame: Frame) {
+        if matches!(
+            frame.message_type,
+            MessageType::Response | MessageType::Error
+        ) {
+            if self.scene_image.owns(frame.request_id) {
+                self.scene_image = ImageJob::default();
+            }
+            if self.portrait_image.owns(frame.request_id) {
+                self.portrait_image = ImageJob::default();
+                if frame.message_type == MessageType::Response
+                    && let Ok(Response::GeneratedImage { data }) =
+                        decode::<Response>(&frame.payload)
+                {
+                    self.add_generated_portrait(&data);
+                    return;
+                }
+            }
+        }
         if frame.message_type == MessageType::Error
             && let Some(download) = self.admin.models.download_for_request(frame.request_id)
         {
@@ -2196,7 +2297,11 @@ impl ChattyApp {
                         } => self.authenticated(session_token, user_id, role, revision),
                         Response::ServerCapabilities {
                             registration_enabled,
-                        } => self.registration_enabled = registration_enabled,
+                            image_generation,
+                        } => {
+                            self.registration_enabled = registration_enabled;
+                            self.image_generation = image_generation;
+                        }
                         Response::Worlds(v) => {
                             self.draft_world_ids
                                 .retain(|id| v.iter().any(|world| &world.id == id));
@@ -2286,6 +2391,7 @@ impl ChattyApp {
                             self.selected_conversation = Some(v.conversation.id);
                             self.messages = v.messages;
                             self.stream_text.clear();
+                            self.request_message_images();
                             if self.tts_auto_speak
                                 && let Some(message_id) = self.pending_tts_message_id.take()
                                 && let Some(message) = self
@@ -2347,7 +2453,10 @@ impl ChattyApp {
                             config: v,
                             adapter_plugins,
                             adapter_override,
+                            image_plugins,
                         } => {
+                            self.image_generation = v.image.enabled;
+                            self.admin.image_plugins = image_plugins;
                             self.admin.adapter_plugins = adapter_plugins;
                             self.admin.adapter_override = adapter_override;
                             self.admin.models.saved_adapter_url = Some(v.adapter_url.clone());
@@ -2361,6 +2470,12 @@ impl ChattyApp {
                             self.admin.models.selected_files.clear();
                         }
                         Response::OllamaState(v) => self.admin.ollama_state = Some(v),
+                        Response::ImageModels(v) => self.admin.image_models = Some(v),
+                        Response::MessageImage { message_id, data } => {
+                            if self.message_image_requests.remove(&message_id) {
+                                self.message_images.insert(message_id, data);
+                            }
+                        }
                         Response::AdminDatabase(v) => self.admin.admin_data = v,
                         Response::GenerationStarted {
                             character_id,
@@ -2448,7 +2563,11 @@ impl ChattyApp {
             }
             MessageType::Delta => {
                 if let Ok(d) = decode::<StateDelta>(&frame.payload) {
+                    let message = d.entity_type == "message";
                     self.apply_delta(d);
+                    if message {
+                        self.request_message_images();
+                    }
                 }
             }
             MessageType::Error => {
@@ -2479,6 +2598,54 @@ impl ChattyApp {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn clear_image_jobs(&mut self) {
+        self.scene_image = ImageJob::default();
+        self.portrait_image = ImageJob::default();
+        self.message_images.clear();
+        self.message_image_requests.clear();
+    }
+
+    /// Keep bytes only for the newest image messages in the open chat.
+    fn request_message_images(&mut self) {
+        let wanted: Vec<String> = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.author_type == "image")
+            .take(MAX_LOADED_MESSAGE_IMAGES)
+            .map(|message| message.id.clone())
+            .collect();
+        self.message_images.retain(|id, _| wanted.contains(id));
+        self.message_image_requests.retain(|id| wanted.contains(id));
+        for id in wanted {
+            if !self.message_images.contains_key(&id)
+                && self.message_image_requests.insert(id.clone())
+            {
+                self.send(Request::GetMessageImage {
+                    session_token: self.token.clone(),
+                    message_id: id,
+                });
+            }
+        }
+    }
+
+    fn add_generated_portrait(&mut self, png: &[u8]) {
+        match characters::generated_portrait_png(png) {
+            Ok(data) => {
+                let id = chatty_protocol::util::new_uuid();
+                if self.draft.default_image_id.is_none() {
+                    self.draft.default_image_id = Some(id.clone());
+                }
+                self.draft.images.push(CharacterImage {
+                    id,
+                    label: "generated portrait".into(),
+                    data,
+                });
+            }
+            Err(error) => self.set_error(error),
         }
     }
 

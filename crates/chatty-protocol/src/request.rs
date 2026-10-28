@@ -211,4 +211,28 @@ pub enum Request {
         message_id: String,
         content: String,
     },
+    /// List models offered by the configured image service.
+    AdminListImageModels {
+        session_token: String,
+    },
+    /// Generate one unsaved PNG, such as a character portrait draft.
+    /// Zero dimensions select the configured size; `square` forces equal sides.
+    GenerateImage {
+        session_token: String,
+        prompt: String,
+        negative_prompt: String,
+        square: bool,
+    },
+    /// Generate and persist an image message in a conversation. An empty prompt
+    /// asks the text model to describe the current scene from recent messages.
+    GenerateSceneImage {
+        session_token: String,
+        conversation_id: String,
+        prompt: String,
+    },
+    /// Fetch the PNG for one authorized image message.
+    GetMessageImage {
+        session_token: String,
+        message_id: String,
+    },
 }

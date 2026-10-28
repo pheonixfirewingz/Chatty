@@ -93,6 +93,42 @@ pub struct SearchResult {
     pub files: Vec<String>,
 }
 
+/// Optional v1 image capability. Prompts and settings are already validated and
+/// clamped by the broker. The broker always supplies a seed because guests have
+/// no entropy source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageRequest {
+    pub model: String,
+    pub prompt: String,
+    pub negative_prompt: String,
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+    pub guidance: f32,
+    pub seed: u64,
+    pub timeout_ms: u64,
+}
+
+/// A finished image. `Get` is fetched by the host from `path`, relative to the
+/// configured base URL; `Base64` is supplied inline. The broker accepts PNG only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ImageOutput {
+    Get {
+        path: String,
+        query: Vec<(String, String)>,
+    },
+    Base64(String),
+}
+
+/// Queue-based servers return `Pending` with an opaque job ID which the host
+/// passes to `ImageStatus` while that request remains active. An empty status
+/// job keeps the current ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ImageJob {
+    Pending { job: String, poll_after_ms: u64 },
+    Ready { images: Vec<ImageOutput> },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AdapterRequest {
     Models {
@@ -109,6 +145,18 @@ pub enum AdapterRequest {
     Search {
         query: String,
     },
+    /// Optional v1 image capability: submit one text-to-image job.
+    Image(ImageRequest),
+    /// Optional v1 image capability: read a pending job's state.
+    ImageStatus {
+        job: String,
+    },
+    /// Optional v1 image capability: best-effort cancellation of a pending job.
+    ImageCancel {
+        job: String,
+    },
+    /// Optional v1 image capability: release loaded image models and GPU memory.
+    ImageUnload,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ResponseKind {
@@ -117,6 +165,7 @@ pub enum ResponseKind {
     State,
     Action,
     Search,
+    Image,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -218,6 +267,7 @@ pub enum PluginOutput {
     Action,
     Search(Vec<SearchResult>),
     Stream(StreamUpdate),
+    Image(ImageJob),
 }
 
 pub type PluginResult = Result<PluginOutput, String>;

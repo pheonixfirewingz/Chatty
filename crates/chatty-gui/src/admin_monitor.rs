@@ -6,8 +6,8 @@
 #![allow(dead_code)]
 
 use chatty_protocol::{
-    AdapterStatus, AdminDataRow, BrokerConfig, BrokerLog, BrokerMonitor, OllamaAction,
-    OllamaState, Request, Role, UserAccount,
+    AdapterStatus, AdminDataRow, BrokerConfig, BrokerLog, BrokerMonitor, OllamaAction, OllamaState,
+    Request, Role, UserAccount,
 };
 use iced::widget::{
     Space, button, column, container, pick_list, row, rule, scrollable, text, text_input, toggler,
@@ -46,6 +46,18 @@ pub enum AdminMessage {
     KeepAliveChanged(String),
     TogglePublicCharacters(bool),
     ToggleRegistration(bool),
+
+    // Image generation settings
+    ToggleImages(bool),
+    ImageUrlChanged(String),
+    SelectImagePlugin(String),
+    ImageModelChanged(String),
+    ImageWidthChanged(u32),
+    ImageHeightChanged(u32),
+    ImageStepsChanged(u32),
+    ImageGuidanceChanged(f32),
+    ImageNegativeChanged(String),
+    LoadImageModels,
 
     ModelsPage(usize),
     ToggleAdvancedSettings(bool),
@@ -256,6 +268,8 @@ pub struct AdminViewState<'a> {
     pub broker_config: &'a BrokerConfig,
     pub adapter_plugins: &'a [String],
     pub adapter_override: Option<&'a str>,
+    pub image_plugins: &'a [String],
+    pub image_models: Option<&'a [String]>,
     pub broker_monitor: Option<&'a BrokerMonitor>,
     pub ollama_state: Option<&'a OllamaState>,
     pub ollama_pull_model: &'a str,
@@ -279,6 +293,9 @@ pub struct AdminState {
     pub broker_config: BrokerConfig,
     pub adapter_plugins: Vec<String>,
     pub adapter_override: Option<String>,
+    pub image_plugins: Vec<String>,
+    /// Models listed by the image service on explicit request; `None` until listed.
+    pub image_models: Option<Vec<String>>,
     pub broker_monitor: Option<BrokerMonitor>,
     pub ollama_state: Option<OllamaState>,
     pub ollama_pull_model: String,
@@ -301,6 +318,8 @@ impl Default for AdminState {
             models: ModelsState::default(),
             adapter_plugins: Vec::new(),
             adapter_override: None,
+            image_plugins: Vec::new(),
+            image_models: None,
             broker_config: BrokerConfig {
                 adapter_enabled: false,
                 adapter_url: String::new(),
@@ -317,6 +336,7 @@ impl Default for AdminState {
                 keep_alive: "5m".into(),
                 allow_public_characters: false,
                 allow_self_registration: true,
+                image: Default::default(),
             },
             broker_monitor: None,
             ollama_state: None,
@@ -344,6 +364,8 @@ impl AdminState {
             broker_config: &self.broker_config,
             adapter_plugins: &self.adapter_plugins,
             adapter_override: self.adapter_override.as_deref(),
+            image_plugins: &self.image_plugins,
+            image_models: self.image_models.as_deref(),
             broker_monitor: self.broker_monitor.as_ref(),
             ollama_state: self.ollama_state.as_ref(),
             ollama_pull_model: &self.ollama_pull_model,
@@ -558,6 +580,51 @@ impl AdminState {
                 self.broker_config.allow_self_registration = allow;
                 vec![]
             }
+            AdminMessage::ToggleImages(enabled) => {
+                self.broker_config.image.enabled = enabled;
+                vec![]
+            }
+            AdminMessage::ImageUrlChanged(url) => {
+                self.image_models = None;
+                self.broker_config.image.url = url;
+                vec![]
+            }
+            AdminMessage::SelectImagePlugin(id) => {
+                if self.image_plugins.contains(&id) {
+                    self.image_models = None;
+                    self.broker_config.image.plugin = id;
+                }
+                vec![]
+            }
+            AdminMessage::ImageModelChanged(model) => {
+                self.broker_config.image.model = model;
+                vec![]
+            }
+            AdminMessage::ImageWidthChanged(width) => {
+                self.broker_config.image.width = width;
+                vec![]
+            }
+            AdminMessage::ImageHeightChanged(height) => {
+                self.broker_config.image.height = height;
+                vec![]
+            }
+            AdminMessage::ImageStepsChanged(steps) => {
+                self.broker_config.image.steps = steps;
+                vec![]
+            }
+            AdminMessage::ImageGuidanceChanged(guidance) => {
+                self.broker_config.image.guidance = guidance;
+                vec![]
+            }
+            AdminMessage::ImageNegativeChanged(prompt) => {
+                self.broker_config.image.negative_prompt = prompt;
+                vec![]
+            }
+            AdminMessage::LoadImageModels => {
+                vec![Request::AdminListImageModels {
+                    session_token: session_token.to_string(),
+                }]
+            }
             AdminMessage::RefreshOllama => {
                 vec![Request::AdminGetOllamaState {
                     session_token: session_token.to_string(),
@@ -680,7 +747,10 @@ pub fn requests_for_tab(tab: usize, session_token: &str) -> Vec<Request> {
                 session_token: session_token.to_string(),
             },
         ],
-        3 => vec![Request::AdminReadBrokerLog {
+        3 => vec![Request::AdminGetBrokerConfig {
+            session_token: session_token.to_string(),
+        }],
+        4 => vec![Request::AdminReadBrokerLog {
             session_token: session_token.to_string(),
         }],
         _ => vec![Request::AdminReadDatabase {
@@ -765,12 +835,10 @@ pub fn admin_subscription_gated(
 // Iced 0.14 View Components
 // -----------------------------------------------------------------------------
 
-pub const ADMIN_TAB_NAMES: [&str; 5] = ["Broker", "Users", "Models", "Logs", "Data"];
+pub const ADMIN_TAB_NAMES: [&str; 6] = ["Broker", "Users", "Models", "Images", "Logs", "Data"];
 
 /// Renders the complete Admin modal dialog including tab bar and active tab content.
-pub fn admin_dialog_view<'a, Message>(
-    state: &AdminViewState<'a>,
-) -> Element<'a, Message>
+pub fn admin_dialog_view<'a, Message>(state: &AdminViewState<'a>) -> Element<'a, Message>
 where
     Message: 'a + Clone + From<AdminMessage>,
 {
@@ -840,7 +908,8 @@ where
         0 => broker_tab_view(state),
         1 => users_tab_view(state),
         2 => ollama_tab_view(state),
-        3 => logs_tab_view(state),
+        3 => image_settings::view(state),
+        4 => logs_tab_view(state),
         _ => data_tab_view(state),
     };
 
@@ -882,9 +951,7 @@ fn metric_card<'a, Message: 'a>(
 }
 
 /// Broker Tab: broker metrics display, recent errors, adapter & generation parameter settings.
-pub fn broker_tab_view<'a, Message>(
-    state: &AdminViewState<'a>,
-) -> Element<'a, Message>
+pub fn broker_tab_view<'a, Message>(state: &AdminViewState<'a>) -> Element<'a, Message>
 where
     Message: 'a + Clone + From<AdminMessage>,
 {
@@ -909,10 +976,25 @@ where
         };
 
         let metrics_row = row![
-            metric_card("Uptime", format_duration(m.uptime_seconds), state.light_mode, state.glass_mode),
-            metric_card("CPU", format!("{:.1}%", m.cpu_percent), state.light_mode, state.glass_mode),
+            metric_card(
+                "Uptime",
+                format_duration(m.uptime_seconds),
+                state.light_mode,
+                state.glass_mode
+            ),
+            metric_card(
+                "CPU",
+                format!("{:.1}%", m.cpu_percent),
+                state.light_mode,
+                state.glass_mode
+            ),
             metric_card("Memory", mem_str, state.light_mode, state.glass_mode),
-            metric_card("Connections", m.active_connections.to_string(), state.light_mode, state.glass_mode),
+            metric_card(
+                "Connections",
+                m.active_connections.to_string(),
+                state.light_mode,
+                state.glass_mode
+            ),
             metric_card("Adapter", adapter_str, state.light_mode, state.glass_mode),
         ]
         .spacing(8);
@@ -974,9 +1056,7 @@ where
 }
 
 /// Users Tab: user creation form, user cards with token metrics, promote/demote and delete buttons.
-pub fn users_tab_view<'a, Message>(
-    state: &AdminViewState<'a>,
-) -> Element<'a, Message>
+pub fn users_tab_view<'a, Message>(state: &AdminViewState<'a>) -> Element<'a, Message>
 where
     Message: 'a + Clone + From<AdminMessage>,
 {
@@ -1102,14 +1182,15 @@ fn hint<'a, Message: 'a>(
 #[path = "model_settings.rs"]
 mod model_settings;
 
+#[path = "image_settings.rs"]
+mod image_settings;
+
 #[path = "model_manager.rs"]
 mod model_manager;
 use model_manager::ollama_tab_view;
 
 /// Logs Tab: broker log viewer with search and size overview.
-pub fn logs_tab_view<'a, Message>(
-    state: &AdminViewState<'a>,
-) -> Element<'a, Message>
+pub fn logs_tab_view<'a, Message>(state: &AdminViewState<'a>) -> Element<'a, Message>
 where
     Message: 'a + Clone + From<AdminMessage>,
 {
@@ -1124,9 +1205,8 @@ where
     .align_y(Alignment::Center);
 
     if !state.admin_log.content.is_empty() {
-        header_actions = header_actions.push(
-            button(text("Copy all")).on_press(Message::from(AdminMessage::CopyLogs)),
-        );
+        header_actions = header_actions
+            .push(button(text("Copy all")).on_press(Message::from(AdminMessage::CopyLogs)));
     }
 
     items = items.push(header_actions);
@@ -1176,11 +1256,7 @@ where
     } else {
         let mut lines_col = column![].spacing(2).width(Length::Fill);
         for line in matching_lines {
-            lines_col = lines_col.push(
-                text(line)
-                    .font(iced::Font::MONOSPACE)
-                    .size(11),
-            );
+            lines_col = lines_col.push(text(line).font(iced::Font::MONOSPACE).size(11));
         }
         lines_col.into()
     };
@@ -1198,9 +1274,7 @@ where
 }
 
 /// Data Tab: database tables explorer with character public toggles.
-pub fn data_tab_view<'a, Message>(
-    state: &AdminViewState<'a>,
-) -> Element<'a, Message>
+pub fn data_tab_view<'a, Message>(state: &AdminViewState<'a>) -> Element<'a, Message>
 where
     Message: 'a + Clone + From<AdminMessage>,
 {
@@ -1371,10 +1445,7 @@ pub mod tests {
         assert_eq!(msg, AdminMessage::SelectRuntimeAdapter("ollama".into()));
 
         let msg = AdminMessage::SelectAdapterModel("llama3.2".into());
-        assert_eq!(
-            msg,
-            AdminMessage::SelectAdapterModel("llama3.2".into())
-        );
+        assert_eq!(msg, AdminMessage::SelectAdapterModel("llama3.2".into()));
 
         let msg = AdminMessage::TemperatureChanged(0.7);
         assert_eq!(msg, AdminMessage::TemperatureChanged(0.7));
@@ -1410,10 +1481,7 @@ pub mod tests {
         assert_eq!(msg, AdminMessage::RefreshOllama);
 
         let msg = AdminMessage::OllamaPullModelChanged("mistral".into());
-        assert_eq!(
-            msg,
-            AdminMessage::OllamaPullModelChanged("mistral".into())
-        );
+        assert_eq!(msg, AdminMessage::OllamaPullModelChanged("mistral".into()));
 
         let msg = AdminMessage::OllamaPull;
         assert_eq!(msg, AdminMessage::OllamaPull);
@@ -1519,11 +1587,50 @@ pub mod tests {
 
         let r3 = requests_for_tab(3, token);
         assert_eq!(r3.len(), 1);
-        assert!(matches!(r3[0], Request::AdminReadBrokerLog { .. }));
+        assert!(matches!(r3[0], Request::AdminGetBrokerConfig { .. }));
 
         let r4 = requests_for_tab(4, token);
         assert_eq!(r4.len(), 1);
-        assert!(matches!(r4[0], Request::AdminReadDatabase { .. }));
+        assert!(matches!(r4[0], Request::AdminReadBrokerLog { .. }));
+
+        let r5 = requests_for_tab(5, token);
+        assert_eq!(r5.len(), 1);
+        assert!(matches!(r5[0], Request::AdminReadDatabase { .. }));
+    }
+
+    #[test]
+    fn image_settings_are_saved_with_broker_config() {
+        let mut state = AdminState {
+            image_plugins: vec!["comfyui".into()],
+            image_models: Some(vec!["old.safetensors".into()]),
+            ..AdminState::default()
+        };
+        state.update(AdminMessage::ToggleImages(true), "t");
+        state.update(
+            AdminMessage::ImageUrlChanged("http://192.168.0.97:8188".into()),
+            "t",
+        );
+        assert!(
+            state.image_models.is_none(),
+            "a new server needs a new model list"
+        );
+        state.update(AdminMessage::SelectImagePlugin("unknown".into()), "t");
+        state.update(AdminMessage::ImageStepsChanged(30), "t");
+        let requests = state.update(AdminMessage::SaveBrokerConfig, "t");
+        let [Request::AdminSetBrokerConfig { config, .. }] = requests.as_slice() else {
+            panic!("expected a config save")
+        };
+        assert!(config.image.enabled);
+        assert_eq!(config.image.url, "http://192.168.0.97:8188");
+        assert_eq!(
+            config.image.plugin, "comfyui",
+            "unknown plugins are ignored"
+        );
+        assert_eq!(config.image.steps, 30);
+        assert!(matches!(
+            state.update(AdminMessage::LoadImageModels, "t").as_slice(),
+            [Request::AdminListImageModels { .. }]
+        ));
     }
 
     #[test]
@@ -1577,7 +1684,10 @@ pub mod tests {
         state.update(AdminMessage::ToggleAdapter(true), token);
         assert!(state.broker_config.adapter_enabled);
 
-        state.update(AdminMessage::AdapterUrlChanged("http://remote:11434".into()), token);
+        state.update(
+            AdminMessage::AdapterUrlChanged("http://remote:11434".into()),
+            token,
+        );
         assert_eq!(state.broker_config.adapter_url, "http://remote:11434");
 
         state.adapter_plugins = vec!["ollama".into(), "openai-compatible".into()];
@@ -1701,7 +1811,9 @@ pub mod tests {
             token,
         );
         assert_eq!(reqs.len(), 1);
-        assert!(matches!(&reqs[0], Request::AdminSetRole { user_id, role: Role::User, .. } if user_id == "u2"));
+        assert!(
+            matches!(&reqs[0], Request::AdminSetRole { user_id, role: Role::User, .. } if user_id == "u2")
+        );
 
         let reqs = state.update(AdminMessage::DeleteUser("u2".into()), token);
         assert_eq!(reqs.len(), 1);
@@ -1802,8 +1914,8 @@ pub mod tests {
             is_public: Some(true),
         }];
 
-        // Test rendering all 5 tabs
-        for tab in 0..5 {
+        // Test rendering every tab
+        for tab in 0..ADMIN_TAB_NAMES.len() {
             state.admin_tab = tab;
             let view_state = state.as_view_state();
             let _element: Element<'_, AdminMessage> = admin_dialog_view(&view_state);
@@ -1935,5 +2047,4 @@ pub mod tests {
         assert_eq!(state.models.downloads["llama3.2:3b"].request_id, Some(99));
         assert!(!state.models.busy);
     }
-
 }

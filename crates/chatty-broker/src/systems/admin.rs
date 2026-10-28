@@ -136,7 +136,7 @@ pub(super) async fn adapter_health(app: &App) -> (AdapterStatus, u32, Option<u64
 }
 
 pub(super) async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> {
-    let row = sqlx::query("SELECT adapter_enabled,adapter_url,adapter_plugin,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration FROM broker_settings WHERE singleton=1")
+    let row = sqlx::query("SELECT adapter_enabled,adapter_url,adapter_plugin,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration,image_enabled,image_url,image_plugin,image_model,image_width,image_height,image_steps,image_guidance,image_negative_prompt FROM broker_settings WHERE singleton=1")
         .fetch_one(db)
         .await?;
     Ok(BrokerConfig {
@@ -155,6 +155,17 @@ pub(super) async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> 
         keep_alive: row.get("keep_alive"),
         allow_public_characters: row.get("allow_public_characters"),
         allow_self_registration: row.get("allow_self_registration"),
+        image: ImageConfig {
+            enabled: row.get("image_enabled"),
+            url: row.get("image_url"),
+            plugin: row.get("image_plugin"),
+            model: row.get("image_model"),
+            width: row.get::<i64, _>("image_width") as u32,
+            height: row.get::<i64, _>("image_height") as u32,
+            steps: row.get::<i64, _>("image_steps") as u32,
+            guidance: row.get("image_guidance"),
+            negative_prompt: row.get("image_negative_prompt"),
+        },
     })
 }
 
@@ -182,6 +193,30 @@ pub(super) fn validate_broker_config(config: &BrokerConfig) -> Result<()> {
     }
     if config.keep_alive.is_empty() || config.keep_alive.len() > 32 {
         bail!("keep-alive must be an Ollama duration such as 5m, 1h, or 0")
+    }
+    let image = &config.image;
+    if !image.url.starts_with("http://") && !image.url.starts_with("https://") {
+        bail!("image service URL must use http or https")
+    }
+    if image.model.len() > 256 || image.model.chars().any(char::is_control) {
+        bail!("image model name is invalid")
+    }
+    let sides = chatty_protocol::admin::MIN_IMAGE_SIDE..=chatty_protocol::admin::MAX_IMAGE_SIDE;
+    if !sides.contains(&image.width)
+        || !sides.contains(&image.height)
+        || !image.width.is_multiple_of(8)
+        || !image.height.is_multiple_of(8)
+    {
+        bail!("image size must be 256 to 2048 pixels per side, in multiples of 8")
+    }
+    if !(1..=chatty_protocol::admin::MAX_IMAGE_STEPS).contains(&image.steps) {
+        bail!("image steps must be between 1 and 150")
+    }
+    if !image.guidance.is_finite() || !(0.0..=30.0).contains(&image.guidance) {
+        bail!("image guidance must be between 0 and 30")
+    }
+    if image.negative_prompt.len() > chatty_protocol::admin::MAX_IMAGE_PROMPT_BYTES {
+        bail!("image negative prompt must not exceed 4096 bytes")
     }
     Ok(())
 }
@@ -229,6 +264,11 @@ pub(super) async fn run_ollama_action(app: &App, action: OllamaAction) -> Result
         model,
         matches!(&action, OllamaAction::Pull { .. }),
     )?;
+    // Loading occupies GPU memory; pulls and deletes do not.
+    let _workload = match &action {
+        OllamaAction::Load { .. } => Some(app.adapters.text_workload(&config).await),
+        _ => None,
+    };
     let action = match action {
         OllamaAction::Pull { model } => crate::adapter_api::ModelAction::Pull { model },
         OllamaAction::Delete { model } => crate::adapter_api::ModelAction::Delete { model },

@@ -26,6 +26,7 @@ Chatty is currently a working `0.1.0` pre-release. It is suitable for developmen
 - Per-user prompt and completion token accounting
 - Admin monitoring, user management, broker policy, inference settings, and Ollama model controls
 - Sandboxed WASM adapter plugins for OpenAI-compatible servers, remote [FreeToken](docs/OPERATIONS.md#freetoken-on-a-remote-machine), Ollama, and Hugging Face model discovery
+- Optional [ComfyUI image generation](docs/OPERATIONS.md#image-generation-with-comfyui): **Generate portrait** in the character editor, and **Image** in the chat composer to illustrate the scene. Text in the composer becomes the image prompt; an empty composer asks the text model to describe the scene
 - Broker/protocol support for group modes, variants, lore, memories, conversation state, and summaries
 
 The GUI focuses on direct conversations. World lore has a native editor with character links, common knowledge, and scene-triggered facts. Broker/protocol support does not imply a complete GUI workflow for every feature.

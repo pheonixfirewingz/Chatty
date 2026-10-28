@@ -13,4 +13,4 @@ esac
 # Optional standalone guest build. Cargo writes only into its target directory.
 # The broker's build.rs compiles its own embedded guests automatically.
 cargo "$operation" --release --locked "${offline[@]}" --target wasm32-unknown-unknown \
-    -p chatty-adapter-openai-compatible -p chatty-adapter-ollama -p chatty-adapter-hugging-face -p chatty-adapter-freetoken
+    -p chatty-adapter-openai-compatible -p chatty-adapter-ollama -p chatty-adapter-hugging-face -p chatty-adapter-freetoken -p chatty-adapter-comfyui

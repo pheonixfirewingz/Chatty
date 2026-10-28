@@ -546,7 +546,7 @@ async fn extract_memories(
     let config = load_broker_config(&app.db).await?;
     let model = selected_model(app).await?;
     let recent = sqlx::query(
-        "SELECT m.id,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL ORDER BY m.revision DESC LIMIT 40",
+        "SELECT m.id,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.revision DESC LIMIT 40",
     )
     .bind(conversation_id)
     .fetch_all(&app.db)
@@ -1294,12 +1294,17 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     let prioritized_memory = format!("Long-term memory:\n{}", memory_prompt(&memories));
     let history = recent.iter().map(|r| {
         let author_type = r.get::<String, _>("author_type");
-        let role = match author_type.as_str() {
-            "user" => "user",
-            "system" => "system",
-            _ => "assistant",
-        };
-        (role.to_owned(), r.get::<String, _>("content"))
+        let content = r.get::<String, _>("content");
+        match author_type.as_str() {
+            "user" => ("user".to_owned(), content),
+            "system" => ("system".to_owned(), content),
+            // Models see only the image prompt, never image bytes.
+            "image" => (
+                "system".to_owned(),
+                format!("[Scene image shown: {content}]"),
+            ),
+            _ => ("assistant".to_owned(), content),
+        }
     });
     let messages = budget_chat_messages(
         &system,
@@ -1330,6 +1335,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         .into(),
     ))
     .await?;
+    let workload = app.adapters.text_workload(&config).await;
     let adapter = app.adapters.inference(&config)?;
     let response_future = adapter.stream(ChatRequest {
         model: model.clone(),
@@ -1423,6 +1429,9 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             break;
         }
     }
+    // Release the model before follow-up calls, which take their own admission.
+    drop(stream);
+    drop(workload);
     if !pending.is_empty() {
         seq += 1;
         tx.send((
@@ -1699,6 +1708,7 @@ async fn select_character_image(
     ];
     debug_messages("select_character_image", &messages, None);
     let selected = async {
+        let _workload = app.adapters.text_workload(config).await;
         let response = app
             .adapters
             .inference(config)?
@@ -1920,6 +1930,7 @@ mod prompt_budget_tests {
             keep_alive: "5m".into(),
             allow_public_characters: false,
             allow_self_registration: false,
+            image: Default::default(),
         };
         assert_eq!(prompt_input_budget(&config), 3_072);
         config.num_predict = 512;

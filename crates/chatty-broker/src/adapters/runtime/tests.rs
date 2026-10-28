@@ -773,6 +773,7 @@ fn management_and_inference_use_the_same_administrator_selection() {
         selected_plugin: None,
         freetoken_credential: None,
         model_operations: Default::default(),
+        workloads: Default::default(),
     };
     let mut config = crate::BrokerConfig {
         adapter_enabled: true,
@@ -790,6 +791,7 @@ fn management_and_inference_use_the_same_administrator_selection() {
         keep_alive: "5m".into(),
         allow_public_characters: false,
         allow_self_registration: false,
+        image: Default::default(),
     };
     host.configuration_changed(&config).unwrap();
     let compatible = host.inference(&config).unwrap();
@@ -843,4 +845,107 @@ fn management_and_inference_use_the_same_administrator_selection() {
     host.configuration_changed(&config).unwrap();
     assert!(registry.selected.lock().unwrap().module.is_none());
     assert!(host.inference(&config).is_err());
+}
+#[test]
+fn image_plugins_are_separate_from_inference_plugins() {
+    let registry = registry();
+    assert_eq!(registry.image_plugin_ids(), ["comfyui"]);
+    assert!(!registry.inference_plugin_ids().contains(&"comfyui".into()));
+    assert!(registry.is_image("comfyui") && !registry.is_inference("comfyui"));
+}
+
+#[tokio::test]
+async fn dropped_image_job_is_cancelled_upstream() {
+    use tokio::io::AsyncWriteExt;
+    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", server.local_addr().unwrap());
+    let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let (socket, _) = server.accept().await.unwrap();
+            let (mut socket, first, body) = read_request(socket).await;
+            let response = if first.starts_with("POST /prompt ") {
+                r#"{"prompt_id":"job-7","number":1,"node_errors":{}}"#
+            } else {
+                "{}"
+            };
+            seen_tx.send((first, body)).unwrap();
+            socket
+                .get_mut()
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                        response.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let adapter = registry().adapter("comfyui", &url).unwrap();
+    let job = adapter.generate_image(ImageRequest {
+        model: "model.safetensors".into(),
+        prompt: "harbour".into(),
+        negative_prompt: String::new(),
+        width: 512,
+        height: 512,
+        steps: 4,
+        guidance: 1.0,
+        seed: 1,
+        timeout_ms: 60_000,
+    });
+    // The job stays pending; the timeout drops it during its first poll wait.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), job)
+            .await
+            .is_err()
+    );
+    let mut requests = Vec::new();
+    while requests.len() < 3 {
+        requests.push(
+            tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    requests.sort_by(|a, b| a.0.cmp(&b.0));
+    assert!(requests[0].0.starts_with("POST /interrupt "));
+    assert_eq!(requests[0].1["prompt_id"], "job-7");
+    assert!(requests[1].0.starts_with("POST /prompt "));
+    assert!(requests[2].0.starts_with("POST /queue "));
+    assert_eq!(requests[2].1["delete"][0], "job-7");
+}
+
+#[tokio::test]
+#[ignore = "requires CHATTY_TEST_IMAGE_URL; optional CHATTY_TEST_IMAGE_MODEL generates one image"]
+async fn live_comfyui_lists_models_and_generates() {
+    let url = std::env::var("CHATTY_TEST_IMAGE_URL").unwrap();
+    let adapter = registry().adapter("comfyui", &url).unwrap();
+    let models = adapter.models(Duration::from_secs(10)).await.unwrap();
+    eprintln!("checkpoints: {models:?}");
+    let model =
+        std::env::var("CHATTY_TEST_IMAGE_MODEL").unwrap_or_else(|_| "missing.safetensors".into());
+    let result = adapter
+        .generate_image(ImageRequest {
+            model,
+            prompt: "a red lighthouse on a cliff at dusk".into(),
+            negative_prompt: String::new(),
+            width: 512,
+            height: 512,
+            steps: 8,
+            guidance: 5.0,
+            seed: 42,
+            timeout_ms: 600_000,
+        })
+        .await;
+    match result {
+        Ok(images) => eprintln!(
+            "generated {} image(s), first {} bytes",
+            images.len(),
+            images[0].len()
+        ),
+        Err(error) => eprintln!("generation error: {error}"),
+    }
 }

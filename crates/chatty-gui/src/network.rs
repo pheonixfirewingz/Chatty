@@ -45,9 +45,19 @@ pub(crate) type NetworkCommand = Command;
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
     ModelRequestStarted(u64),
-    DownloadStarted { request_id: u64, model: String },
+    DownloadStarted {
+        request_id: u64,
+        model: String,
+    },
+    /// A cancellable image job was sent. `scene` distinguishes chat images from portraits.
+    ImageRequestStarted {
+        request_id: u64,
+        scene: bool,
+    },
     Status(String),
-    Connected { resuming_session: bool },
+    Connected {
+        resuming_session: bool,
+    },
     ConnectionFailed(String),
     CertificateTrustRequired(PendingCertificate),
     Disconnected,
@@ -515,7 +525,7 @@ async fn verify_chatty_handshake(mut stream: TlsStream<TcpStream>) -> Result<Tls
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
-        || value["protocol"] != 19
+        || value["protocol"] != 20
         || value["encoding"] != "bincode2"
     {
         bail!("unsupported broker handshake");
@@ -861,6 +871,9 @@ pub(crate) async fn run(
                             let _ = events.send(Event::DownloadStarted { request_id: next_id, model: model.clone() });
                         } else if matches!(&*request, Request::AdminOllamaAction { .. } | Request::AdminSearchModels { .. } | Request::AdminGetOllamaState { .. }) {
                             let _ = events.send(Event::ModelRequestStarted(next_id));
+                        } else if let Request::GenerateImage { .. } | Request::GenerateSceneImage { .. } = &*request {
+                            let scene = matches!(&*request, Request::GenerateSceneImage { .. });
+                            let _ = events.send(Event::ImageRequestStarted { request_id: next_id, scene });
                         }
                         if matches!(&*request, Request::Logout { .. }) {
                             remembered = None;
@@ -1022,7 +1035,9 @@ mod tests {
             .is_err()
         );
         sender
-            .send(super::Command::Request(Box::new(Request::GetServerCapabilities)))
+            .send(super::Command::Request(Box::new(
+                Request::GetServerCapabilities,
+            )))
             .unwrap();
         assert!(
             super::park_for_command(&mut pending, &mut receiver)

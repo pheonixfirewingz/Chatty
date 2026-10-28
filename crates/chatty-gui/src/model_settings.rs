@@ -6,7 +6,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Length};
 
-fn field<'a, Message: 'a>(
+pub(super) fn field<'a, Message: 'a>(
     label: &'static str,
     help: &'static str,
     control: impl Into<Element<'a, Message>>,
@@ -20,7 +20,7 @@ fn field<'a, Message: 'a>(
     .into()
 }
 
-fn sampling<'a, Message: 'a + Clone + From<AdminMessage>>(
+pub(super) fn sampling<'a, Message: 'a + Clone + From<AdminMessage>>(
     label: &'static str,
     help: &'static str,
     value: f32,

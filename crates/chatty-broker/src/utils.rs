@@ -44,6 +44,46 @@ pub(super) fn load_or_create_image_key(tls_key_path: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+fn encrypt_image_bytes(key: &[u8; 32], aad: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let mut nonce = [0u8; 24];
+    getrandom::fill(&mut nonce)
+        .map_err(|error| format_err!("generate image encryption nonce: {error}"))?;
+    let ciphertext = XChaCha20Poly1305::new(key.into())
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| format_err!("encrypt image"))?;
+    let mut stored =
+        Vec::with_capacity(IMAGE_CIPHERTEXT_MAGIC.len() + nonce.len() + ciphertext.len());
+    stored.extend_from_slice(IMAGE_CIPHERTEXT_MAGIC);
+    stored.extend_from_slice(&nonce);
+    stored.extend_from_slice(&ciphertext);
+    Ok(stored)
+}
+
+fn decrypt_image_bytes(key: &[u8; 32], aad: &str, stored: &[u8]) -> Result<Vec<u8>> {
+    let encrypted = stored
+        .strip_prefix(IMAGE_CIPHERTEXT_MAGIC)
+        .context("image is not encrypted")?;
+    if encrypted.len() < 24 {
+        bail!("image ciphertext is truncated")
+    }
+    let (nonce, ciphertext) = encrypted.split_at(24);
+    XChaCha20Poly1305::new(key.into())
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| format_err!("decrypt image"))
+}
+
 pub(super) fn encrypt_character_images(
     key: &[u8; 32],
     owner_id: &str,
@@ -53,26 +93,11 @@ pub(super) fn encrypt_character_images(
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    let plaintext = encode(&images.to_vec())?;
-    let mut nonce = [0u8; 24];
-    getrandom::fill(&mut nonce)
-        .map_err(|error| format_err!("generate image encryption nonce: {error}"))?;
-    let aad = format!("{owner_id}:{character_id}");
-    let ciphertext = XChaCha20Poly1305::new(key.into())
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &plaintext,
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(|_| format_err!("encrypt character images"))?;
-    let mut stored =
-        Vec::with_capacity(IMAGE_CIPHERTEXT_MAGIC.len() + nonce.len() + ciphertext.len());
-    stored.extend_from_slice(IMAGE_CIPHERTEXT_MAGIC);
-    stored.extend_from_slice(&nonce);
-    stored.extend_from_slice(&ciphertext);
-    Ok(stored)
+    encrypt_image_bytes(
+        key,
+        &format!("{owner_id}:{character_id}"),
+        &encode(&images.to_vec())?,
+    )
 }
 
 pub(super) fn decrypt_character_images(
@@ -84,24 +109,29 @@ pub(super) fn decrypt_character_images(
     if stored.is_empty() {
         return Ok(Vec::new());
     }
-    let encrypted = stored
-        .strip_prefix(IMAGE_CIPHERTEXT_MAGIC)
-        .context("character images are not encrypted")?;
-    if encrypted.len() < 24 {
-        bail!("character image ciphertext is truncated")
-    }
-    let (nonce, ciphertext) = encrypted.split_at(24);
-    let aad = format!("{owner_id}:{character_id}");
-    let plaintext = XChaCha20Poly1305::new(key.into())
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(|_| format_err!("decrypt character images"))?;
+    let plaintext = decrypt_image_bytes(key, &format!("{owner_id}:{character_id}"), stored)
+        .context("decrypt character images")?;
     Ok(decode(&plaintext)?)
+}
+
+/// Message images use a separate associated-data namespace from character images.
+pub(super) fn encrypt_message_image(
+    key: &[u8; 32],
+    owner_id: &str,
+    message_id: &str,
+    png: &[u8],
+) -> Result<Vec<u8>> {
+    encrypt_image_bytes(key, &format!("message:{owner_id}:{message_id}"), png)
+}
+
+pub(super) fn decrypt_message_image(
+    key: &[u8; 32],
+    owner_id: &str,
+    message_id: &str,
+    stored: &[u8],
+) -> Result<Vec<u8>> {
+    decrypt_image_bytes(key, &format!("message:{owner_id}:{message_id}"), stored)
+        .context("decrypt message image")
 }
 
 pub(super) fn default_user_data_dir(

@@ -6,7 +6,7 @@
 
 use chatty_protocol::{Character, CharacterImage, CharacterInput, World};
 use iced::widget::{
-    button, column, container, image, row, scrollable, text, text_input, toggler, Space,
+    Space, button, column, container, image, row, scrollable, text, text_input, toggler,
 };
 use iced::{Alignment, Background, Color, Element, Length, Padding, Theme};
 use std::collections::HashSet;
@@ -332,9 +332,7 @@ pub fn png_card_json(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Normalizes a PNG character portrait: verifies 128..=512 dimensions (max 4096 px source)
 /// and crops horizontally centered to a top-aligned square if needed.
-pub fn normalize_character_image_png(
-    source: &[u8],
-) -> std::result::Result<Vec<u8>, String> {
+pub fn normalize_character_image_png(source: &[u8]) -> std::result::Result<Vec<u8>, String> {
     let decoded = ::image::load_from_memory_with_format(source, ::image::ImageFormat::Png)
         .map_err(|_| "must be a valid PNG".to_owned())?;
     let (width, height) = (decoded.width(), decoded.height());
@@ -472,20 +470,72 @@ pub enum CharacterMessage {
 
     // Image gallery actions
     AddImages,
+    /// Ask the broker's image service for a portrait from the draft's details.
+    GeneratePortrait,
     AddImageFolder,
     SetDefaultImage(String),
     DeleteImage(String),
-    ImageLabelChanged { id: String, label: String },
+    ImageLabelChanged {
+        id: String,
+        label: String,
+    },
 
     // Navigation
     Chat(String),
     OpenMemories(String),
 
     // Lorebook / World linking
-    ToggleWorldLink { world_id: String, linked: bool },
+    ToggleWorldLink {
+        world_id: String,
+        linked: bool,
+    },
 
     // Search filter
     SearchChanged(String),
+}
+
+/// Whether a view can request a generated image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageGeneration {
+    Unavailable,
+    Ready,
+    Pending,
+}
+
+/// Builds an image prompt from the visible details of a character draft.
+#[must_use]
+pub fn portrait_prompt(draft: &DraftCharacter) -> String {
+    let details = [&draft.age, &draft.gender, &draft.race, &draft.appearance]
+        .into_iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let prompt = format!(
+        "character portrait, head and shoulders, looking at viewer, detailed face, {details}"
+    );
+    prompt.chars().take(2000).collect()
+}
+
+/// Crops a generated PNG to a top-aligned square and downsizes it to portrait bounds.
+pub fn generated_portrait_png(source: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let decoded = ::image::load_from_memory_with_format(source, ::image::ImageFormat::Png)
+        .map_err(|_| "the image service did not return a valid PNG".to_owned())?;
+    let side = decoded.width().min(decoded.height());
+    if side < 128 {
+        return Err("the generated image is smaller than 128×128".into());
+    }
+    let square = decoded.crop_imm((decoded.width() - side) / 2, 0, side, side);
+    let portrait = if side > 512 {
+        square.resize_exact(512, 512, ::image::imageops::FilterType::Triangle)
+    } else {
+        square
+    };
+    let mut output = std::io::Cursor::new(Vec::new());
+    portrait
+        .write_to(&mut output, ::image::ImageFormat::Png)
+        .map_err(|_| "could not encode the generated portrait".to_owned())?;
+    Ok(output.into_inner())
 }
 
 /// Alias for `CharacterMessage`.
@@ -630,7 +680,13 @@ pub fn character_list_view<'a>(
             {
                 image(handle).width(36).height(36).into()
             } else {
-                let initial = c.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                let initial = c
+                    .name
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .to_string();
                 container(text(initial).size(15))
                     .width(36)
                     .height(36)
@@ -687,6 +743,7 @@ pub fn character_editor_view<'a>(
     draft: &'a DraftCharacter,
     draft_world_ids: &'a HashSet<String>,
     worlds: &'a [World],
+    portrait: ImageGeneration,
     light_mode: bool,
     glass_mode: bool,
 ) -> Element<'a, CharacterMessage> {
@@ -695,6 +752,7 @@ pub fn character_editor_view<'a>(
             draft,
             draft_world_ids,
             worlds,
+            portrait,
             light_mode,
             glass_mode,
             size.width,
@@ -707,6 +765,7 @@ fn character_editor_at_width<'a>(
     draft: &'a DraftCharacter,
     draft_world_ids: &'a HashSet<String>,
     worlds: &'a [World],
+    portrait: ImageGeneration,
     light_mode: bool,
     glass_mode: bool,
     width: f32,
@@ -721,7 +780,8 @@ fn character_editor_at_width<'a>(
 
     let mut header_col = column![text(title_str).size(18)].spacing(2);
     if !can_edit {
-        header_col = header_col.push(text("Public character · Only the owner can edit it.").size(12));
+        header_col =
+            header_col.push(text("Public character · Only the owner can edit it.").size(12));
     }
 
     let mut actions = row![].spacing(8).align_y(Alignment::Center);
@@ -927,13 +987,15 @@ fn character_editor_at_width<'a>(
 
     let mut lore_col = column![
         text("World lore").size(14),
-        text("Link this character to any worlds whose lore should be available during roleplay.").size(12),
+        text("Link this character to any worlds whose lore should be available during roleplay.")
+            .size(12),
     ]
     .spacing(4);
 
     if worlds.is_empty() {
         lore_col = lore_col.push(
-            text("No worlds yet. Create one from the Worlds editor, then return here to link it.").size(12),
+            text("No worlds yet. Create one from the Worlds editor, then return here to link it.")
+                .size(12),
         );
     } else {
         let mut worlds_row = row![].spacing(10).align_y(Alignment::Center);
@@ -958,17 +1020,32 @@ fn character_editor_at_width<'a>(
     .spacing(4);
 
     if can_edit {
-        gallery_col = gallery_col.push(
-            row![
-                button(text("Add images…").size(13))
-                    .padding(Padding::from([4, 10]))
-                    .on_press(CharacterMessage::AddImages),
-                button(text("Add folder…").size(13))
-                    .padding(Padding::from([4, 10]))
-                    .on_press(CharacterMessage::AddImageFolder),
-            ]
-            .spacing(8),
-        );
+        let mut image_actions = row![
+            button(text("Add images…").size(13))
+                .padding(Padding::from([4, 10]))
+                .on_press(CharacterMessage::AddImages),
+            button(text("Add folder…").size(13))
+                .padding(Padding::from([4, 10]))
+                .on_press(CharacterMessage::AddImageFolder),
+        ]
+        .spacing(8);
+        match portrait {
+            ImageGeneration::Unavailable => {}
+            ImageGeneration::Ready => {
+                image_actions = image_actions.push(
+                    button(text("Generate portrait").size(13))
+                        .padding(Padding::from([4, 10]))
+                        .on_press_maybe(
+                            (!draft.appearance.trim().is_empty())
+                                .then_some(CharacterMessage::GeneratePortrait),
+                        ),
+                );
+            }
+            ImageGeneration::Pending => {
+                image_actions = image_actions.push(text("Generating portrait…").size(13));
+            }
+        }
+        gallery_col = gallery_col.push(image_actions.wrap());
     }
 
     for img in &draft.images {
@@ -1023,13 +1100,9 @@ fn character_editor_at_width<'a>(
         let img_card = crate::ui::card(
             row![
                 thumb,
-                column![
-                    text("AI label").size(11),
-                    label_input,
-                    img_actions,
-                ]
-                .spacing(4)
-                .width(Length::Fill),
+                column![text("AI label").size(11), label_input, img_actions,]
+                    .spacing(4)
+                    .width(Length::Fill),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -1078,6 +1151,7 @@ pub fn character_dialog_view<'a>(
     worlds: &'a [World],
     search_query: &'a str,
     char_import_pending: bool,
+    portrait: ImageGeneration,
     light_mode: bool,
     glass_mode: bool,
     compact: bool,
@@ -1105,6 +1179,7 @@ pub fn character_dialog_view<'a>(
         draft,
         draft_world_ids,
         worlds,
+        portrait,
         light_mode,
         glass_mode,
     );
@@ -1122,8 +1197,12 @@ pub fn character_dialog_view<'a>(
         .into()
     } else {
         row![
-            container(list_pane).width(Length::Fixed(240.0)).height(Length::Fill),
-            container(editor_pane).width(Length::Fill).height(Length::Fill),
+            container(list_pane)
+                .width(Length::Fixed(240.0))
+                .height(Length::Fill),
+            container(editor_pane)
+                .width(Length::Fill)
+                .height(Length::Fill),
         ]
         .spacing(12)
         .into()
@@ -1150,6 +1229,7 @@ pub fn character_dialog_view_mapped<'a, Message: 'a>(
     worlds: &'a [World],
     search_query: &'a str,
     char_import_pending: bool,
+    portrait: ImageGeneration,
     light_mode: bool,
     glass_mode: bool,
     compact: bool,
@@ -1162,6 +1242,7 @@ pub fn character_dialog_view_mapped<'a, Message: 'a>(
         worlds,
         search_query,
         char_import_pending,
+        portrait,
         light_mode,
         glass_mode,
         compact,
@@ -1441,7 +1522,8 @@ pub mod tests {
             .unwrap();
 
         let norm_rect = normalize_character_image_png(rect_png.get_ref()).unwrap();
-        let decoded = ::image::load_from_memory_with_format(&norm_rect, ::image::ImageFormat::Png).unwrap();
+        let decoded =
+            ::image::load_from_memory_with_format(&norm_rect, ::image::ImageFormat::Png).unwrap();
         assert_eq!(decoded.dimensions(), (256, 256));
 
         // Too small: 64x64

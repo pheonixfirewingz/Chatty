@@ -1,0 +1,6 @@
+{
+  "id": "comfyui",
+  "api_version": 1,
+  "kind": "image",
+  "module": "adapter.wasm"
+}

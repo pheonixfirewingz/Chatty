@@ -1,17 +1,18 @@
-use chatty_protocol::{Character, GenerationContext};
 use chatty_protocol::conversation::{ChatMessage, Conversation};
 use chatty_protocol::response::GenerationStatus;
+use chatty_protocol::{Character, GenerationContext};
 use iced::widget::{
     Id, Space, button, canvas, column, container, image, mouse_area, row, scrollable, text,
     text_input, tooltip,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, font};
 
-use crate::characters::image_handle;
+use crate::characters::{ImageGeneration, image_handle};
 use crate::ui::{
     COLOR_PRIMARY, MessageIcon, VectorIcon, card, card_style, render_markdown,
     sidebar_toggle_button, user_chat_bubble_style,
 };
+use std::collections::HashMap;
 
 /// Interaction messages for the conversation view and new-chat dialog.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +62,10 @@ pub enum ConversationMessage {
     OpenLink(String),
     /// Hovering over a chat message bubble.
     HoverMessage(Option<String>),
+    /// Illustrate the scene; a non-empty composer input is used as the prompt.
+    GenerateSceneImage,
+    /// Cancel the pending scene image.
+    CancelSceneImage,
 }
 
 /// Keeps parsed data only for loaded messages and the current stream.
@@ -104,6 +109,9 @@ pub struct ConversationViewState<'a> {
     pub available_size: iced::Size,
     pub light_mode: bool,
     pub glass_mode: bool,
+    /// Loaded PNG bytes for recent image messages, keyed by message ID.
+    pub message_images: &'a HashMap<String, Vec<u8>>,
+    pub scene_image: ImageGeneration,
 }
 
 /// Zero-copy snapshot of application state required to render the new-chat modal dialog.
@@ -154,9 +162,10 @@ pub fn current_emotion_portrait<'a>(
 ) -> Option<(&'a str, &'a str, &'a str, &'a [u8])> {
     selected_conversation?;
     for message in messages.iter().rev() {
-        let (Some(character_id), Some(image_id)) =
-            (message.author_id.as_deref(), message.character_image_id.as_deref())
-        else {
+        let (Some(character_id), Some(image_id)) = (
+            message.author_id.as_deref(),
+            message.character_image_id.as_deref(),
+        ) else {
             continue;
         };
         let Some(character) = characters.iter().find(|c| c.id == character_id) else {
@@ -490,6 +499,52 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
     row![area].width(Length::Fill).into()
 }
 
+/// Generated scene image with its prompt as a caption.
+fn render_image_message<'a, Message: Clone + 'a>(
+    message: &'a ChatMessage,
+    png: Option<&[u8]>,
+    is_hovered: bool,
+    light_mode: bool,
+    glass_mode: bool,
+    on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
+) -> Element<'a, Message> {
+    let picture: Element<'a, Message> = match png.and_then(image_handle) {
+        Some(handle) => image(handle)
+            .width(Length::Fill)
+            .content_fit(iced::ContentFit::Contain)
+            .into(),
+        None => text("Loading image…")
+            .size(12)
+            .color(crate::ui::secondary_text_color(light_mode))
+            .into(),
+    };
+    let delete = message_action_button(
+        MessageIcon::Delete,
+        "Delete image",
+        is_hovered.then(|| on_msg(ConversationMessage::DeleteMessage(message.id.clone()))),
+        light_mode,
+    );
+    let caption = row![
+        text(&message.content)
+            .size(12)
+            .color(crate::ui::secondary_text_color(light_mode))
+            .width(Length::Fill),
+        delete,
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    let message_id = message.id.clone();
+    mouse_area(
+        container(column![picture, caption].spacing(6))
+            .padding(10)
+            .max_width(560)
+            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
+    )
+    .on_enter(on_msg(ConversationMessage::HoverMessage(Some(message_id))))
+    .on_exit(on_msg(ConversationMessage::HoverMessage(None)))
+    .into()
+}
+
 fn message_action_button<'a, Message: Clone + 'a>(
     icon: MessageIcon,
     label: &'static str,
@@ -558,12 +613,12 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             .color(crate::ui::secondary_text_color(light_mode));
 
         let start_btn = button(text("Start a new chat").size(15).font(font::Font {
-                weight: font::Weight::Bold,
-                ..Default::default()
-            }))
-            .padding([10, 24])
-            .on_press(on_msg(ConversationMessage::OpenNewChatDialog))
-            .style(crate::ui::primary_button_style());
+            weight: font::Weight::Bold,
+            ..Default::default()
+        }))
+        .padding([10, 24])
+        .on_press(on_msg(ConversationMessage::OpenNewChatDialog))
+        .style(crate::ui::primary_button_style());
 
         let center_col = card(
             column![heading, subtitle, Space::new().height(12), start_btn]
@@ -575,7 +630,8 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
         .max_width(480);
 
         let content: Element<'a, Message> = if !view.sidebar_visible {
-            let toggle_btn = sidebar_toggle_button(false, on_msg(ConversationMessage::ToggleSidebar));
+            let toggle_btn =
+                sidebar_toggle_button(false, on_msg(ConversationMessage::ToggleSidebar));
             column![
                 row![toggle_btn].align_y(Alignment::Center),
                 container(center_col)
@@ -603,18 +659,17 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             .into();
     }
 
-    let emotion_portrait = if view.available_size.width >= 900.0
-        && view.available_size.height >= 500.0
-    {
-        current_emotion_portrait(
-            view.characters,
-            view.messages,
-            view.selected_conversation,
-            view.selected_speaker,
-        )
-    } else {
-        None
-    };
+    let emotion_portrait =
+        if view.available_size.width >= 900.0 && view.available_size.height >= 500.0 {
+            current_emotion_portrait(
+                view.characters,
+                view.messages,
+                view.selected_conversation,
+                view.selected_speaker,
+            )
+        } else {
+            None
+        };
 
     let mut message_list = column![].spacing(16).width(Length::Fill);
 
@@ -622,6 +677,17 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
     for (msg, markdown) in view.messages.iter().zip(&view.markdown.messages) {
         let is_editing = view.editing_message_id == Some(msg.id.as_str());
         let is_hovered = view.hovered_message_id == Some(msg.id.as_str());
+        if msg.author_type == "image" {
+            message_list = message_list.push(render_image_message(
+                msg,
+                view.message_images.get(&msg.id).map(Vec::as_slice),
+                is_hovered,
+                light_mode,
+                glass_mode,
+                on_msg,
+            ));
+            continue;
+        }
         message_list = message_list.push(render_message_bubble(
             msg,
             markdown,
@@ -666,8 +732,8 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
                     .size(12)
                     .color(crate::ui::secondary_text_color(light_mode)),
             )
-                .padding(8)
-                .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
+            .padding(8)
+            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
         );
     }
 
@@ -733,20 +799,52 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
         .size(12)
         .color(crate::ui::secondary_text_color(light_mode));
 
+    let mut composer_row = row![composer_input].spacing(8).align_y(Alignment::Center);
+    match view.scene_image {
+        ImageGeneration::Unavailable => {}
+        ImageGeneration::Ready => {
+            let label = if view.input.trim().is_empty() {
+                "Illustrate the current scene"
+            } else {
+                "Generate an image from this text"
+            };
+            composer_row = composer_row.push(tooltip(
+                button(text("Image").size(13))
+                    .padding([10, 14])
+                    .on_press_maybe(
+                        view.active_request
+                            .is_none()
+                            .then(|| on_msg(ConversationMessage::GenerateSceneImage)),
+                    )
+                    .style(crate::ui::secondary_button_style(light_mode)),
+                container(text(label).size(12))
+                    .padding(6)
+                    .style(crate::ui::tooltip_style),
+                tooltip::Position::Top,
+            ));
+        }
+        ImageGeneration::Pending => {
+            composer_row = composer_row.push(
+                button(text("Cancel image").size(13))
+                    .padding([10, 14])
+                    .on_press(on_msg(ConversationMessage::CancelSceneImage))
+                    .style(crate::ui::secondary_button_style(light_mode)),
+            );
+        }
+    }
+    let composer_row = composer_row.push(action_btn);
+
     let composer_box = card(
-        column![
-            row![composer_input, action_btn]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            hint
-        ]
-        .spacing(4),
+        column![composer_row, hint].spacing(4),
         light_mode,
         glass_mode,
     )
     .width(Length::Fill);
 
-    let mut chat_content = column![].spacing(8).width(Length::Fill).height(Length::Fill);
+    let mut chat_content = column![]
+        .spacing(8)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
     if !view.sidebar_visible {
         let toggle_btn = sidebar_toggle_button(false, on_msg(ConversationMessage::ToggleSidebar));
@@ -854,9 +952,7 @@ pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
         let card_btn = button(card_row)
             .width(Length::Fill)
             .padding(10)
-            .on_press(on_msg(ConversationMessage::SelectNewChatCharacter(
-                char_id,
-            )))
+            .on_press(on_msg(ConversationMessage::SelectNewChatCharacter(char_id)))
             .style(move |theme: &Theme, status: button::Status| {
                 if is_selected {
                     button::Style {
@@ -871,12 +967,32 @@ pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
                 } else {
                     let (bg, border_color) = match status {
                         button::Status::Hovered => (
-                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.08),
-                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.16),
+                            Color::from_rgba(
+                                theme.palette().text.r,
+                                theme.palette().text.g,
+                                theme.palette().text.b,
+                                0.08,
+                            ),
+                            Color::from_rgba(
+                                theme.palette().text.r,
+                                theme.palette().text.g,
+                                theme.palette().text.b,
+                                0.16,
+                            ),
                         ),
                         _ => (
-                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.04),
-                            Color::from_rgba(theme.palette().text.r, theme.palette().text.g, theme.palette().text.b, 0.08),
+                            Color::from_rgba(
+                                theme.palette().text.r,
+                                theme.palette().text.g,
+                                theme.palette().text.b,
+                                0.04,
+                            ),
+                            Color::from_rgba(
+                                theme.palette().text.r,
+                                theme.palette().text.g,
+                                theme.palette().text.b,
+                                0.08,
+                            ),
                         ),
                     };
                     button::Style {
@@ -942,8 +1058,8 @@ pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chatty_protocol::conversation::Variant;
     use chatty_protocol::CharacterImage;
+    use chatty_protocol::conversation::Variant;
 
     fn dummy_character(id: &str, name: &str) -> Character {
         Character {
@@ -1035,8 +1151,7 @@ mod tests {
         let chars = vec![character];
         let messages = vec![dummy_message("m1", "assistant", "Hi")];
 
-        let portrait =
-            current_emotion_portrait(&chars, &messages, Some("c1"), Some("bot1"));
+        let portrait = current_emotion_portrait(&chars, &messages, Some("c1"), Some("bot1"));
         assert!(portrait.is_some());
         let (name, label, id, data) = portrait.unwrap();
         assert_eq!(name, "Seraphina");
@@ -1069,6 +1184,8 @@ mod tests {
             available_size: iced::Size::new(800.0, 720.0),
             light_mode: false,
             glass_mode: false,
+            message_images: &HashMap::new(),
+            scene_image: ImageGeneration::Unavailable,
         };
 
         let _el: Element<'_, ConversationMessage> =
@@ -1114,6 +1231,8 @@ mod tests {
             available_size: iced::Size::new(800.0, 720.0),
             light_mode: false,
             glass_mode: false,
+            message_images: &HashMap::new(),
+            scene_image: ImageGeneration::Unavailable,
         };
 
         let _el: Element<'_, ConversationMessage> =
@@ -1125,7 +1244,11 @@ mod tests {
         let chars = vec![dummy_character("bot1", "Mara")];
         let msgs = vec![
             dummy_message("m1", "user", "Tell me about this place."),
-            dummy_message("m2", "assistant", "It has watched the valley for centuries."),
+            dummy_message(
+                "m2",
+                "assistant",
+                "It has watched the valley for centuries.",
+            ),
         ];
         let conv = Conversation {
             id: "c1".into(),
@@ -1160,6 +1283,8 @@ mod tests {
             available_size: iced::Size::new(800.0, 720.0),
             light_mode: false,
             glass_mode: false,
+            message_images: &HashMap::new(),
+            scene_image: ImageGeneration::Unavailable,
         };
         let _el1: Element<'_, ConversationMessage> =
             conversation_view(&view_state_unhovered, std::convert::identity);

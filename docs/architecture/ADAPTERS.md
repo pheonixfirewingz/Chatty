@@ -12,6 +12,7 @@ The broker's internal `Adapter` interface handles model discovery, completion, s
 - `crates/chatty-adapters/freetoken`: FreeToken serving API options, health state, and guest entry point; reuses the shared OpenAI translation.
 - `crates/chatty-adapters/ollama`: native chat, tags, version/running state, model pull/load/unload/delete, and NDJSON translation.
 - `crates/chatty-adapters/hugging-face`: public GGUF catalogue query and repository/file filtering.
+- `crates/chatty-adapters/comfyui`: checkpoint listing and a text-to-image workflow for ComfyUI's queue API.
 - `crates/chatty-broker/src/adapters.rs`: operator/configuration selection and mapping adapter results to existing broker/wire types.
 
 Authentication and authorization happen before the broker calls management operations. Plugins never receive session tokens, database handles, TLS private keys, or filesystem paths. FreeToken API keys stay in the host and are attached as sensitive bearer headers only after validation against an explicit operator-pinned origin. They are never passed to guests or other adapters; redirects remain disabled.
@@ -43,6 +44,20 @@ Inputs are UTF-8 JSON `PluginInput` values; outputs are serialized `PluginResult
 
 `StreamUpdate.download` and `StreamUpdate.finish_reason` are optional additive JSON metadata, defaulting to absent for older v1 guests. It does not change exports or existing required JSON fields, so ABI version remains 1. OpenAI-compatible decoders preserve this metadata without ending before the trailing usage event and `[DONE]`. Reasoning fields stay outside final content.
 
+### Image generation
+
+Image generation is an optional v1 capability, added without changing exports or existing JSON fields. Image plugins declare `"kind": "image"` in their manifest. They are transient like the catalogue adapter: loaded per operation and never offered as text runtimes.
+
+- `Models` lists the server's image models.
+- `Image(ImageRequest)` submits one job. Its single POST plan returns `ResponseKind::Image`. The broker supplies the model, prompts, size, steps, guidance, a random seed, and a time budget.
+- `Decode` returns `ImageJob::Ready { images }` or `ImageJob::Pending { job, poll_after_ms }`. Synchronous servers can return `Ready` immediately.
+- `ImageStatus { job }` prepares a single GET plan for a pending job. An empty `job` in its result keeps the current ID. The host waits 250 ms to 5 s between polls, within a 30-minute cap and the caller's budget.
+- `ImageCancel { job }` prepares up to two POST/DELETE requests. The host sends it when an unfinished job is dropped.
+- `ImageUnload` prepares one POST that releases loaded image models and GPU memory. The broker sends it before text work when both services share a host.
+- `ImageOutput::Get { path, query }` is fetched by the host with GET from `path`, relative to the configured base URL. The response must have an `image/*` type. `ImageOutput::Base64` carries inline data. Each image is bounded to 16 MiB, and at most four images are accepted.
+
+The broker accepts PNG output only. It re-encodes the first image and rejects results over 7 MiB.
+
 Guests should keep translation stateless. A request owns its guest instance; streams keep their decoder instance until completion or cancellation. No instance state is shared between users. Unsupported operations return a descriptive error, rather than silently choosing a different provider.
 
 ## Sandbox and transport limits
@@ -53,7 +68,8 @@ Guests should keep translation stateless. A request owns its guest instance; str
 - Up to 100 million fuel units per call, including allocations/frees; initialization also has a fuel budget.
 - Input/output JSON and an incomplete stream record are bounded to 8 MiB.
 - At most four HTTP calls for a state read; other operations issue one. Calls for a state read run concurrently and preserve result order.
-- Model discovery, state, and catalogue plans permit GET only; completions/streams permit POST only; lifecycle actions permit POST or DELETE.
+- Model discovery, state, catalogue, and image status plans permit GET only; completions/streams, image submissions, and image unloads permit POST only; lifecycle actions and image cancellation permit POST or DELETE.
+- Upstream error messages include `error.message` and up to 512 characters of `error.details`.
 - Every URL must retain the configured origin and URL credentials. Redirects are rejected. Plugins may translate URL paths, such as removing `/v1` for native Ollama.
 - Caller timeouts cannot be lengthened by plugins. Lifecycle calls are capped at six hours; catalogue/state reads at 20 seconds. Host connection timeout is five seconds.
 - HTTP response JSON is bounded to 8 MiB per call, or 2 MiB for catalogue search. Streaming keeps bounded incomplete records without buffering the entire network response.

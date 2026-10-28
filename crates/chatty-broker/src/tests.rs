@@ -1158,6 +1158,7 @@ async fn cross_tenant_character_update_is_forbidden() {
                 keep_alive: "5m".into(),
                 allow_public_characters: false,
                 allow_self_registration: false,
+                image: Default::default(),
             },
         },
     )
@@ -1167,7 +1168,8 @@ async fn cross_tenant_character_update_is_forbidden() {
     assert!(matches!(
         decode::<Response>(&capabilities).unwrap(),
         Response::ServerCapabilities {
-            registration_enabled: false
+            registration_enabled: false,
+            image_generation: false,
         }
     ));
     call(
@@ -1401,4 +1403,449 @@ async fn model_pull_is_sent_to_the_configured_inference_server() {
     })
     .await
     .unwrap();
+}
+
+/// Minimal ComfyUI HTTP surface: one queued job which is ready on its second poll.
+/// It also answers the native Ollama calls used for shared-host model switching.
+async fn mock_comfyui(png: Vec<u8>) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+    mock_comfyui_with_ollama(png, true).await
+}
+
+/// `ollama_unloads` false simulates a chat model that never leaves the GPU.
+async fn mock_comfyui_with_ollama(
+    png: Vec<u8>,
+    ollama_unloads: bool,
+) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", server.local_addr().unwrap());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        let mut polls = 0;
+        let mut text_loaded = true;
+        loop {
+            let (socket, _) = server.accept().await.unwrap();
+            let mut socket = tokio::io::BufReader::new(socket);
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            let request = line
+                .split_whitespace()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut length = 0;
+            loop {
+                line.clear();
+                socket.read_line(&mut line).await.unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            socket.read_exact(&mut body).await.unwrap();
+            let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            if ollama_unloads && request == "POST /api/generate" && body["keep_alive"] == 0 {
+                text_loaded = false;
+            }
+            if request == "POST /api/chat" {
+                text_loaded = true;
+            }
+            log.lock().unwrap().push((request.clone(), body));
+            let (content_type, response) = if request == "GET /models/checkpoints" {
+                ("application/json", br#"["model.safetensors"]"#.to_vec())
+            } else if request == "POST /prompt" {
+                (
+                    "application/json",
+                    br#"{"prompt_id":"job-1","number":1,"node_errors":{}}"#.to_vec(),
+                )
+            } else if request == "GET /history/job-1" {
+                polls += 1;
+                let body = if polls % 2 == 1 {
+                    "{}"
+                } else {
+                    r#"{"job-1":{"status":{"status_str":"success","completed":true},"outputs":{"7":{"images":[{"filename":"a.png","subfolder":"","type":"temp"}]}}}}"#
+                };
+                ("application/json", body.as_bytes().to_vec())
+            } else if request.starts_with("GET /view?") {
+                ("image/png", png.clone())
+            } else if request == "GET /api/version" {
+                ("application/json", br#"{"version":"0.12.0"}"#.to_vec())
+            } else if request == "GET /api/tags" {
+                (
+                    "application/json",
+                    br#"{"models":[{"name":"chat-model"}]}"#.to_vec(),
+                )
+            } else if request == "GET /api/ps" {
+                let running: &[u8] = if text_loaded {
+                    br#"{"models":[{"name":"chat-model","size":1,"size_vram":1,"expires_at":""}]}"#
+                } else {
+                    br#"{"models":[]}"#
+                };
+                ("application/json", running.to_vec())
+            } else if request == "POST /api/chat" {
+                (
+                    "application/json",
+                    br#"{"message":{"content":"ok"},"done_reason":"stop"}"#.to_vec(),
+                )
+            } else {
+                ("application/json", b"{}".to_vec())
+            };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            );
+            let socket = socket.get_mut();
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&response).await.unwrap();
+        }
+    });
+    (url, seen)
+}
+
+#[tokio::test]
+async fn scene_images_are_generated_encrypted_and_owner_scoped() {
+    let (url, seen) = mock_comfyui(test_portrait_png()).await;
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    sqlx::query("INSERT INTO broker_settings(singleton,adapter_url) VALUES(1,'http://inference.example:11434/v1')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let (deltas, _) = broadcast::channel(32);
+    let app = App {
+        db,
+        adapters: test_adapter_host(),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        deltas,
+        recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
+    };
+    let mut tokens = Vec::new();
+    for username in ["image-admin", "image-other"] {
+        let (_, payload) = call(
+            &app,
+            Request::Register {
+                username: username.into(),
+                password: "test-password".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let Response::Authenticated { session_token, .. } = decode::<Response>(&payload).unwrap()
+        else {
+            panic!("registration failed")
+        };
+        tokens.push(session_token);
+    }
+    let owner = auth(&app.db, &tokens[0]).await.unwrap();
+    sqlx::query(
+        "INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('chat',?,'Chat',0,1)",
+    )
+    .bind(&owner)
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let scene = Request::GenerateSceneImage {
+        session_token: tokens[0].clone(),
+        conversation_id: "chat".into(),
+        prompt: "a lighthouse at dusk".into(),
+    };
+    let error = call(&app, scene.clone()).await.unwrap_err();
+    assert!(error.to_string().contains("disabled"));
+
+    let mut config = load_broker_config(&app.db).await.unwrap();
+    config.image.enabled = true;
+    config.image.url = url;
+    config.image.width = 512;
+    config.image.height = 768;
+    let denied = call(
+        &app,
+        Request::AdminSetBrokerConfig {
+            session_token: tokens[1].clone(),
+            config: config.clone(),
+        },
+    )
+    .await;
+    assert!(denied.is_err(), "only administrators configure images");
+    let (kind, _) = call(
+        &app,
+        Request::AdminSetBrokerConfig {
+            session_token: tokens[0].clone(),
+            config,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(kind, MessageType::Response);
+    let (_, payload) = call(
+        &app,
+        Request::AdminListImageModels {
+            session_token: tokens[0].clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(decode::<Response>(&payload).unwrap(), Response::ImageModels(models) if models == ["model.safetensors"])
+    );
+
+    let (_, payload) = call(&app, scene).await.unwrap();
+    let Response::Accepted {
+        entity_id: Some(message_id),
+        ..
+    } = decode::<Response>(&payload).unwrap()
+    else {
+        panic!("scene image was not accepted")
+    };
+    let (author_type, content): (String, String) =
+        sqlx::query_as("SELECT author_type,content FROM messages WHERE id=?")
+            .bind(&message_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        (author_type.as_str(), content.as_str()),
+        ("image", "a lighthouse at dusk")
+    );
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT data FROM message_images WHERE message_id=?")
+        .bind(&message_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert!(stored.starts_with(b"CHIMG1"));
+
+    let (_, payload) = call(
+        &app,
+        Request::GetMessageImage {
+            session_token: tokens[0].clone(),
+            message_id: message_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let Response::MessageImage { data, .. } = decode::<Response>(&payload).unwrap() else {
+        panic!("owner could not read the image")
+    };
+    assert_eq!(
+        image::load_from_memory(&data)
+            .unwrap()
+            .into_rgb8()
+            .dimensions(),
+        (128, 128)
+    );
+    let denied = call(
+        &app,
+        Request::GetMessageImage {
+            session_token: tokens[1].clone(),
+            message_id,
+        },
+    )
+    .await;
+    assert!(denied.is_err(), "other tenants cannot read images");
+
+    let (_, payload) = call(
+        &app,
+        Request::GenerateImage {
+            session_token: tokens[1].clone(),
+            prompt: "portrait of a knight".into(),
+            negative_prompt: "blurry".into(),
+            square: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        decode::<Response>(&payload).unwrap(),
+        Response::GeneratedImage { .. }
+    ));
+    let seen = seen.lock().unwrap();
+    let workflows = seen
+        .iter()
+        .filter(|(request, _)| request == "POST /prompt")
+        .map(|(_, body)| &body["prompt"])
+        .collect::<Vec<_>>();
+    assert_eq!(workflows[0]["4"]["inputs"]["width"], 512);
+    assert_eq!(workflows[0]["4"]["inputs"]["height"], 768);
+    assert_eq!(
+        workflows[1]["4"]["inputs"]["height"], 512,
+        "portraits are square"
+    );
+    assert_eq!(workflows[1]["3"]["inputs"]["text"], "blurry");
+    assert_eq!(
+        workflows[1]["1"]["inputs"]["ckpt_name"],
+        "model.safetensors"
+    );
+}
+
+#[tokio::test]
+async fn shared_gpu_host_unloads_the_other_model_kind_before_switching() {
+    let (url, seen) = mock_comfyui(test_portrait_png()).await;
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    sqlx::query("INSERT INTO broker_settings(singleton,adapter_url,adapter_plugin,image_enabled,image_url) VALUES(1,?,'ollama',1,?)")
+        .bind(&url)
+        .bind(&url)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (deltas, _) = broadcast::channel(32);
+    let app = App {
+        db,
+        adapters: test_adapter_host(),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        deltas,
+        recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
+    };
+    let requests = |seen: &Arc<std::sync::Mutex<Vec<(String, Value)>>>| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|(request, body)| (request.clone(), body.clone()))
+            .collect::<Vec<_>>()
+    };
+    generate_png(&app, "a harbour", "", false).await.unwrap();
+    let log = requests(&seen);
+    let unload = log
+        .iter()
+        .position(|(request, body)| request == "POST /api/generate" && body["keep_alive"] == 0)
+        .expect("running text model is unloaded");
+    let submit = log
+        .iter()
+        .position(|(request, _)| request == "POST /prompt")
+        .unwrap();
+    assert!(
+        unload < submit,
+        "text is unloaded before the image job starts"
+    );
+    assert_eq!(log[unload].1["model"], "chat-model");
+
+    let messages = vec![AdapterMessage::new("user", "hello")];
+    for _ in 0..2 {
+        complete(
+            &app,
+            "chat-model",
+            messages.clone(),
+            GenerationOptions::default(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    }
+    let log = requests(&seen);
+    let free = log
+        .iter()
+        .filter(|(request, _)| request == "POST /free")
+        .collect::<Vec<_>>();
+    assert_eq!(free.len(), 1, "only the switch to text frees image memory");
+    assert_eq!(free[0].1["unload_models"], true);
+    let free_at = log
+        .iter()
+        .position(|(request, _)| request == "POST /free")
+        .unwrap();
+    let chat_at = log
+        .iter()
+        .position(|(request, _)| request == "POST /api/chat")
+        .unwrap();
+    assert!(free_at < chat_at);
+}
+
+#[tokio::test]
+async fn separate_hosts_do_not_unload_models() {
+    let (url, seen) = mock_comfyui(test_portrait_png()).await;
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    sqlx::query("INSERT INTO broker_settings(singleton,adapter_url,adapter_plugin,image_enabled,image_url) VALUES(1,'http://inference.example:11434','ollama',1,?)")
+        .bind(&url)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (deltas, _) = broadcast::channel(32);
+    let app = App {
+        db,
+        adapters: test_adapter_host(),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        deltas,
+        recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
+    };
+    generate_png(&app, "a harbour", "", false).await.unwrap();
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(request, _)| request.starts_with("GET /api/") || request == "POST /free")
+    );
+}
+
+#[tokio::test]
+async fn image_job_is_refused_while_the_chat_model_stays_loaded() {
+    let (url, seen) = mock_comfyui_with_ollama(test_portrait_png(), false).await;
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    sqlx::query("INSERT INTO broker_settings(singleton,adapter_url,adapter_plugin,image_enabled,image_url) VALUES(1,?,'ollama',1,?)")
+        .bind(&url)
+        .bind(&url)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (deltas, _) = broadcast::channel(32);
+    let app = App {
+        db,
+        adapters: test_adapter_host(),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        deltas,
+        recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
+    };
+    let error = generate_png(&app, "a harbour", "", false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("still loaded"), "{error}");
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(request, _)| request == "POST /prompt"),
+        "the image server never receives the job"
+    );
 }

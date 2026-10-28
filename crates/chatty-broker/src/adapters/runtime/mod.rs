@@ -20,6 +20,12 @@ use std::{
 };
 use wasm::{Plugin, Session};
 
+/// Bounded wait for a queued image job, including the submit request.
+const MAX_IMAGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Each fetched or inline image is bounded before the broker decodes it.
+pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IMAGES: usize = 4;
+
 /// Discovery stores only module locations, never compiled guest modules.
 enum PluginSource {
     Bundled(&'static [u8]),
@@ -34,6 +40,14 @@ impl PluginSource {
     }
 }
 
+/// Manifest capability. Image plugins are never offered for text inference.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PluginKind {
+    Inference,
+    Image,
+    Catalogue,
+}
+
 #[derive(Default)]
 struct SelectedPlugin {
     id: Option<String>,
@@ -42,7 +56,7 @@ struct SelectedPlugin {
 
 #[derive(Clone)]
 pub struct Registry {
-    plugins: Arc<HashMap<String, PluginSource>>,
+    plugins: Arc<HashMap<String, (PluginSource, PluginKind)>>,
     selected: Arc<Mutex<SelectedPlugin>>,
     client: reqwest::Client,
 }
@@ -56,9 +70,10 @@ impl Registry {
     /// Startup validates manifests only. WASM is read and compiled on demand.
     pub fn load(directory: Option<&Path>) -> Result<Self> {
         let mut plugins = HashMap::new();
-        for (id, bytes) in [
+        for (id, kind, bytes) in [
             (
                 "openai-compatible",
+                PluginKind::Inference,
                 include_bytes!(concat!(
                     env!("OUT_DIR"),
                     "/wasm/wasm32-unknown-unknown/release/chatty_adapter_openai_compatible.wasm"
@@ -67,6 +82,7 @@ impl Registry {
             ),
             (
                 "freetoken",
+                PluginKind::Inference,
                 include_bytes!(concat!(
                     env!("OUT_DIR"),
                     "/wasm/wasm32-unknown-unknown/release/chatty_adapter_freetoken.wasm"
@@ -75,6 +91,7 @@ impl Registry {
             ),
             (
                 "ollama",
+                PluginKind::Inference,
                 include_bytes!(concat!(
                     env!("OUT_DIR"),
                     "/wasm/wasm32-unknown-unknown/release/chatty_adapter_ollama.wasm"
@@ -83,14 +100,24 @@ impl Registry {
             ),
             (
                 "hugging-face",
+                PluginKind::Catalogue,
                 include_bytes!(concat!(
                     env!("OUT_DIR"),
                     "/wasm/wasm32-unknown-unknown/release/chatty_adapter_hugging_face.wasm"
                 ))
                 .as_slice(),
             ),
+            (
+                "comfyui",
+                PluginKind::Image,
+                include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_comfyui.wasm"
+                ))
+                .as_slice(),
+            ),
         ] {
-            plugins.insert(id.into(), PluginSource::Bundled(bytes));
+            plugins.insert(id.into(), (PluginSource::Bundled(bytes), kind));
         }
         if let Some(directory) = directory {
             let mut entries = std::fs::read_dir(directory)?
@@ -137,7 +164,16 @@ impl Registry {
                         "adapter module must be a filename within its plugin directory",
                     ));
                 }
-                plugins.insert(id.into(), PluginSource::File(path.join(filename)));
+                let kind = match manifest["kind"].as_str() {
+                    None | Some("inference") => PluginKind::Inference,
+                    Some("image") => PluginKind::Image,
+                    Some(kind) => {
+                        return Err(Error::new(format!(
+                            "unsupported adapter kind for {id}: {kind}"
+                        )));
+                    }
+                };
+                plugins.insert(id.into(), (PluginSource::File(path.join(filename)), kind));
             }
         }
         let client = reqwest::Client::builder()
@@ -171,6 +207,7 @@ impl Registry {
         self.plugins
             .get(canonical_plugin_id(id))
             .ok_or_else(|| Error::new(format!("adapter plugin not installed: {id}")))?
+            .0
             .load()
     }
 
@@ -218,20 +255,38 @@ impl Registry {
             credential: None,
         })
     }
-    /// Enumerate installed inference IDs without compiling unused modules.
-    pub fn inference_plugin_ids(&self) -> Vec<String> {
+    fn plugin_ids(&self, kind: PluginKind) -> Vec<String> {
         let mut ids: Vec<_> = self
             .plugins
-            .keys()
-            .filter(|id| id.as_str() != "hugging-face")
-            .cloned()
+            .iter()
+            .filter(|(_, (_, plugin_kind))| *plugin_kind == kind)
+            .map(|(id, _)| id.clone())
             .collect();
         ids.sort();
         ids
     }
+    /// Enumerate installed inference IDs without compiling unused modules.
+    pub fn inference_plugin_ids(&self) -> Vec<String> {
+        self.plugin_ids(PluginKind::Inference)
+    }
+    /// Enumerate installed text-to-image IDs without compiling unused modules.
+    pub fn image_plugin_ids(&self) -> Vec<String> {
+        self.plugin_ids(PluginKind::Image)
+    }
 
     pub fn contains(&self, id: &str) -> bool {
         self.plugins.contains_key(canonical_plugin_id(id))
+    }
+    pub fn is_inference(&self, id: &str) -> bool {
+        self.kind(id) == Some(PluginKind::Inference)
+    }
+    pub fn is_image(&self, id: &str) -> bool {
+        self.kind(id) == Some(PluginKind::Image)
+    }
+    fn kind(&self, id: &str) -> Option<PluginKind> {
+        self.plugins
+            .get(canonical_plugin_id(id))
+            .map(|(_, kind)| *kind)
     }
 }
 
@@ -387,6 +442,39 @@ impl Adapter {
                 1,
                 2 * 1024 * 1024,
             ),
+            // Synchronous servers may return inline images from the submit call.
+            AdapterRequest::Image(image) => (
+                ResponseKind::Image,
+                false,
+                Some(image.timeout_ms),
+                vec![HttpMethod::Post],
+                1,
+                MAX_MESSAGE_BYTES,
+            ),
+            AdapterRequest::ImageStatus { .. } => (
+                ResponseKind::Image,
+                false,
+                Some(20_000),
+                vec![HttpMethod::Get],
+                1,
+                MAX_MESSAGE_BYTES,
+            ),
+            AdapterRequest::ImageUnload => (
+                ResponseKind::Action,
+                false,
+                Some(20_000),
+                vec![HttpMethod::Post],
+                1,
+                MAX_MESSAGE_BYTES,
+            ),
+            AdapterRequest::ImageCancel { .. } => (
+                ResponseKind::Action,
+                false,
+                Some(10_000),
+                vec![HttpMethod::Post, HttpMethod::Delete],
+                2,
+                MAX_MESSAGE_BYTES,
+            ),
         };
         let output = session.invoke(&PluginInput::Prepare {
             base_url: self.base.to_string().trim_end_matches('/').into(),
@@ -452,10 +540,20 @@ impl Adapter {
             let status = response.status();
             let bytes = read_bounded(response, MAX_MESSAGE_BYTES).await?;
             let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            let message = body["error"]["message"]
+            let mut message = body["error"]["message"]
                 .as_str()
                 .or_else(|| body["error"].as_str())
-                .unwrap_or("upstream request failed");
+                .unwrap_or("upstream request failed")
+                .to_owned();
+            // Some servers, such as ComfyUI, put the actionable cause in `details`.
+            if let Some(details) = body["error"]["details"].as_str().map(str::trim)
+                && !details.is_empty()
+            {
+                message = format!(
+                    "{message}: {}",
+                    details.chars().take(512).collect::<String>()
+                );
+            }
             return Err(redact_error(
                 Error::new(format!("adapter HTTP {status}: {message}")),
                 self.credential.as_ref(),
@@ -529,6 +627,98 @@ impl Adapter {
             _ => Err(Error::new("adapter returned no search results")),
         }
     }
+    async fn image_job(&self, request: AdapterRequest) -> Result<ImageJob> {
+        match self.execute(request).await? {
+            PluginOutput::Image(job) => Ok(job),
+            _ => Err(Error::new("adapter returned no image job")),
+        }
+    }
+    /// Submit one text-to-image job and wait for its encoded images. Polling is
+    /// limited to this request's lifetime. Dropping the future asks the server to
+    /// cancel a job that is still pending.
+    pub async fn generate_image(&self, mut request: ImageRequest) -> Result<Vec<Vec<u8>>> {
+        let budget = Duration::from_millis(request.timeout_ms).min(MAX_IMAGE_TIMEOUT);
+        request.timeout_ms = budget.as_millis() as u64;
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut job = self.image_job(AdapterRequest::Image(request)).await?;
+        let mut pending = PendingImage {
+            adapter: self.clone(),
+            job: None,
+        };
+        let images = loop {
+            match job {
+                ImageJob::Ready { images } => break images,
+                ImageJob::Pending {
+                    job: id,
+                    poll_after_ms,
+                } => {
+                    if !id.is_empty() {
+                        pending.job = Some(id);
+                    }
+                    let id = pending.job.clone().ok_or_else(|| {
+                        Error::new("adapter returned a pending image without a job ID")
+                    })?;
+                    let wake = tokio::time::Instant::now()
+                        + Duration::from_millis(poll_after_ms.clamp(250, 5_000));
+                    if wake >= deadline {
+                        return Err(Error::new("image generation timed out"));
+                    }
+                    tokio::time::sleep_until(wake).await;
+                    job = self
+                        .image_job(AdapterRequest::ImageStatus { job: id })
+                        .await?;
+                }
+            }
+        };
+        pending.job = None;
+        if images.is_empty() || images.len() > MAX_IMAGES {
+            return Err(Error::new("adapter returned an invalid image count"));
+        }
+        let mut encoded = Vec::with_capacity(images.len());
+        for image in images {
+            encoded.push(match image {
+                ImageOutput::Base64(data) => decode_base64_image(&data)?,
+                ImageOutput::Get { path, query } => self.fetch_image(&path, query).await?,
+            });
+        }
+        Ok(encoded)
+    }
+    /// Ask an image server to release loaded models and GPU memory.
+    pub async fn unload_image_models(&self) -> Result<()> {
+        match self.execute(AdapterRequest::ImageUnload).await? {
+            PluginOutput::Action => Ok(()),
+            _ => Err(Error::new("adapter returned no action result")),
+        }
+    }
+    async fn fetch_image(&self, path: &str, query: Vec<(String, String)>) -> Result<Vec<u8>> {
+        if path.is_empty()
+            || path.len() > 1024
+            || path.starts_with('/')
+            || path.contains(['?', '#', '\\'])
+            || path.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err(Error::new("adapter image path is invalid"));
+        }
+        let url = format!("{}/{path}", self.base.as_str().trim_end_matches('/'));
+        let response = self
+            .send(HttpRequest {
+                method: HttpMethod::Get,
+                url,
+                query,
+                body: None,
+                timeout_ms: Some(60_000),
+            })
+            .await?;
+        let image_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.to_ascii_lowercase().starts_with("image/"));
+        if !image_type {
+            return Err(Error::new("adapter image response is not an image"));
+        }
+        read_bounded(response, MAX_IMAGE_BYTES).await
+    }
     pub async fn stream(&self, request: ChatRequest) -> Result<AdapterStream> {
         self.start_stream(AdapterRequest::Stream(request)).await
     }
@@ -570,6 +760,37 @@ impl Adapter {
             credential: self.credential.clone(),
         })
     }
+}
+
+/// Cancels an unfinished job on drop. The cancel request runs detached, bounded
+/// by its 10-second plan timeout, because Drop cannot await.
+struct PendingImage {
+    adapter: Adapter,
+    job: Option<String>,
+}
+impl Drop for PendingImage {
+    fn drop(&mut self) {
+        let (Some(job), Ok(runtime)) = (self.job.take(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        let adapter = self.adapter.clone();
+        runtime.spawn(async move {
+            if let Err(error) = adapter.execute(AdapterRequest::ImageCancel { job }).await {
+                tracing::debug!(%error, "image job cancellation failed");
+            }
+        });
+    }
+}
+
+fn decode_base64_image(data: &str) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    if data.len() / 4 * 3 > MAX_IMAGE_BYTES {
+        return Err(Error::new("adapter image exceeds 16 MiB"));
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| Error::new("adapter image is not valid base64"))
 }
 
 fn validate_plan(base: &reqwest::Url, plan: &HttpPlan) -> Result<()> {

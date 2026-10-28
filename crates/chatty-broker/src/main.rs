@@ -39,17 +39,21 @@ mod admin;
 mod auth;
 #[path = "systems/conversations.rs"]
 mod conversations;
+#[path = "systems/images.rs"]
+mod images;
 #[path = "systems/inference.rs"]
 mod inference;
 #[path = "systems/memory.rs"]
 mod memory;
 mod transport;
 mod utils;
+mod workload;
 
 use adapters::*;
 use admin::*;
 use auth::*;
 use conversations::*;
+use images::*;
 use inference::*;
 use memory::*;
 use transport::*;
@@ -497,15 +501,16 @@ async fn dispatch(
             );
         }
         Request::GetServerCapabilities => {
-            let registration_enabled: bool = sqlx::query_scalar(
-                "SELECT allow_self_registration FROM broker_settings WHERE singleton=1",
+            let (registration_enabled, image_generation): (bool, bool) = sqlx::query_as(
+                "SELECT allow_self_registration,image_enabled FROM broker_settings WHERE singleton=1",
             )
             .fetch_one(&app.db)
             .await?;
             send!(
                 MessageType::Response,
                 Response::ServerCapabilities {
-                    registration_enabled
+                    registration_enabled,
+                    image_generation,
                 }
             );
         }
@@ -723,6 +728,9 @@ async fn dispatch(
             config.adapter_url = config.adapter_url.trim().trim_end_matches('/').to_owned();
             config.model = config.model.trim().to_owned();
             config.keep_alive = config.keep_alive.trim().to_owned();
+            config.image.url = config.image.url.trim().trim_end_matches('/').to_owned();
+            config.image.model = config.image.model.trim().to_owned();
+            config.image.negative_prompt = config.image.negative_prompt.trim().to_owned();
             if !config.adapter_url.starts_with("http://")
                 && !config.adapter_url.starts_with("https://")
             {
@@ -730,7 +738,7 @@ async fn dispatch(
             }
             validate_broker_config(&config)?;
             app.adapters.validate_selection(&config)?;
-            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,adapter_plugin=?,use_ollama_api=?,model=?,temperature=?,top_p=?,top_k=?,num_ctx=?,num_predict=?,repeat_penalty=?,seed=?,keep_alive=?,allow_public_characters=?,allow_self_registration=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
+            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,adapter_plugin=?,use_ollama_api=?,model=?,temperature=?,top_p=?,top_k=?,num_ctx=?,num_predict=?,repeat_penalty=?,seed=?,keep_alive=?,allow_public_characters=?,allow_self_registration=?,image_enabled=?,image_url=?,image_plugin=?,image_model=?,image_width=?,image_height=?,image_steps=?,image_guidance=?,image_negative_prompt=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
                 .bind(config.adapter_enabled)
                 .bind(&config.adapter_url)
                 .bind(&config.adapter_plugin)
@@ -746,6 +754,15 @@ async fn dispatch(
                 .bind(&config.keep_alive)
                 .bind(config.allow_public_characters)
                 .bind(config.allow_self_registration)
+                .bind(config.image.enabled)
+                .bind(&config.image.url)
+                .bind(&config.image.plugin)
+                .bind(&config.image.model)
+                .bind(config.image.width)
+                .bind(config.image.height)
+                .bind(config.image.steps)
+                .bind(config.image.guidance)
+                .bind(&config.image.negative_prompt)
                 .execute(&app.db)
                 .await?;
             app.adapters.configuration_changed(&config)?;
@@ -1797,7 +1814,7 @@ async fn dispatch(
             own_conversation(&app.db, &uid, &conversation_id).await?;
             if let Some(parent) = &parent_id {
                 let valid: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND conversation_id=?)",
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND conversation_id=? AND author_type<>'image')",
                 )
                 .bind(parent)
                 .bind(&conversation_id)
@@ -2040,8 +2057,105 @@ async fn dispatch(
                 }
             );
         }
+        Request::AdminListImageModels { session_token } => {
+            require_admin(&app.db, &session_token).await?;
+            send!(
+                MessageType::Response,
+                Response::ImageModels(image_models(&app).await?)
+            );
+        }
+        Request::GenerateImage {
+            session_token,
+            prompt,
+            negative_prompt,
+            square,
+        } => {
+            auth(&app.db, &session_token).await?;
+            let data = cancellable_image_job(
+                &app,
+                &tx,
+                &connection_id,
+                id,
+                busy,
+                generate_png(&app, &prompt, &negative_prompt, square),
+            )
+            .await?;
+            send!(MessageType::Response, Response::GeneratedImage { data });
+        }
+        Request::GenerateSceneImage {
+            session_token,
+            conversation_id,
+            prompt,
+        } => {
+            let uid = auth(&app.db, &session_token).await?;
+            own_conversation(&app.db, &uid, &conversation_id).await?;
+            validate_image_prompt(&prompt)?;
+            let work = async {
+                let prompt = match prompt.trim() {
+                    "" => describe_scene(&app, &uid, &conversation_id).await?,
+                    prompt => prompt.to_owned(),
+                };
+                let png = generate_png(&app, &prompt, "", false).await?;
+                Ok((prompt, png))
+            };
+            let (prompt, png) =
+                cancellable_image_job(&app, &tx, &connection_id, id, busy, work).await?;
+            let (message_id, rev, changed) =
+                save_scene_image(&app, &uid, &conversation_id, &prompt, &png).await?;
+            send_delta!(
+                &uid,
+                rev,
+                "message",
+                message_id,
+                DeltaOperation::Add,
+                changed
+            );
+            send!(
+                MessageType::Response,
+                Response::Accepted {
+                    entity_id: Some(message_id),
+                    revision: rev
+                }
+            );
+        }
+        Request::GetMessageImage {
+            session_token,
+            message_id,
+        } => {
+            let uid = auth(&app.db, &session_token).await?;
+            let data = load_message_image(&app, &uid, &message_id).await?;
+            send!(
+                MessageType::Response,
+                Response::MessageImage { message_id, data }
+            );
+        }
     }
     Ok(())
+}
+
+/// Image jobs can outlast the idle limit and are cancellable by request ID or
+/// disconnect. Dropping the work cancels its pending upstream job.
+async fn cancellable_image_job<T>(
+    app: &App,
+    tx: &mpsc::Sender<Out>,
+    connection_id: &str,
+    id: u64,
+    busy: Arc<AtomicU64>,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    busy.fetch_add(1, Ordering::Relaxed);
+    let _busy_guard = BusyGuard(busy);
+    let (cancel, mut cancel_rx) = watch::channel(false);
+    let key = (connection_id.to_owned(), id);
+    app.cancellations.lock().await.insert(key.clone(), cancel);
+    let result = tokio::select! {
+        biased;
+        _ = cancel_rx.changed() => Err(format_err!("image generation cancelled")),
+        _ = tx.closed() => Err(format_err!("image generation cancelled")),
+        result = work => result,
+    };
+    app.cancellations.lock().await.remove(&key);
+    result
 }
 
 #[cfg(test)]

@@ -25,7 +25,49 @@ pub struct BrokerConfig {
     pub keep_alive: String,
     pub allow_public_characters: bool,
     pub allow_self_registration: bool,
+    pub image: ImageConfig,
 }
+
+/// Text-to-image service used for portraits and scene images. It is separate
+/// from the text inference adapter and is disabled until configured.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ImageConfig {
+    pub enabled: bool,
+    pub url: String,
+    /// Installed image plugin ID, such as `comfyui`.
+    pub plugin: String,
+    /// Server model or checkpoint name. Empty selects the first listed model.
+    pub model: String,
+    /// Default output size for scene images; portraits are square.
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+    pub guidance: f32,
+    /// Appended to every request's negative prompt.
+    pub negative_prompt: String,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: "http://127.0.0.1:8188".into(),
+            plugin: "comfyui".into(),
+            model: String::new(),
+            width: 1024,
+            height: 1024,
+            steps: 25,
+            guidance: 7.0,
+            negative_prompt: String::new(),
+        }
+    }
+}
+
+/// Inclusive output bounds; dimensions are multiples of eight.
+pub const MIN_IMAGE_SIDE: u32 = 256;
+pub const MAX_IMAGE_SIDE: u32 = 2048;
+pub const MAX_IMAGE_STEPS: u32 = 150;
+pub const MAX_IMAGE_PROMPT_BYTES: usize = 4096;
 
 impl BrokerConfig {
     /// Resolve settings written before explicit plugin selection was available.

@@ -53,7 +53,7 @@ See [README](../README.md#data-locations) for XDG paths and
 
 ## WASM adapter plugins
 
-The broker bundles `openai-compatible`, `ollama`, `freetoken`, and `hugging-face` WASM modules. Normal deployment needs no WASM compiler or plugin directory. Model files and inference remain on the configured remote server; plugins only translate requests and responses inside the broker.
+The broker bundles `openai-compatible`, `ollama`, `freetoken`, `hugging-face`, and `comfyui` WASM modules. Normal deployment needs no WASM compiler or plugin directory. Model files and inference remain on the configured remote server; plugins only translate requests and responses inside the broker.
 
 To install a third-party adapter, place its manifest and module in a broker-readable directory:
 
@@ -68,6 +68,8 @@ The manifest must identify ABI version 1 and a module filename within the same d
 {"id":"my-provider","api_version":1,"module":"adapter.wasm"}
 ```
 
+An optional `"kind"` is `"inference"` (default) or `"image"`. Image plugins appear only in the image service list, never as text inference runtimes.
+
 Set `CHATTY_ADAPTER_DIR=/etc/chatty/adapters` in the broker's environment, then restart the broker. Choose `my-provider` in the admin portal's runtime adapter list and save settings. The broker persists the selection for inference and model management. An optional `CHATTY_ADAPTER_PLUGIN=my-provider` operator override takes precedence; the portal shows the override instead of an editable selector. Remove the override and restart to enable selection in the portal. Keep the inference URL and generation settings in the admin portal. Catalogue searches continue using the bundled Hugging Face plugin. Custom IDs cannot shadow bundled IDs. The former `openai` selector remains an alias for `openai-compatible`, so existing service configuration keeps working. Missing IDs, incompatible manifest versions, or invalid manifests fail startup explicitly. WASM bytes are read and validated only when an adapter is used; invalid modules fail that operation explicitly.
 
 Startup discovers plugin manifests without loading every WASM module. The broker compiles the selected inference adapter on first use and retains only that adapter. Model management uses the same selection; it does not load Ollama as a second provider. Select the `ollama` runtime adapter to use Ollama lifecycle operations. Changing the selection or disabling inference releases its old cache entry immediately; active requests finish with their own references. Hugging Face loads only for catalogue requests and is released when those requests finish, including errors. FreeToken credential validation does not load a guest.
@@ -75,6 +77,30 @@ Startup discovers plugin manifests without loading every WASM module. The broker
 Installing new plugin IDs requires a broker restart. Changes to an already discovered module file take effect after its cached module is evicted and next used. To roll back an operator override, remove it and restart; the persisted admin selection applies again. Migration 0013 adds the plugin selection while preserving legacy native-Ollama settings. Protocol 17 carries the installed adapter list, selection, and streamed download progress; upgrade broker and GUI together.
 
 Plugin development and limits are documented in [Adapter contract](architecture/ADAPTERS.md). Rebuilding bundled modules is documented in [Release](RELEASE.md#adapter-artifacts).
+
+### Image generation with ComfyUI
+
+Image generation is separate from text inference and disabled by default. It produces character portrait drafts and persisted scene images in chats. Migration 0014 adds its settings and the encrypted `message_images` table. Protocol 20 carries the settings and image requests; upgrade broker and GUI together.
+
+1. Start ComfyUI so the broker host can reach it, for example `python main.py --listen 0.0.0.0 --port 8188`. Restrict that port to the broker with a firewall; ComfyUI has no authentication. Chatty needs only the HTTP API; add `--front-end-root` pointing at an empty directory to disable the browser interface. On AMD GPUs, use a PyTorch build that includes your GPU architecture (`python -c "import torch; print(torch.cuda.get_arch_list())"`); AMD's datacenter `rocm/comfyui` images target MI-series GPUs only and crash on Radeon cards.
+2. Install at least one all-in-one checkpoint (model, CLIP, and VAE in one file) under ComfyUI's `models/checkpoints/`. SD 1.5 and SDXL checkpoints work. Split diffusion-model layouts, such as separate UNet/CLIP/VAE files, are not supported by the bundled workflow.
+3. In the admin portal, open the **Images** tab. Enable the image service, choose `comfyui`, enter the server URL (for example `http://192.168.0.97:8188`), and save.
+4. Select **List models** to check the connection, choose a checkpoint or leave the model empty for the first one, set size, steps, guidance, and the negative prompt, then save again.
+
+The bundled workflow is checkpoint loader → CLIP prompts → empty latent → KSampler (euler/normal) → VAE decode → preview image. Preview outputs are written to ComfyUI's temporary directory, not its gallery. The broker validates the configured model against the server's checkpoint list before each job. It polls the job's history once per second only while that request is active. Jobs are limited to 10 minutes and two concurrent jobs per broker. Cancelling a request or disconnecting removes the queued job and interrupts it if running. Results are decoded, re-encoded as PNG without embedded workflow metadata, and capped at 7 MiB. Scene images are encrypted with the same key as character images.
+
+#### Shared GPU host
+
+If the chat inference URL and the image URL use the same host (ports and schemes are ignored; `localhost`, `127.0.0.1`, and `::1` match), the broker assumes one GPU cannot hold both models. It then runs text and image work one kind at a time:
+
+- Requests of the loaded kind run concurrently. Streamed replies hold their slot until the stream ends.
+- A request of the other kind waits for active work to finish. While it waits, new requests of the loaded kind also wait, so neither kind starves.
+- Before image work, the broker unloads every running text model through the selected runtime. It then waits up to 30 seconds until the runtime reports no running models. If it cannot confirm this, the image request fails and the image server never receives the job. This needs the `ollama` runtime; other runtimes cannot report or unload models, so image requests fail on a shared host.
+- This control must live in the broker. When Ollama and ComfyUI run in separate containers on one GPU, ComfyUI cannot see Ollama's memory use. It reports the GPU as free and can crash when it overruns that memory.
+- Before text work, the broker asks the image server to free its models. ComfyUI receives `POST /free` with `unload_models` and `free_memory`.
+- Failure to free image memory is logged and does not block chat, because an unreachable image server holds no memory. Model pulls and deletes are not serialized; loading a model through the admin portal is treated as text work.
+
+The first request after each switch pays the model load time. Put the services on different hosts to avoid switching. The admin **Images** tab shows when the hosts match.
 
 ### FreeToken on a remote machine
 

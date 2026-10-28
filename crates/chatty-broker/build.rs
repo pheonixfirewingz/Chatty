@@ -25,6 +25,8 @@ fn main() {
             "chatty-adapter-hugging-face",
             "-p",
             "chatty-adapter-freetoken",
+            "-p",
+            "chatty-adapter-comfyui",
         ])
         // Native compiler/linker flags do not apply to the WASM guests.
         .env_remove("RUSTFLAGS")
