@@ -89,6 +89,17 @@ Image generation is separate from text inference and disabled by default. It pro
 
 The bundled workflow is checkpoint loader → CLIP prompts → empty latent → KSampler (euler/normal) → VAE decode → preview image. Preview outputs are written to ComfyUI's temporary directory, not its gallery. The broker validates the configured model against the server's checkpoint list before each job. It polls the job's history once per second only while that request is active. Jobs are limited to 10 minutes and two concurrent jobs per broker. Cancelling a request or disconnecting removes the queued job and interrupts it if running. Results are decoded, re-encoded as PNG without embedded workflow metadata, and capped at 7 MiB. Scene images are encrypted with the same key as character images.
 
+#### Custom workflows
+
+The admin **Images** tab can replace the built-in workflow with any ComfyUI graph, such as Flux or SD3 split loaders, LoRAs, upscalers, or face detailers. Migration 0015 stores the template, and protocol 22 carries it.
+
+1. Build and test the flow in a ComfyUI instance with its browser interface, then choose **Workflow > Export (API)**. UI-format exports are rejected.
+2. In the exported JSON, replace the values Chatty should control with placeholders: `{{prompt}}`, `{{negative_prompt}}`, `{{model}}`, `{{seed}}`, `{{width}}`, `{{height}}`, `{{steps}}`, `{{guidance}}`. A value that is exactly `"{{seed}}"`, `"{{width}}"`, `"{{height}}"`, `"{{steps}}"` or `"{{guidance}}"` becomes a number. Placeholders inside longer text are replaced as text, for example `"masterpiece, {{prompt}}"`.
+3. Select **Load workflow file…**, check the summary, and select **Save image settings**. The broker rejects templates over 256 KiB, without `{{prompt}}`, with unknown placeholders, or with nodes lacking `class_type`/`inputs`.
+4. Select **Generate test image** to render one image with the saved settings.
+
+Keep one image output node; Chatty uses the first output image. `PreviewImage` writes to ComfyUI's temporary directory, while `SaveImage` keeps files in its output folder. Templates without `{{model}}` skip the model list, so their loaders can name files directly. The model list includes both `checkpoints` and `diffusion_models`. Select **Use built-in** to return to the default flow. [`docs/examples/comfyui-sdxl-turbo-api.json`](examples/comfyui-sdxl-turbo-api.json) is a working SDXL-Turbo template; use about 4 steps and guidance 1 with it. [`docs/examples/comfyui-flux-dev-api.json`](examples/comfyui-flux-dev-api.json) runs FLUX.1 [dev] from the all-in-one fp8 checkpoint (`checkpoints/FLUX1/flux1-dev-fp8.safetensors`). It uses `FluxGuidance` for `{{guidance}}`, a zeroed negative prompt, KSampler cfg 1, and euler/simple. Use 20 steps and guidance 3.5. On an RX 7900 XTX with ROCm 7.1 PyTorch, a 1216×832 scene takes about 29 s and an 832×832 portrait about 19 s once loaded. Loading after a model swap adds about 12 s. FLUX.1 [dev] weights are licensed for non-commercial use.
+
 #### Shared GPU host
 
 If the chat inference URL and the image URL use the same host (ports and schemes are ignored; `localhost`, `127.0.0.1`, and `::1` match), the broker assumes one GPU cannot hold both models. It then runs text and image work one kind at a time:

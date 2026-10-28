@@ -386,12 +386,13 @@ impl Adapter {
         // Guest plans cannot turn an inference/read capability into a lifecycle mutation,
         // change the expected result type, or lengthen the caller's time budget.
         let (kind, stream, timeout, methods, max_requests, response_limit) = match &request {
+            // Providers may merge several model folders, such as ComfyUI.
             AdapterRequest::Models { timeout_ms } => (
                 ResponseKind::Models,
                 false,
                 Some(*timeout_ms),
                 vec![HttpMethod::Get],
-                1,
+                4,
                 MAX_MESSAGE_BYTES,
             ),
             AdapterRequest::Complete(chat) => (

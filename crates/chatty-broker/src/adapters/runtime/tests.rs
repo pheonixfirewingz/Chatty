@@ -894,6 +894,7 @@ async fn dropped_image_job_is_cancelled_upstream() {
         guidance: 1.0,
         seed: 1,
         timeout_ms: 60_000,
+        workflow: None,
     });
     // The job stays pending; the timeout drops it during its first poll wait.
     assert!(
@@ -919,7 +920,7 @@ async fn dropped_image_job_is_cancelled_upstream() {
 }
 
 #[tokio::test]
-#[ignore = "requires CHATTY_TEST_IMAGE_URL; optional CHATTY_TEST_IMAGE_MODEL generates one image"]
+#[ignore = "requires CHATTY_TEST_IMAGE_URL; optional CHATTY_TEST_IMAGE_MODEL generates one image, CHATTY_TEST_IMAGE_WORKFLOW selects a template file, CHATTY_TEST_IMAGE_OUT saves it"]
 async fn live_comfyui_lists_models_and_generates() {
     let url = std::env::var("CHATTY_TEST_IMAGE_URL").unwrap();
     let adapter = registry().adapter("comfyui", &url).unwrap();
@@ -938,14 +939,22 @@ async fn live_comfyui_lists_models_and_generates() {
             guidance: 5.0,
             seed: 42,
             timeout_ms: 600_000,
+            workflow: std::env::var("CHATTY_TEST_IMAGE_WORKFLOW")
+                .ok()
+                .map(|path| std::fs::read_to_string(path).unwrap()),
         })
         .await;
     match result {
-        Ok(images) => eprintln!(
-            "generated {} image(s), first {} bytes",
-            images.len(),
-            images[0].len()
-        ),
+        Ok(images) => {
+            if let Ok(path) = std::env::var("CHATTY_TEST_IMAGE_OUT") {
+                std::fs::write(path, &images[0]).unwrap();
+            }
+            eprintln!(
+                "generated {} image(s), first {} bytes",
+                images.len(),
+                images[0].len()
+            );
+        }
         Err(error) => eprintln!("generation error: {error}"),
     }
 }

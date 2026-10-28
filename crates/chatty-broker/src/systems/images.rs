@@ -46,9 +46,17 @@ pub(super) async fn generate_png(
     let config = load_broker_config(&app.db).await?;
     let adapter = app.adapters.image(&config)?;
     let image = &config.image;
+    // Templates that hard-code their loaders need no model selection.
+    let uses_model = image.workflow.is_empty() || image.workflow.contains("{{model}}");
     // Check first: provider validation errors rarely name the missing model.
-    let models = adapter.models(Duration::from_secs(10)).await?;
-    let model = if image.model.is_empty() {
+    let models = if uses_model {
+        adapter.models(Duration::from_secs(10)).await?
+    } else {
+        Vec::new()
+    };
+    let model = if !uses_model {
+        String::new()
+    } else if image.model.is_empty() {
         models
             .into_iter()
             .next()
@@ -98,6 +106,7 @@ pub(super) async fn generate_png(
             // Some backends reject seeds above i64::MAX.
             seed: seed & i64::MAX as u64,
             timeout_ms: IMAGE_TIMEOUT.as_millis() as u64,
+            workflow: (!image.workflow.is_empty()).then(|| image.workflow.clone()),
         })
         .await?
         .into_iter()

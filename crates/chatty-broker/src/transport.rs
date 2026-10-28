@@ -41,7 +41,7 @@ pub(super) async fn serve(
         MessageType::Handshake,
         0,
         serde_json::to_vec(
-            &json!({"protocol":21,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
+            &json!({"protocol":22,"encoding":"bincode2","compression":"zstd","tls":"1.3"}),
         )?
         .into(),
     ))

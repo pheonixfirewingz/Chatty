@@ -136,7 +136,7 @@ pub(super) async fn adapter_health(app: &App) -> (AdapterStatus, u32, Option<u64
 }
 
 pub(super) async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> {
-    let row = sqlx::query("SELECT adapter_enabled,adapter_url,adapter_plugin,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration,image_enabled,image_url,image_plugin,image_model,image_width,image_height,image_steps,image_guidance,image_negative_prompt FROM broker_settings WHERE singleton=1")
+    let row = sqlx::query("SELECT adapter_enabled,adapter_url,adapter_plugin,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration,image_enabled,image_url,image_plugin,image_model,image_width,image_height,image_steps,image_guidance,image_negative_prompt,image_workflow FROM broker_settings WHERE singleton=1")
         .fetch_one(db)
         .await?;
     Ok(BrokerConfig {
@@ -165,6 +165,7 @@ pub(super) async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> 
             steps: row.get::<i64, _>("image_steps") as u32,
             guidance: row.get("image_guidance"),
             negative_prompt: row.get("image_negative_prompt"),
+            workflow: row.get("image_workflow"),
         },
     })
 }
@@ -217,6 +218,48 @@ pub(super) fn validate_broker_config(config: &BrokerConfig) -> Result<()> {
     }
     if image.negative_prompt.len() > chatty_protocol::admin::MAX_IMAGE_PROMPT_BYTES {
         bail!("image negative prompt must not exceed 4096 bytes")
+    }
+    validate_image_workflow(&image.workflow)
+}
+
+/// Check a ComfyUI API-format template before it is saved, so mistakes surface
+/// in the admin portal instead of during a user's image request.
+pub(super) fn validate_image_workflow(workflow: &str) -> Result<()> {
+    if workflow.is_empty() {
+        return Ok(());
+    }
+    if workflow.len() > chatty_protocol::admin::MAX_IMAGE_WORKFLOW_BYTES {
+        bail!("image workflow must not exceed 256 KiB")
+    }
+    let graph: Value =
+        serde_json::from_str(workflow).context("image workflow is not valid JSON")?;
+    let Some(nodes) = graph.as_object() else {
+        bail!("image workflow must be a JSON object of nodes")
+    };
+    if nodes.contains_key("nodes") && nodes.contains_key("links") {
+        bail!("this is a UI workflow; in ComfyUI use Workflow > Export (API)")
+    }
+    if nodes.is_empty() || nodes.len() > 500 {
+        bail!("image workflow must contain 1 to 500 nodes")
+    }
+    for (id, node) in nodes {
+        if !node["class_type"].is_string() || !node["inputs"].is_object() {
+            bail!("workflow node {id} needs a class_type and inputs")
+        }
+    }
+    if !workflow.contains("{{prompt}}") {
+        bail!("image workflow must use {{{{prompt}}}} in a text input")
+    }
+    let mut rest = workflow;
+    while let Some(start) = rest.find("{{") {
+        let Some(length) = rest[start..].find("}}") else {
+            break;
+        };
+        let placeholder = &rest[start..start + length + 2];
+        if !chatty_protocol::admin::IMAGE_WORKFLOW_PLACEHOLDERS.contains(&placeholder) {
+            bail!("unknown image workflow placeholder {placeholder}")
+        }
+        rest = &rest[start + length + 2..];
     }
     Ok(())
 }

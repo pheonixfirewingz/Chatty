@@ -88,7 +88,7 @@ Transport is TLS 1.3 over one TCP connection at port `7443` by default.
 The broker first sends a JSON handshake:
 
 ```json
-{"protocol":21,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
+{"protocol":22,"encoding":"bincode2","compression":"zstd","tls":"1.3"}
 ```
 
 All later messages use a 14-byte header:
@@ -101,7 +101,7 @@ Payloads are bincode 2. Stream chunks and deltas are always zstd-compressed; oth
 
 Client message types are requests and cancellation. Broker message types include responses, errors, deltas, stream chunks, and stream completion. Request IDs correlate direct responses and generation cancellation.
 
-Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 19 includes persisted runtime adapter selection, installed inference plugin IDs and operator overrides, request-scoped download progress and terminal cancellation/completion responses, scoped memory condensation, and conversation-scoped generation context usage in start/end responses. Broker and GUI must upgrade together. Protocol 20 adds image service settings, the image capability flag, unsaved portrait generation, scene image messages, and on-demand message image fetches. Protocol 21 adds an optional seed to `GenerateImage` for consistent emotion sets.
+Admin model search is broker-only and rechecks the administrator role. It queries the public Hugging Face GGUF catalogue on explicit submission, with a 20-second timeout, a 2 MiB response limit, at most 20 repositories, and at most 128 single-file GGUF choices per repository. Downloads use Ollama's `hf.co/owner/repository:filename.gguf` pull support. No inference runtime or model files are added to the GUI. Protocol 19 includes persisted runtime adapter selection, installed inference plugin IDs and operator overrides, request-scoped download progress and terminal cancellation/completion responses, scoped memory condensation, and conversation-scoped generation context usage in start/end responses. Broker and GUI must upgrade together. Protocol 20 adds image service settings, the image capability flag, unsaved portrait generation, scene image messages, and on-demand message image fetches. Protocol 21 adds an optional seed to `GenerateImage` for consistent emotion sets. Protocol 22 adds the administrator's image workflow template to the image settings.
 
 ### Image generation
 

@@ -45,6 +45,9 @@ pub struct ImageConfig {
     pub guidance: f32,
     /// Appended to every request's negative prompt.
     pub negative_prompt: String,
+    /// API-format workflow template with `{{placeholder}}` inputs. Empty uses
+    /// the plugin's built-in workflow.
+    pub workflow: String,
 }
 
 impl Default for ImageConfig {
@@ -59,6 +62,7 @@ impl Default for ImageConfig {
             steps: 25,
             guidance: 7.0,
             negative_prompt: String::new(),
+            workflow: String::new(),
         }
     }
 }
@@ -68,6 +72,18 @@ pub const MIN_IMAGE_SIDE: u32 = 256;
 pub const MAX_IMAGE_SIDE: u32 = 2048;
 pub const MAX_IMAGE_STEPS: u32 = 150;
 pub const MAX_IMAGE_PROMPT_BYTES: usize = 4096;
+pub const MAX_IMAGE_WORKFLOW_BYTES: usize = 256 * 1024;
+/// Values the broker fills into a workflow template for each request.
+pub const IMAGE_WORKFLOW_PLACEHOLDERS: [&str; 8] = [
+    "{{prompt}}",
+    "{{negative_prompt}}",
+    "{{model}}",
+    "{{seed}}",
+    "{{width}}",
+    "{{height}}",
+    "{{steps}}",
+    "{{guidance}}",
+];
 
 impl BrokerConfig {
     /// Resolve settings written before explicit plugin selection was available.

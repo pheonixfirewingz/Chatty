@@ -1457,6 +1457,8 @@ async fn mock_comfyui_with_ollama(
             log.lock().unwrap().push((request.clone(), body));
             let (content_type, response) = if request == "GET /models/checkpoints" {
                 ("application/json", br#"["model.safetensors"]"#.to_vec())
+            } else if request == "GET /models/diffusion_models" {
+                ("application/json", br#"["flux1-dev.safetensors"]"#.to_vec())
             } else if request == "POST /prompt" {
                 (
                     "application/json",
@@ -1598,7 +1600,7 @@ async fn scene_images_are_generated_encrypted_and_owner_scoped() {
     .await
     .unwrap();
     assert!(
-        matches!(decode::<Response>(&payload).unwrap(), Response::ImageModels(models) if models == ["model.safetensors"])
+        matches!(decode::<Response>(&payload).unwrap(), Response::ImageModels(models) if models == ["model.safetensors", "flux1-dev.safetensors"])
     );
 
     let (_, payload) = call(&app, scene).await.unwrap();
@@ -1857,4 +1859,82 @@ async fn image_job_is_refused_while_the_chat_model_stays_loaded() {
             .any(|(request, _)| request == "POST /prompt"),
         "the image server never receives the job"
     );
+}
+
+#[test]
+fn image_workflow_templates_are_validated_before_saving() {
+    let valid = r#"{"1": {"class_type": "CLIPTextEncode", "inputs": {"text": "{{prompt}}"}}}"#;
+    assert!(validate_image_workflow("").is_ok());
+    assert!(validate_image_workflow(valid).is_ok());
+    for (workflow, message) in [
+        ("not json", "not valid JSON"),
+        (r#"{"nodes": [], "links": []}"#, "Export (API)"),
+        (r#"{"1": {"inputs": {"text": "{{prompt}}"}}}"#, "class_type"),
+        (
+            r#"{"1": {"class_type": "SaveImage", "inputs": {}}}"#,
+            "{{prompt}}",
+        ),
+        (
+            r#"{"1": {"class_type": "CLIPTextEncode", "inputs": {"text": "{{prompt}} {{lora}}"}}}"#,
+            "{{lora}}",
+        ),
+    ] {
+        let error = validate_image_workflow(workflow).unwrap_err().to_string();
+        assert!(error.contains(message), "{workflow}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn custom_image_workflows_are_sent_with_filled_placeholders() {
+    let (url, seen) = mock_comfyui(test_portrait_png()).await;
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    let workflow = r#"{
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "{{prompt}}"}},
+        "3": {"class_type": "EmptySD3LatentImage", "inputs": {"width": "{{width}}", "height": "{{height}}", "batch_size": 1}},
+        "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": "chatty"}}
+    }"#;
+    sqlx::query("INSERT INTO broker_settings(singleton,adapter_url,image_enabled,image_url,image_model,image_width,image_height,image_workflow) VALUES(1,'http://inference.example:11434/v1',1,?,'not-installed',768,512,?)")
+        .bind(&url)
+        .bind(workflow)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (deltas, _) = broadcast::channel(32);
+    let app = App {
+        db,
+        adapters: test_adapter_host(),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
+        snapshot_gate: Arc::new(RwLock::new(())),
+        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        deltas,
+        recent_errors: Arc::new(Mutex::new(Vec::new())),
+        log_path: Arc::new(PathBuf::new()),
+        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_key: Arc::new([7; 32]),
+    };
+    generate_png(&app, "a harbour", "", false, Some(5))
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert!(
+        !seen
+            .iter()
+            .any(|(request, _)| request.starts_with("GET /models/")),
+        "a template without {{{{model}}}} skips model lookup"
+    );
+    let graph = &seen
+        .iter()
+        .find(|(request, _)| request == "POST /prompt")
+        .unwrap()
+        .1["prompt"];
+    assert_eq!(graph["1"]["class_type"], "UNETLoader");
+    assert_eq!(graph["2"]["inputs"]["text"], "a harbour");
+    assert_eq!(graph["3"]["inputs"]["width"], 768);
+    assert_eq!(graph["3"]["inputs"]["height"], 512);
 }

@@ -36,8 +36,10 @@ encrypted bytes in a separate table. Clients fetch those bytes on demand.
 - Migration 0014 adds image settings and `message_images`; protocol version becomes 20.
 - Job state is polled only while a request is active. There is no idle polling and
   no WebSocket client in the host.
-- ComfyUI split-model layouts and custom workflows are not supported by the bundled
-  plugin; a third-party image plugin can provide them without broker changes.
+- Administrators can replace the bundled single-checkpoint flow with an API-format
+  ComfyUI template using `{{placeholder}}` inputs, covering split-model layouts and
+  multi-stage flows. The template travels as an additive `ImageRequest.workflow`
+  field, so ABI 1 is unchanged; the broker validates its shape before saving.
 - Only PNG output is accepted, matching the existing image decoder features.
 - When both services share a host, the broker admits one model kind at a time and
   unloads the other before switching (`ImageUnload`, or Ollama unload). This trades

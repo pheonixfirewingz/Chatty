@@ -49,7 +49,8 @@ Inputs are UTF-8 JSON `PluginInput` values; outputs are serialized `PluginResult
 Image generation is an optional v1 capability, added without changing exports or existing JSON fields. Image plugins declare `"kind": "image"` in their manifest. They are transient like the catalogue adapter: loaded per operation and never offered as text runtimes.
 
 - `Models` lists the server's image models.
-- `Image(ImageRequest)` submits one job. Its single POST plan returns `ResponseKind::Image`. The broker supplies the model, prompts, size, steps, guidance, a random seed, and a time budget.
+- `Image(ImageRequest)` submits one job. Its single POST plan returns `ResponseKind::Image`. The broker supplies the model, prompts, size, steps, guidance, a seed, and a time budget. The optional, additive `workflow` field carries an administrator's provider-specific template; guests fill its placeholders and fall back to a built-in workflow when it is absent. `model` is empty when a template does not use `{{model}}`.
+- `Models` may issue up to four GETs whose results the guest merges, such as ComfyUI's checkpoint and diffusion model folders.
 - `Decode` returns `ImageJob::Ready { images }` or `ImageJob::Pending { job, poll_after_ms }`. Synchronous servers can return `Ready` immediately.
 - `ImageStatus { job }` prepares a single GET plan for a pending job. An empty `job` in its result keeps the current ID. The host waits 250 ms to 5 s between polls, within a 30-minute cap and the caller's budget.
 - `ImageCancel { job }` prepares up to two POST/DELETE requests. The host sends it when an unfinished job is dropped.

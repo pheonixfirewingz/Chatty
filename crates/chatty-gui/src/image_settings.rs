@@ -163,13 +163,98 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
         ),
     ]
     .spacing(12);
+    let secondary = ui::secondary_text_color(state.light_mode);
+    let mut workflow = column![
+        text("Workflow").size(16),
+        text(state.image_workflow_summary).size(13),
+        row![
+            button(text("Load workflow file…").size(13))
+                .on_press(Message::from(AdminMessage::LoadImageWorkflow)),
+            button(text("Use built-in").size(13)).on_press_maybe(
+                (!image.workflow.is_empty())
+                    .then(|| Message::from(AdminMessage::ClearImageWorkflow))
+            ),
+        ]
+        .spacing(8)
+        .wrap(),
+        text(
+            "Build any flow in ComfyUI (LoRAs, upscalers, face detailers, split model loaders), then use Workflow > Export (API). \
+             Put placeholders in node inputs: {{prompt}} {{negative_prompt}} {{model}} {{seed}} {{width}} {{height}} {{steps}} {{guidance}}. \
+             A value that is only a placeholder becomes a number where needed. Chatty uses the first output image; keep one image output node."
+        )
+        .size(12)
+        .color(secondary),
+    ]
+    .spacing(10);
+    if let Some(notice) = state.image_notice {
+        workflow = workflow.push(
+            text(notice)
+                .size(12)
+                .color(ui::accent_text_color(state.light_mode)),
+        );
+    }
+
+    let test = state.image_test;
+    let mut test_card = column![
+        text("Test").size(16),
+        text("Renders one image with the saved settings. Save changes first.")
+            .size(12)
+            .color(secondary),
+        row![
+            text_input(super::DEFAULT_TEST_PROMPT, &test.prompt)
+                .on_input(|value| Message::from(AdminMessage::ImageTestPromptChanged(value)))
+                .on_submit(Message::from(AdminMessage::TestImageGeneration))
+                .width(Length::Fill),
+            button(
+                text(if test.pending {
+                    "Generating…"
+                } else {
+                    "Generate test image"
+                })
+                .size(13)
+            )
+            .on_press_maybe(
+                (!test.pending).then(|| Message::from(AdminMessage::TestImageGeneration))
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(10);
+    if let Some(notice) = &test.notice {
+        test_card = test_card.push(
+            text(notice)
+                .size(12)
+                .color(ui::accent_text_color(state.light_mode)),
+        );
+    }
+    if let Some(handle) = test
+        .result
+        .as_deref()
+        .and_then(crate::characters::image_handle)
+    {
+        if let Some(elapsed) = test.elapsed {
+            test_card = test_card.push(
+                text(format!("Generated in {:.1} s", elapsed.as_secs_f32()))
+                    .size(12)
+                    .color(secondary),
+            );
+        }
+        test_card = test_card.push(
+            container(iced::widget::image(handle).content_fit(iced::ContentFit::Contain))
+                .max_width(512),
+        );
+    }
+
     column![
         ui::card(connection, state.light_mode, state.glass_mode),
         ui::card(generation, state.light_mode, state.glass_mode),
+        ui::card(workflow, state.light_mode, state.glass_mode),
         button(text("Save image settings"))
             .style(super::primary_button)
             .padding([9, 16])
             .on_press(Message::from(AdminMessage::SaveBrokerConfig)),
+        ui::card(test_card, state.light_mode, state.glass_mode),
     ]
     .spacing(12)
     .width(Length::Fill)

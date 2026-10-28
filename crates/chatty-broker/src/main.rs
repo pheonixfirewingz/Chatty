@@ -738,7 +738,7 @@ async fn dispatch(
             }
             validate_broker_config(&config)?;
             app.adapters.validate_selection(&config)?;
-            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,adapter_plugin=?,use_ollama_api=?,model=?,temperature=?,top_p=?,top_k=?,num_ctx=?,num_predict=?,repeat_penalty=?,seed=?,keep_alive=?,allow_public_characters=?,allow_self_registration=?,image_enabled=?,image_url=?,image_plugin=?,image_model=?,image_width=?,image_height=?,image_steps=?,image_guidance=?,image_negative_prompt=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
+            sqlx::query("UPDATE broker_settings SET adapter_enabled=?,adapter_url=?,adapter_plugin=?,use_ollama_api=?,model=?,temperature=?,top_p=?,top_k=?,num_ctx=?,num_predict=?,repeat_penalty=?,seed=?,keep_alive=?,allow_public_characters=?,allow_self_registration=?,image_enabled=?,image_url=?,image_plugin=?,image_model=?,image_width=?,image_height=?,image_steps=?,image_guidance=?,image_negative_prompt=?,image_workflow=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
                 .bind(config.adapter_enabled)
                 .bind(&config.adapter_url)
                 .bind(&config.adapter_plugin)
@@ -763,6 +763,7 @@ async fn dispatch(
                 .bind(config.image.steps)
                 .bind(config.image.guidance)
                 .bind(&config.image.negative_prompt)
+                .bind(&config.image.workflow)
                 .execute(&app.db)
                 .await?;
             app.adapters.configuration_changed(&config)?;

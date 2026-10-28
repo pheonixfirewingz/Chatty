@@ -2154,6 +2154,11 @@ impl ChattyApp {
                 };
                 if job.pending && job.request_id.is_none() {
                     job.request_id = Some(request_id);
+                } else if !scene
+                    && self.admin.image_test.pending
+                    && self.admin.image_test.request_id.is_none()
+                {
+                    self.admin.image_test.request_id = Some(request_id);
                 }
             }
             Event::Status(status) => {
@@ -2162,6 +2167,7 @@ impl ChattyApp {
                     self.scene_image = ImageJob::default();
                     self.portrait_image = ImageJob::default();
                     self.emotion_batch = None;
+                    self.admin.image_test.pending = false;
                     self.message_image_requests.clear();
                     self.memory_state.condensing = false;
                     self.admin.models.interrupt_downloads();
@@ -2271,6 +2277,26 @@ impl ChattyApp {
         ) {
             if self.scene_image.owns(frame.request_id) {
                 self.scene_image = ImageJob::default();
+            }
+            let test = &mut self.admin.image_test;
+            if test.pending && test.request_id == Some(frame.request_id) {
+                test.pending = false;
+                test.elapsed = test.started.map(|started| started.elapsed());
+                match frame.message_type {
+                    MessageType::Response => {
+                        if let Ok(Response::GeneratedImage { data }) =
+                            decode::<Response>(&frame.payload)
+                        {
+                            test.result = Some(data);
+                        }
+                        return;
+                    }
+                    _ => {
+                        test.notice = decode::<WireError>(&frame.payload)
+                            .ok()
+                            .map(|error| error.message);
+                    }
+                }
             }
             if self.portrait_image.owns(frame.request_id) {
                 self.portrait_image = ImageJob::default();
@@ -2489,7 +2515,7 @@ impl ChattyApp {
                             self.admin.adapter_override = adapter_override;
                             self.admin.models.saved_adapter_url = Some(v.adapter_url.clone());
                             self.admin.models.saved_model = v.model.clone();
-                            self.admin.broker_config = v;
+                            self.admin.set_broker_config(v);
                         }
                         Response::BrokerMonitor(v) => self.admin.broker_monitor = Some(v),
                         Response::BrokerLog(v) => self.admin.admin_log = v,
@@ -4009,6 +4035,28 @@ mod tests {
         assert!(app.emotion_batch.is_none());
         assert!(!app.portrait_image.pending);
         assert_eq!(app.draft.images.len(), 2);
+    }
+
+    #[test]
+    fn admin_test_render_receives_its_image() {
+        let (commands, mut rx) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.token = "token".into();
+        let _ = app.update(Message::Admin(AdminMessage::TestImageGeneration));
+        next_image_request(&mut rx);
+        let image = encode(&Response::GeneratedImage {
+            data: generated_png(256),
+        })
+        .unwrap();
+        reply(&mut app, 4, MessageType::Response, image);
+        assert!(!app.admin.image_test.pending);
+        assert!(app.admin.image_test.result.is_some());
+        assert!(app.admin.image_test.elapsed.is_some());
+        assert!(
+            app.draft.images.is_empty(),
+            "test renders never reach a character"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme};
 
 use crate::ui;
+use std::time::{Duration, Instant};
 
 // -----------------------------------------------------------------------------
 // Admin Messages
@@ -58,6 +59,10 @@ pub enum AdminMessage {
     ImageGuidanceChanged(f32),
     ImageNegativeChanged(String),
     LoadImageModels,
+    LoadImageWorkflow,
+    ClearImageWorkflow,
+    ImageTestPromptChanged(String),
+    TestImageGeneration,
 
     ModelsPage(usize),
     ToggleAdvancedSettings(bool),
@@ -270,6 +275,9 @@ pub struct AdminViewState<'a> {
     pub adapter_override: Option<&'a str>,
     pub image_plugins: &'a [String],
     pub image_models: Option<&'a [String]>,
+    pub image_workflow_summary: &'a str,
+    pub image_notice: Option<&'a str>,
+    pub image_test: &'a ImageTest,
     pub broker_monitor: Option<&'a BrokerMonitor>,
     pub ollama_state: Option<&'a OllamaState>,
     pub ollama_pull_model: &'a str,
@@ -296,6 +304,10 @@ pub struct AdminState {
     pub image_plugins: Vec<String>,
     /// Models listed by the image service on explicit request; `None` until listed.
     pub image_models: Option<Vec<String>>,
+    /// Cached description of `broker_config.image.workflow`, rebuilt on change.
+    pub image_workflow_summary: String,
+    pub image_notice: Option<String>,
+    pub image_test: ImageTest,
     pub broker_monitor: Option<BrokerMonitor>,
     pub ollama_state: Option<OllamaState>,
     pub ollama_pull_model: String,
@@ -320,6 +332,9 @@ impl Default for AdminState {
             adapter_override: None,
             image_plugins: Vec::new(),
             image_models: None,
+            image_workflow_summary: workflow_summary(""),
+            image_notice: None,
+            image_test: ImageTest::default(),
             broker_config: BrokerConfig {
                 adapter_enabled: false,
                 adapter_url: String::new(),
@@ -366,6 +381,9 @@ impl AdminState {
             adapter_override: self.adapter_override.as_deref(),
             image_plugins: &self.image_plugins,
             image_models: self.image_models.as_deref(),
+            image_workflow_summary: &self.image_workflow_summary,
+            image_notice: self.image_notice.as_deref(),
+            image_test: &self.image_test,
             broker_monitor: self.broker_monitor.as_ref(),
             ollama_state: self.ollama_state.as_ref(),
             ollama_pull_model: &self.ollama_pull_model,
@@ -625,6 +643,52 @@ impl AdminState {
                     session_token: session_token.to_string(),
                 }]
             }
+            AdminMessage::LoadImageWorkflow => {
+                match pick_image_workflow() {
+                    Some(Ok(workflow)) => {
+                        self.image_workflow_summary = workflow_summary(&workflow);
+                        self.broker_config.image.workflow = workflow;
+                        self.image_notice =
+                            Some("Workflow loaded. Save image settings to use it.".into());
+                    }
+                    Some(Err(error)) => self.image_notice = Some(error),
+                    None => {}
+                }
+                vec![]
+            }
+            AdminMessage::ClearImageWorkflow => {
+                self.broker_config.image.workflow.clear();
+                self.image_workflow_summary = workflow_summary("");
+                self.image_notice =
+                    Some("Built-in workflow selected. Save image settings to use it.".into());
+                vec![]
+            }
+            AdminMessage::ImageTestPromptChanged(prompt) => {
+                self.image_test.prompt = prompt;
+                vec![]
+            }
+            AdminMessage::TestImageGeneration => {
+                if self.image_test.pending {
+                    return vec![];
+                }
+                let prompt = match self.image_test.prompt.trim() {
+                    "" => DEFAULT_TEST_PROMPT.to_owned(),
+                    prompt => prompt.to_owned(),
+                };
+                self.image_test = ImageTest {
+                    prompt: self.image_test.prompt.clone(),
+                    pending: true,
+                    started: Some(Instant::now()),
+                    ..ImageTest::default()
+                };
+                vec![Request::GenerateImage {
+                    session_token: session_token.to_string(),
+                    prompt,
+                    negative_prompt: String::new(),
+                    square: false,
+                    seed: None,
+                }]
+            }
             AdminMessage::RefreshOllama => {
                 vec![Request::AdminGetOllamaState {
                     session_token: session_token.to_string(),
@@ -834,6 +898,86 @@ pub fn admin_subscription_gated(
 // -----------------------------------------------------------------------------
 // Iced 0.14 View Components
 // -----------------------------------------------------------------------------
+
+/// Prompt used by the Images tab test when its prompt box is empty.
+pub const DEFAULT_TEST_PROMPT: &str = "a lighthouse on a cliff at dusk, dramatic sky";
+
+/// One administrator test render using the broker's saved image settings.
+#[derive(Debug, Clone, Default)]
+pub struct ImageTest {
+    pub prompt: String,
+    pub pending: bool,
+    pub request_id: Option<u64>,
+    pub started: Option<Instant>,
+    pub result: Option<Vec<u8>>,
+    pub elapsed: Option<Duration>,
+    pub notice: Option<String>,
+}
+
+impl AdminState {
+    /// Apply a broker configuration and refresh the derived workflow summary.
+    pub fn set_broker_config(&mut self, config: BrokerConfig) {
+        self.image_workflow_summary = workflow_summary(&config.image.workflow);
+        self.broker_config = config;
+    }
+}
+
+/// Describe a workflow template without keeping parsed JSON in view state.
+#[must_use]
+pub fn workflow_summary(workflow: &str) -> String {
+    if workflow.is_empty() {
+        return "Built-in checkpoint workflow (checkpoint, prompts, KSampler, decode).".into();
+    }
+    let nodes = serde_json::from_str::<serde_json::Value>(workflow)
+        .ok()
+        .and_then(|graph| graph.as_object().map(|nodes| nodes.len()))
+        .unwrap_or(0);
+    let used: Vec<&str> = chatty_protocol::admin::IMAGE_WORKFLOW_PLACEHOLDERS
+        .into_iter()
+        .filter(|placeholder| workflow.contains(placeholder))
+        .collect();
+    format!(
+        "Custom workflow: {nodes} nodes, {} KiB. Fills {}.",
+        workflow.len().div_ceil(1024),
+        used.join(", ")
+    )
+}
+
+/// Check the shape the broker requires, for early feedback before saving.
+pub fn check_image_workflow(workflow: &str) -> Result<(), String> {
+    if workflow.len() > chatty_protocol::admin::MAX_IMAGE_WORKFLOW_BYTES {
+        return Err("The workflow file is larger than 256 KiB.".into());
+    }
+    let graph: serde_json::Value = serde_json::from_str(workflow)
+        .map_err(|error| format!("The workflow is not valid JSON: {error}"))?;
+    let nodes = graph
+        .as_object()
+        .ok_or("The workflow must be a JSON object of nodes.")?;
+    if nodes.contains_key("nodes") && nodes.contains_key("links") {
+        return Err(
+            "This is a ComfyUI UI workflow. In ComfyUI use Workflow > Export (API) instead.".into(),
+        );
+    }
+    if !workflow.contains("{{prompt}}") {
+        return Err("Put {{prompt}} in the positive prompt text of the workflow.".into());
+    }
+    Ok(())
+}
+
+/// Ask for an API-format workflow file. `None` means the dialog was cancelled.
+fn pick_image_workflow() -> Option<Result<String, String>> {
+    let path = rfd::FileDialog::new()
+        .add_filter("ComfyUI API workflow", &["json"])
+        .pick_file()?;
+    Some((|| {
+        let bytes =
+            std::fs::read(&path).map_err(|error| format!("Could not read the file: {error}"))?;
+        let workflow = String::from_utf8(bytes)
+            .map_err(|_| "The workflow file is not UTF-8 text.".to_owned())?;
+        check_image_workflow(&workflow)?;
+        Ok(workflow)
+    })())
+}
 
 pub const ADMIN_TAB_NAMES: [&str; 6] = ["Broker", "Users", "Models", "Images", "Logs", "Data"];
 
@@ -1596,6 +1740,52 @@ pub mod tests {
         let r5 = requests_for_tab(5, token);
         assert_eq!(r5.len(), 1);
         assert!(matches!(r5[0], Request::AdminReadDatabase { .. }));
+    }
+
+    #[test]
+    fn workflow_files_are_checked_and_summarised() {
+        let api = r#"{"1": {"class_type": "CLIPTextEncode", "inputs": {"text": "{{prompt}}"}},
+            "2": {"class_type": "KSampler", "inputs": {"seed": "{{seed}}"}}}"#;
+        assert!(check_image_workflow(api).is_ok());
+        assert!(
+            check_image_workflow(r#"{"nodes": [], "links": []}"#)
+                .unwrap_err()
+                .contains("Export (API)")
+        );
+        assert!(
+            check_image_workflow(r#"{"1": {}}"#)
+                .unwrap_err()
+                .contains("{{prompt}}")
+        );
+        assert!(check_image_workflow("{").is_err());
+        assert!(workflow_summary("").starts_with("Built-in"));
+        assert_eq!(
+            workflow_summary(api),
+            "Custom workflow: 2 nodes, 1 KiB. Fills {{prompt}}, {{seed}}."
+        );
+        let mut state = AdminState::default();
+        let mut config = state.broker_config.clone();
+        config.image.workflow = api.into();
+        state.set_broker_config(config);
+        assert!(state.image_workflow_summary.contains("2 nodes"));
+        state.update(AdminMessage::ClearImageWorkflow, "t");
+        assert!(state.broker_config.image.workflow.is_empty());
+    }
+
+    #[test]
+    fn image_test_uses_default_prompt_and_runs_once() {
+        let mut state = AdminState::default();
+        let requests = state.update(AdminMessage::TestImageGeneration, "t");
+        assert!(matches!(
+            requests.as_slice(),
+            [Request::GenerateImage { prompt, square: false, .. }] if prompt == DEFAULT_TEST_PROMPT
+        ));
+        assert!(state.image_test.pending);
+        assert!(
+            state
+                .update(AdminMessage::TestImageGeneration, "t")
+                .is_empty()
+        );
     }
 
     #[test]

@@ -107,6 +107,10 @@ pub struct ImageRequest {
     pub guidance: f32,
     pub seed: u64,
     pub timeout_ms: u64,
+    /// Optional provider-specific workflow template with `{{name}}` placeholders.
+    /// Older guests ignore it; `None` selects the guest's built-in workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
 }
 
 /// A finished image. `Get` is fetched by the host from `path`, relative to the
