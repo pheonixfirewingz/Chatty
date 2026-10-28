@@ -2,7 +2,7 @@ use chatty_protocol::conversation::{ChatMessage, Conversation};
 use chatty_protocol::response::GenerationStatus;
 use chatty_protocol::{Character, GenerationContext};
 use iced::widget::{
-    Id, Space, button, canvas, column, container, image, mouse_area, row, scrollable, text,
+    Id, Space, button, canvas, column, container, image, mouse_area, row, scrollable, stack, text,
     text_input, tooltip,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, font};
@@ -62,6 +62,8 @@ pub enum ConversationMessage {
     OpenLink(String),
     /// Hovering over a chat message bubble.
     HoverMessage(Option<String>),
+    /// Copy text to the system clipboard.
+    CopyText(String),
     /// Illustrate the scene; a non-empty composer input is used as the prompt.
     GenerateSceneImage,
     /// Cancel the pending scene image.
@@ -107,7 +109,6 @@ pub struct ConversationViewState<'a> {
     pub hovered_message_id: Option<&'a str>,
     pub sidebar_visible: bool,
     pub available_size: iced::Size,
-    pub light_mode: bool,
     pub glass_mode: bool,
     /// Loaded PNG bytes for recent image messages, keyed by message ID.
     pub message_images: &'a HashMap<String, Vec<u8>>,
@@ -121,7 +122,6 @@ pub struct NewChatViewState<'a> {
     pub characters: &'a [Character],
     pub selected_character_id: Option<&'a str>,
     pub title: &'a str,
-    pub light_mode: bool,
     pub glass_mode: bool,
 }
 
@@ -239,7 +239,6 @@ pub fn character_avatar_view<'a, Message: 'a>(
 #[must_use]
 pub fn emotion_portrait_card<'a, Message: 'a>(
     portrait: &(&'a str, &'a str, &'a str, &'a [u8]),
-    light_mode: bool,
     glass_mode: bool,
     compact: bool,
 ) -> Element<'a, Message> {
@@ -247,20 +246,16 @@ pub fn emotion_portrait_card<'a, Message: 'a>(
     let img_size = if compact { 80.0 } else { 140.0 };
 
     let avatar = character_avatar_view(name, Some(data), img_size);
-    let title = text(name).size(13).color(if light_mode {
-        Color::from_rgb(0.1, 0.1, 0.2)
-    } else {
-        Color::WHITE
-    });
+    let title = text(name).size(13).color(Color::WHITE);
     let emotion_label = text(format!("Emotion: {label}"))
         .size(11)
-        .color(crate::ui::secondary_text_color(light_mode));
+        .color(crate::ui::SECONDARY_TEXT);
 
     let card_content = column![avatar, Space::new().height(4), title, emotion_label]
         .align_x(Alignment::Center)
         .spacing(2);
 
-    card(card_content, light_mode, glass_mode)
+    card(card_content, glass_mode)
         .width(Length::Fixed(if compact { 110.0 } else { 168.0 }))
         .into()
 }
@@ -275,7 +270,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
     is_editing: bool,
     editing_content: &'a str,
     is_hovered: bool,
-    light_mode: bool,
     glass_mode: bool,
     on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
 ) -> Element<'a, Message> {
@@ -295,7 +289,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
         let cancel_btn = button(text("Cancel").size(12))
             .padding([5, 12])
             .on_press(on_msg(ConversationMessage::CancelMessageEdit))
-            .style(crate::ui::secondary_button_style(light_mode));
+            .style(crate::ui::secondary_button_style());
 
         let actions = row![save_btn, cancel_btn, text("Esc to cancel").size(11)]
             .spacing(8)
@@ -304,7 +298,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
         return container(column![input_box, actions].spacing(8))
             .padding(12)
             .max_width(620)
-            .style(move |_| card_style(light_mode, glass_mode))
+            .style(move |_| card_style(glass_mode))
             .into();
     }
 
@@ -331,7 +325,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
                         content: edit_content.clone(),
                     })
                 }),
-                light_mode,
             );
 
             let del_id = message.id.clone();
@@ -339,7 +332,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
                 MessageIcon::Delete,
                 "Delete message",
                 is_hovered.then(|| on_msg(ConversationMessage::DeleteMessage(del_id))),
-                light_mode,
             );
 
             row![edit_btn, del_btn]
@@ -370,7 +362,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
             weight: font::Weight::Bold,
             ..Default::default()
         })
-        .color(crate::ui::accent_text_color(light_mode));
+        .color(crate::ui::ACCENT_TEXT);
 
     let mut header_row = row![author_header].spacing(8).align_y(Alignment::Center);
 
@@ -386,7 +378,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
                     content: edit_content.clone(),
                 })
             }),
-            light_mode,
         );
 
         let author_id_opt = &message.author_id;
@@ -399,7 +390,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
                     author_id: author_id_opt.clone(),
                 })
             }),
-            light_mode,
         );
 
         let regen_id = message.id.clone();
@@ -407,7 +397,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
             MessageIcon::Regenerate,
             "Regenerate reply",
             is_hovered.then(|| on_msg(ConversationMessage::RegenerateMessage(regen_id))),
-            light_mode,
         );
 
         let del_id = message.id.clone();
@@ -415,7 +404,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
             MessageIcon::Delete,
             "Delete message",
             is_hovered.then(|| on_msg(ConversationMessage::DeleteMessage(del_id))),
-            light_mode,
         );
 
         let mut actions = row![speak_btn, regen_btn, edit_btn, del_btn].spacing(4);
@@ -446,7 +434,6 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
                         variant_id: prev_v_id,
                     })
                 }),
-                light_mode,
             );
 
             let msg_id2 = message.id.clone();
@@ -460,13 +447,12 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
                         variant_id: next_v_id,
                     })
                 }),
-                light_mode,
             );
 
             let counter = text(format!("{}/{}", current_variant + 1, total))
                 .size(11)
                 .color(if is_hovered {
-                    crate::ui::palette(light_mode).text
+                    crate::ui::PALETTE.text
                 } else {
                     Color::TRANSPARENT
                 });
@@ -489,7 +475,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
             .padding(10)
             .max_width(700)
             .width(Length::Fill)
-            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
+            .style(move |_| crate::ui::assistant_chat_bubble_style(glass_mode)),
     )
     .on_enter(on_msg(ConversationMessage::HoverMessage(Some(
         msg_id_enter,
@@ -499,46 +485,63 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
     row![area].width(Length::Fill).into()
 }
 
-/// Generated scene image with its prompt as a caption.
+/// Generated scene image; hovering shows its prompt with a copy button.
 fn render_image_message<'a, Message: Clone + 'a>(
     message: &'a ChatMessage,
     png: Option<&[u8]>,
     is_hovered: bool,
-    light_mode: bool,
     glass_mode: bool,
     on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
 ) -> Element<'a, Message> {
     let picture: Element<'a, Message> = match png.and_then(image_handle) {
-        Some(handle) => image(handle)
-            .width(Length::Fill)
-            .content_fit(iced::ContentFit::Contain)
-            .into(),
+        Some(handle) => {
+            let picture = image(handle)
+                .width(Length::Fill)
+                .content_fit(iced::ContentFit::Contain);
+            if is_hovered {
+                let copy = message_action_button(
+                    MessageIcon::Copy,
+                    "Copy prompt",
+                    Some(on_msg(ConversationMessage::CopyText(
+                        message.content.clone(),
+                    ))),
+                );
+                let prompt = container(
+                    row![text(&message.content).size(12).width(Length::Fill), copy]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                )
+                .padding(10)
+                .style(crate::ui::tooltip_style);
+                stack![
+                    picture,
+                    container(prompt)
+                        .padding(8)
+                        .height(Length::Fill)
+                        .align_bottom(Length::Fill),
+                ]
+                .into()
+            } else {
+                picture.into()
+            }
+        }
         None => text("Loading image…")
             .size(12)
-            .color(crate::ui::secondary_text_color(light_mode))
+            .color(crate::ui::SECONDARY_TEXT)
             .into(),
     };
     let delete = message_action_button(
         MessageIcon::Delete,
         "Delete image",
         is_hovered.then(|| on_msg(ConversationMessage::DeleteMessage(message.id.clone()))),
-        light_mode,
     );
-    let caption = row![
-        text(&message.content)
-            .size(12)
-            .color(crate::ui::secondary_text_color(light_mode))
-            .width(Length::Fill),
-        delete,
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let actions = row![Space::new().width(Length::Fill), delete].align_y(Alignment::Center);
     let message_id = message.id.clone();
     mouse_area(
-        container(column![picture, caption].spacing(6))
+        container(column![actions, picture].spacing(4))
             .padding(10)
             .max_width(560)
-            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
+            .style(move |_| crate::ui::assistant_chat_bubble_style(glass_mode)),
     )
     .on_enter(on_msg(ConversationMessage::HoverMessage(Some(message_id))))
     .on_exit(on_msg(ConversationMessage::HoverMessage(None)))
@@ -549,11 +552,10 @@ fn message_action_button<'a, Message: Clone + 'a>(
     icon: MessageIcon,
     label: &'static str,
     action: Option<Message>,
-    light_mode: bool,
 ) -> Element<'a, Message> {
     let visible = action.is_some();
     let color = if visible {
-        crate::ui::palette(light_mode).text
+        crate::ui::PALETTE.text
     } else {
         Color::TRANSPARENT
     };
@@ -565,7 +567,7 @@ fn message_action_button<'a, Message: Clone + 'a>(
         .height(24)
         .padding(7.5)
         .on_press_maybe(action)
-        .style(message_action_style(light_mode, visible));
+        .style(message_action_style(visible));
     tooltip(
         control,
         container(text(label).size(12))
@@ -577,13 +579,10 @@ fn message_action_button<'a, Message: Clone + 'a>(
 }
 
 // Hidden action buttons retain their measured size so hover never reflows text.
-fn message_action_style(
-    light_mode: bool,
-    visible: bool,
-) -> impl Fn(&Theme, button::Status) -> button::Style {
+fn message_action_style(visible: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         if visible {
-            crate::ui::chat_action_button_style(light_mode, false)(theme, status)
+            crate::ui::chat_action_button_style(false)(theme, status)
         } else {
             button::Style {
                 background: None,
@@ -602,15 +601,14 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
     view: &ConversationViewState<'a>,
     on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
 ) -> Element<'a, Message> {
-    let light_mode = view.light_mode;
     let glass_mode = view.glass_mode;
     if view.selected_conversation.is_none() {
         let heading = text("Who will you meet today?")
             .size(26)
-            .color(crate::ui::accent_text_color(light_mode));
+            .color(crate::ui::ACCENT_TEXT);
         let subtitle = text("Pick a character, set the scene, and start a conversation.")
             .size(14)
-            .color(crate::ui::secondary_text_color(light_mode));
+            .color(crate::ui::SECONDARY_TEXT);
 
         let start_btn = button(text("Start a new chat").size(15).font(font::Font {
             weight: font::Weight::Bold,
@@ -624,7 +622,6 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             column![heading, subtitle, Space::new().height(12), start_btn]
                 .align_x(Alignment::Center)
                 .spacing(8),
-            light_mode,
             glass_mode,
         )
         .max_width(480);
@@ -682,7 +679,6 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
                 msg,
                 view.message_images.get(&msg.id).map(Vec::as_slice),
                 is_hovered,
-                light_mode,
                 glass_mode,
                 on_msg,
             ));
@@ -695,7 +691,6 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             is_editing,
             view.editing_message_content,
             is_hovered,
-            view.light_mode,
             view.glass_mode,
             on_msg,
         ));
@@ -705,7 +700,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
         let author_name = character_name(view.characters, view.typing_character);
         let header = text(format!("{author_name}:"))
             .size(13)
-            .color(crate::ui::accent_text_color(light_mode));
+            .color(crate::ui::ACCENT_TEXT);
         let md = render_markdown(&view.markdown.stream, move |uri| {
             on_msg(ConversationMessage::OpenLink(uri.to_string()))
         });
@@ -713,7 +708,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
         let stream_content = container(column![header, Space::new().height(2), md].spacing(2))
             .padding(10)
             .max_width(700)
-            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode));
+            .style(move |_| crate::ui::assistant_chat_bubble_style(glass_mode));
 
         message_list = message_list.push(row![stream_content]);
     }
@@ -727,13 +722,9 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             None => format!("{typing_name} is typing…"),
         };
         message_list = message_list.push(
-            container(
-                text(status_text)
-                    .size(12)
-                    .color(crate::ui::secondary_text_color(light_mode)),
-            )
-            .padding(8)
-            .style(move |_| crate::ui::assistant_chat_bubble_style(light_mode, glass_mode)),
+            container(text(status_text).size(12).color(crate::ui::SECONDARY_TEXT))
+                .padding(8)
+                .style(move |_| crate::ui::assistant_chat_bubble_style(glass_mode)),
         );
     }
 
@@ -797,7 +788,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
 
     let hint = text("Enter to send")
         .size(12)
-        .color(crate::ui::secondary_text_color(light_mode));
+        .color(crate::ui::SECONDARY_TEXT);
 
     let mut composer_row = row![composer_input].spacing(8).align_y(Alignment::Center);
     match view.scene_image {
@@ -816,7 +807,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
                             .is_none()
                             .then(|| on_msg(ConversationMessage::GenerateSceneImage)),
                     )
-                    .style(crate::ui::secondary_button_style(light_mode)),
+                    .style(crate::ui::secondary_button_style()),
                 container(text(label).size(12))
                     .padding(6)
                     .style(crate::ui::tooltip_style),
@@ -828,18 +819,13 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
                 button(text("Cancel image").size(13))
                     .padding([10, 14])
                     .on_press(on_msg(ConversationMessage::CancelSceneImage))
-                    .style(crate::ui::secondary_button_style(light_mode)),
+                    .style(crate::ui::secondary_button_style()),
             );
         }
     }
     let composer_row = composer_row.push(action_btn);
 
-    let composer_box = card(
-        column![composer_row, hint].spacing(4),
-        light_mode,
-        glass_mode,
-    )
-    .width(Length::Fill);
+    let composer_box = card(column![composer_row, hint].spacing(4), glass_mode).width(Length::Fill);
 
     let mut chat_content = column![]
         .spacing(8)
@@ -853,9 +839,9 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
 
     chat_content = chat_content.push(scrollable_messages).push(composer_box);
 
-    let chat_bg = crate::ui::chat_panel_background(light_mode, glass_mode);
+    let chat_bg = crate::ui::chat_panel_background(glass_mode);
     if let Some(ref portrait) = emotion_portrait {
-        let emotion_card = emotion_portrait_card(portrait, light_mode, glass_mode, false);
+        let emotion_card = emotion_portrait_card(portrait, glass_mode, false);
         let content_with_portrait = row![chat_content, Space::new().width(12), emotion_card]
             .width(Length::Fill)
             .height(Length::Fill);
@@ -890,15 +876,12 @@ pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
     if !view.is_open {
         return None;
     }
-    let light_mode = view.light_mode;
     let _glass_mode = view.glass_mode;
 
-    let title_text = text("New chat")
-        .size(20)
-        .color(crate::ui::accent_text_color(light_mode));
+    let title_text = text("New chat").size(20).color(crate::ui::ACCENT_TEXT);
     let desc_text = text("Choose a character for a private chat.")
         .size(13)
-        .color(crate::ui::secondary_text_color(light_mode));
+        .color(crate::ui::SECONDARY_TEXT);
 
     let name_label = text("CONVERSATION NAME").size(11);
     let name_input = text_input("Optional — we can name it for you", view.title)
@@ -926,7 +909,7 @@ pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
             &c.personality
         })
         .size(11)
-        .color(crate::ui::secondary_text_color(light_mode));
+        .color(crate::ui::SECONDARY_TEXT);
 
         let char_info = column![name_t, summary_t].spacing(2);
 
@@ -936,7 +919,7 @@ pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
                 .color(if is_selected {
                     COLOR_PRIMARY
                 } else {
-                    crate::ui::secondary_text_color(light_mode)
+                    crate::ui::SECONDARY_TEXT
                 });
 
         let card_row = row![
@@ -1029,7 +1012,7 @@ pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
     let cancel_btn = button(text("Cancel").size(13))
         .padding([8, 16])
         .on_press(on_msg(ConversationMessage::CloseNewChatDialog))
-        .style(crate::ui::secondary_button_style(light_mode));
+        .style(crate::ui::secondary_button_style());
 
     let dialog_content = column![
         title_text,
@@ -1182,7 +1165,6 @@ mod tests {
             hovered_message_id: None,
             sidebar_visible: true,
             available_size: iced::Size::new(800.0, 720.0),
-            light_mode: false,
             glass_mode: false,
             message_images: &HashMap::new(),
             scene_image: ImageGeneration::Unavailable,
@@ -1200,7 +1182,6 @@ mod tests {
             characters: &chars,
             selected_character_id: Some("c1"),
             title: "My Chat",
-            light_mode: false,
             glass_mode: false,
         };
 
@@ -1229,7 +1210,6 @@ mod tests {
             hovered_message_id: None,
             sidebar_visible: false,
             available_size: iced::Size::new(800.0, 720.0),
-            light_mode: false,
             glass_mode: false,
             message_images: &HashMap::new(),
             scene_image: ImageGeneration::Unavailable,
@@ -1281,7 +1261,6 @@ mod tests {
             hovered_message_id: None,
             sidebar_visible: false,
             available_size: iced::Size::new(800.0, 720.0),
-            light_mode: false,
             glass_mode: false,
             message_images: &HashMap::new(),
             scene_image: ImageGeneration::Unavailable,

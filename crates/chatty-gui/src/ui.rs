@@ -31,22 +31,8 @@ pub const COLOR_PRIMARY_STRONG: Color = Color::from_rgb(
 /// Contrasting text/icon color on primary backgrounds (#ffffff)
 pub const COLOR_ON_PRIMARY: Color = Color::WHITE;
 
-/// Light mode theme palette
-pub const LIGHT_PALETTE: iced::theme::Palette = iced::theme::Palette {
-    background: Color::from_rgb(
-        0xf6 as f32 / 255.0,
-        0xf7 as f32 / 255.0,
-        0xfb as f32 / 255.0,
-    ),
-    text: Color::from_rgb(0.08, 0.10, 0.15),
-    primary: COLOR_PRIMARY,
-    success: Color::from_rgb(0.13, 0.77, 0.37),
-    warning: Color::from_rgb(0.96, 0.62, 0.04),
-    danger: Color::from_rgb(0.94, 0.27, 0.27),
-};
-
-/// Dark mode theme palette
-pub const DARK_PALETTE: iced::theme::Palette = iced::theme::Palette {
+/// Theme palette: Chatty has a single dark glass appearance.
+pub const PALETTE: iced::theme::Palette = iced::theme::Palette {
     background: Color::from_rgb(
         0x0b as f32 / 255.0,
         0x0f as f32 / 255.0,
@@ -59,23 +45,10 @@ pub const DARK_PALETTE: iced::theme::Palette = iced::theme::Palette {
     danger: Color::from_rgb(0.94, 0.27, 0.27),
 };
 
-/// Returns the palette for the given light/dark mode.
+/// Returns the Chatty theme.
 #[must_use]
-pub fn palette(light_mode: bool) -> iced::theme::Palette {
-    if light_mode {
-        LIGHT_PALETTE
-    } else {
-        DARK_PALETTE
-    }
-}
-
-/// Returns a Theme configured for Chatty with either Light or Dark mode.
-#[must_use]
-pub fn theme(light_mode: bool) -> Theme {
-    Theme::custom(
-        if light_mode { "chatty-light" } else { "chatty-dark" },
-        palette(light_mode),
-    )
+pub fn theme() -> Theme {
+    Theme::custom("chatty-dark", PALETTE)
 }
 
 // -----------------------------------------------------------------------------
@@ -117,40 +90,15 @@ pub fn glass_background(base: Color) -> Background {
     Background::Color(base)
 }
 
-/// Detects light mode from a theme palette, for styling sites that only carry
-/// the theme (tooltips, catalog styles) and not the app state.
+/// Calculates the surface background color based on glass mode.
 #[must_use]
-pub fn is_light_theme(theme: &Theme) -> bool {
-    let bg = theme.palette().background;
-    (bg.r * 0.299 + bg.g * 0.587 + bg.b * 0.114) > 0.5
-}
-
-/// Calculates the surface background color based on light/dark mode and glass mode.
-#[must_use]
-pub fn surface_color(light_mode: bool, glass_mode: bool) -> Color {
+pub fn surface_color(glass_mode: bool) -> Color {
     if glass_mode {
-        let alpha = glass_alpha(TRANSPARENCY);
-
-        if light_mode {
-            Color::from_rgba(
-                246.0 / 255.0,
-                248.0 / 255.0,
-                1.0,
-                alpha,
-            )
-        } else {
-            Color::from_rgba(
-                10.0 / 255.0,
-                16.0 / 255.0,
-                29.0 / 255.0,
-                alpha,
-            )
-        }
-    } else if light_mode {
-        Color::from_rgb(
-            246.0 / 255.0,
-            247.0 / 255.0,
-            251.0 / 255.0,
+        Color::from_rgba(
+            10.0 / 255.0,
+            16.0 / 255.0,
+            29.0 / 255.0,
+            glass_alpha(TRANSPARENCY),
         )
     } else {
         Color::from_rgb(
@@ -162,45 +110,23 @@ pub fn surface_color(light_mode: bool, glass_mode: bool) -> Color {
 }
 
 /// Secondary text stays readable on both raised plates and navigation glass.
-#[must_use]
-pub fn secondary_text_color(light_mode: bool) -> Color {
-    if light_mode {
-        Color::from_rgb(0.25, 0.29, 0.36)
-    } else {
-        Color::from_rgb(0.77, 0.81, 0.88)
-    }
-}
+pub const SECONDARY_TEXT: Color = Color::from_rgb(0.77, 0.81, 0.88);
 
-/// Theme-aware accent for small text on light and dark materials.
-#[must_use]
-pub fn accent_text_color(light_mode: bool) -> Color {
-    if light_mode {
-        COLOR_PRIMARY_STRONG
-    } else {
-        Color::from_rgb(0.73, 0.76, 1.0)
-    }
-}
+/// Accent for small text on glass materials.
+pub const ACCENT_TEXT: Color = Color::from_rgb(0.73, 0.76, 1.0);
 
 /// Base pane of glass: the window's own background, with a uniform tint.
 #[must_use]
-pub fn surface_background(light_mode: bool, glass_mode: bool) -> Background {
-    let base = surface_color(light_mode, glass_mode);
-    glass_background(base)
+pub fn surface_background(glass_mode: bool) -> Background {
+    glass_background(surface_color(glass_mode))
 }
 
 /// Overlay tint for a panel resting on the window glass. `strength` is how much
 /// the panel frosts over the pane behind it; solid mode is fully opaque.
 #[must_use]
-pub fn panel_tint(light_mode: bool, glass_mode: bool, strength: f32) -> Color {
+pub fn panel_tint(glass_mode: bool, strength: f32) -> Color {
     if glass_mode {
-        let a = strength.clamp(0.0, 1.0);
-        if light_mode {
-            Color::from_rgba(1.0, 1.0, 1.0, a)
-        } else {
-            Color::from_rgba(6.0 / 255.0, 11.0 / 255.0, 22.0 / 255.0, a)
-        }
-    } else if light_mode {
-        Color::from_rgb(246.0 / 255.0, 247.0 / 255.0, 251.0 / 255.0)
+        Color::from_rgba(6.0 / 255.0, 11.0 / 255.0, 22.0 / 255.0, strength.clamp(0.0, 1.0))
     } else {
         Color::from_rgb(11.0 / 255.0, 15.0 / 255.0, 23.0 / 255.0)
     }
@@ -209,35 +135,20 @@ pub fn panel_tint(light_mode: bool, glass_mode: bool, strength: f32) -> Color {
 /// Background for the conversation column: a lighter frosting than the sidebar
 /// so desktop detail remains visible between the readable message plates.
 #[must_use]
-pub fn chat_panel_background(light_mode: bool, glass_mode: bool) -> Background {
+pub fn chat_panel_background(glass_mode: bool) -> Background {
     let strength = 0.0;
-    glass_background(panel_tint(light_mode, glass_mode, strength))
+    glass_background(panel_tint(glass_mode, strength))
 }
 
 /// Calculates the raised surface background color (cards, dialogs, composer).
 #[must_use]
-pub fn surface_raised_color(light_mode: bool, glass_mode: bool) -> Color {
+pub fn surface_raised_color(glass_mode: bool) -> Color {
     if glass_mode {
-        if light_mode {
-            Color::from_rgba(
-                249.0 / 255.0,
-                251.0 / 255.0,
-                1.0,
-                235.0 / 255.0,
-            )
-        } else {
-            Color::from_rgba(
-                18.0 / 255.0,
-                26.0 / 255.0,
-                44.0 / 255.0,
-                238.0 / 255.0,
-            )
-        }
-    } else if light_mode {
-        Color::from_rgb(
-            235.0 / 255.0,
-            237.0 / 255.0,
-            245.0 / 255.0,
+        Color::from_rgba(
+            18.0 / 255.0,
+            26.0 / 255.0,
+            44.0 / 255.0,
+            238.0 / 255.0,
         )
     } else {
         Color::from_rgb(
@@ -250,9 +161,8 @@ pub fn surface_raised_color(light_mode: bool, glass_mode: bool) -> Color {
 
 /// Raised plate background: cards, bubbles and dialogs with a uniform tint.
 #[must_use]
-pub fn raised_background(light_mode: bool, glass_mode: bool) -> Background {
-    let base = surface_raised_color(light_mode, glass_mode);
-    glass_background(base)
+pub fn raised_background(glass_mode: bool) -> Background {
+    glass_background(surface_raised_color(glass_mode))
 }
 
 /// Calculates the border color for cards, panels, and frames.
@@ -260,23 +170,13 @@ pub fn raised_background(light_mode: bool, glass_mode: bool) -> Background {
 /// In glass mode this is the rim light: a bright hairline catching the edge of
 /// the pane.
 #[must_use]
-pub fn border_color(light_mode: bool, glass_mode: bool) -> Color {
+pub fn border_color(glass_mode: bool) -> Color {
     if glass_mode {
-        if light_mode {
-            Color::from_rgba(1.0, 1.0, 1.0, 235.0 / 255.0)
-        } else {
-            Color::from_rgba(
-                199.0 / 255.0,
-                214.0 / 255.0,
-                1.0,
-                87.0 / 255.0,
-            )
-        }
-    } else if light_mode {
-        Color::from_rgb(
-            218.0 / 255.0,
-            224.0 / 255.0,
-            233.0 / 255.0,
+        Color::from_rgba(
+            199.0 / 255.0,
+            214.0 / 255.0,
+            1.0,
+            87.0 / 255.0,
         )
     } else {
         Color::from_rgb(
@@ -293,18 +193,44 @@ pub fn input_style(
     theme: &Theme,
     status: iced::widget::text_input::Status,
 ) -> iced::widget::text_input::Style {
-    let light_mode = is_light_theme(theme);
     let mut style = iced::widget::text_input::default(theme, status);
     style.border.radius = 12.0.into();
     let focused = matches!(status, iced::widget::text_input::Status::Focused { .. });
     style.border.width = if focused { 1.0 } else { 0.0 };
     style.border.color = if focused {
-        accent_text_color(light_mode)
+        ACCENT_TEXT
     } else {
         Color::TRANSPARENT
     };
-    style.placeholder = secondary_text_color(light_mode);
+    style.placeholder = SECONDARY_TEXT;
     style
+}
+
+/// Multi-line counterpart of [`input_style`].
+#[must_use]
+pub fn editor_style(
+    theme: &Theme,
+    status: iced::widget::text_editor::Status,
+) -> iced::widget::text_editor::Style {
+    use iced::widget::{text_editor, text_input};
+    let input = input_style(
+        theme,
+        match status {
+            text_editor::Status::Active => text_input::Status::Active,
+            text_editor::Status::Hovered => text_input::Status::Hovered,
+            text_editor::Status::Focused { is_hovered } => {
+                text_input::Status::Focused { is_hovered }
+            }
+            text_editor::Status::Disabled => text_input::Status::Disabled,
+        },
+    );
+    text_editor::Style {
+        background: input.background,
+        border: input.border,
+        placeholder: input.placeholder,
+        value: input.value,
+        selection: input.selection,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -313,9 +239,9 @@ pub fn input_style(
 
 /// Container style for the root window: the pane of glass the app is etched from.
 #[must_use]
-pub fn window_backdrop_style(light_mode: bool, glass_mode: bool) -> container::Style {
+pub fn window_backdrop_style(glass_mode: bool) -> container::Style {
     container::Style {
-        background: Some(surface_background(light_mode, glass_mode)),
+        background: Some(surface_background(glass_mode)),
         text_color: None,
         border: Border::default(),
         shadow: Shadow::default(),
@@ -325,21 +251,17 @@ pub fn window_backdrop_style(light_mode: bool, glass_mode: bool) -> container::S
 
 /// Container style for cards.
 #[must_use]
-pub fn card_style(light_mode: bool, glass_mode: bool) -> container::Style {
+pub fn card_style(glass_mode: bool) -> container::Style {
     container::Style {
-        background: Some(raised_background(light_mode, glass_mode)),
+        background: Some(raised_background(glass_mode)),
         text_color: None,
         border: Border {
-            color: border_color(light_mode, glass_mode),
+            color: border_color(glass_mode),
             width: 0.0,
             radius: 14.0.into(),
         },
         shadow: Shadow {
-            color: if light_mode {
-                Color::from_rgba(15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.12)
-            } else {
-                Color::from_rgba(0.0, 0.0, 0.0, 0.42)
-            },
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.42),
             offset: Vector::new(0.0, 6.0),
             blur_radius: 18.0,
         },
@@ -352,20 +274,14 @@ pub fn card_style(light_mode: bool, glass_mode: bool) -> container::Style {
 /// Popups sit closest to the viewer, so they are almost fully cured glass:
 /// opaque enough to read against without a visible outline.
 #[must_use]
-pub fn modal_dialog_frame_style(light_mode: bool, glass_mode: bool) -> container::Style {
+pub fn modal_dialog_frame_style(glass_mode: bool) -> container::Style {
     let bg = if glass_mode {
-        if light_mode {
-            Color::from_rgba(252.0 / 255.0, 253.0 / 255.0, 1.0, 244.0 / 255.0)
-        } else {
-            Color::from_rgba(
-                14.0 / 255.0,
-                20.0 / 255.0,
-                34.0 / 255.0,
-                246.0 / 255.0,
-            )
-        }
-    } else if light_mode {
-        Color::WHITE
+        Color::from_rgba(
+            14.0 / 255.0,
+            20.0 / 255.0,
+            34.0 / 255.0,
+            246.0 / 255.0,
+        )
     } else {
         Color::from_rgb(
             17.0 / 255.0,
@@ -378,16 +294,12 @@ pub fn modal_dialog_frame_style(light_mode: bool, glass_mode: bool) -> container
         background: Some(glass_background(bg)),
         text_color: None,
         border: Border {
-            color: border_color(light_mode, glass_mode),
+            color: border_color(glass_mode),
             width: 0.0,
             radius: 20.0.into(),
         },
         shadow: Shadow {
-            color: if light_mode {
-                Color::from_rgba(15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.30)
-            } else {
-                Color::from_rgba(0.0, 0.0, 0.0, 0.62)
-            },
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.62),
             offset: Vector::new(0.0, 24.0),
             blur_radius: 64.0,
         },
@@ -397,10 +309,9 @@ pub fn modal_dialog_frame_style(light_mode: bool, glass_mode: bool) -> container
 
 /// Container style for modal scrim background dimming.
 #[must_use]
-pub fn modal_scrim_style(light_mode: bool) -> container::Style {
-    let alpha = if light_mode { 0.32 } else { 0.55 };
+pub fn modal_scrim_style() -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, alpha))),
+        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
         text_color: None,
         border: Border::default(),
         shadow: Shadow::default(),
@@ -412,26 +323,17 @@ pub fn modal_scrim_style(light_mode: bool) -> container::Style {
 /// surface mode the rest of the app is in.
 #[must_use]
 pub fn tooltip_style(theme: &Theme) -> container::Style {
-    let light_mode = is_light_theme(theme);
-    let base = if light_mode {
-        Color::from_rgba(252.0 / 255.0, 253.0 / 255.0, 1.0, 245.0 / 255.0)
-    } else {
-        Color::from_rgba(12.0 / 255.0, 17.0 / 255.0, 28.0 / 255.0, 245.0 / 255.0)
-    };
+    let base = Color::from_rgba(12.0 / 255.0, 17.0 / 255.0, 28.0 / 255.0, 245.0 / 255.0);
     container::Style {
         background: Some(glass_background(base)),
         text_color: Some(theme.palette().text),
         border: Border {
-            color: border_color(light_mode, true),
+            color: border_color(true),
             width: 0.0,
             radius: 10.0.into(),
         },
         shadow: Shadow {
-            color: if light_mode {
-                Color::from_rgba(15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.22)
-            } else {
-                Color::from_rgba(0.0, 0.0, 0.0, 0.50)
-            },
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.50),
             offset: Vector::new(0.0, 8.0),
             blur_radius: 24.0,
         },
@@ -462,23 +364,19 @@ pub fn user_chat_bubble_style() -> container::Style {
 
 /// Container style for assistant chat bubbles.
 #[must_use]
-pub fn assistant_chat_bubble_style(light_mode: bool, glass_mode: bool) -> container::Style {
-    let mut base = surface_raised_color(light_mode, glass_mode);
+pub fn assistant_chat_bubble_style(glass_mode: bool) -> container::Style {
+    let mut base = surface_raised_color(glass_mode);
     base.a *= 0.9;
     container::Style {
         background: Some(glass_background(base)),
         text_color: None,
         border: Border {
-            color: border_color(light_mode, glass_mode),
+            color: border_color(glass_mode),
             width: 0.0,
             radius: 18.0.into(),
         },
         shadow: Shadow {
-            color: if light_mode {
-                Color::from_rgba(15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.08)
-            } else {
-                Color::from_rgba(0.0, 0.0, 0.0, 0.34)
-            },
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.34),
             offset: Vector::new(0.0, 3.0),
             blur_radius: 12.0,
         },
@@ -488,27 +386,22 @@ pub fn assistant_chat_bubble_style(light_mode: bool, glass_mode: bool) -> contai
 
 /// Container style for sidebar panels.
 #[must_use]
-pub fn sidebar_panel_style(light_mode: bool, glass_mode: bool) -> container::Style {
-    let strength = if light_mode { 0.78 } else { 0.76 };
+pub fn sidebar_panel_style(glass_mode: bool) -> container::Style {
     let base = if glass_mode {
-        panel_tint(light_mode, glass_mode, strength)
+        panel_tint(glass_mode, 0.76)
     } else {
-        surface_color(light_mode, glass_mode)
+        surface_color(glass_mode)
     };
     container::Style {
         background: Some(glass_background(base)),
         text_color: None,
         border: Border {
-            color: border_color(light_mode, glass_mode),
+            color: border_color(glass_mode),
             width: 0.0,
             radius: 18.0.into(),
         },
         shadow: Shadow {
-            color: if light_mode {
-                Color::from_rgba(15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.10)
-            } else {
-                Color::from_rgba(0.0, 0.0, 0.0, 0.38)
-            },
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.38),
             offset: Vector::new(4.0, 0.0),
             blur_radius: 24.0,
         },
@@ -523,36 +416,33 @@ pub fn sidebar_panel_style(light_mode: bool, glass_mode: bool) -> container::Sty
 /// Creates a card container with standard padding and rounded border.
 pub fn card<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
-    light_mode: bool,
     glass_mode: bool,
 ) -> container::Container<'a, Message> {
     container(content)
         .padding(12)
-        .style(move |_| card_style(light_mode, glass_mode))
+        .style(move |_| card_style(glass_mode))
 }
 
 /// Creates a modal dialog frame container.
 pub fn modal_dialog_frame<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
-    light_mode: bool,
     glass_mode: bool,
 ) -> container::Container<'a, Message> {
     container(content)
         .padding(16)
-        .style(move |_| modal_dialog_frame_style(light_mode, glass_mode))
+        .style(move |_| modal_dialog_frame_style(glass_mode))
 }
 
 /// Creates a modal background scrim container that fills available space.
 pub fn modal_scrim<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
-    light_mode: bool,
 ) -> container::Container<'a, Message> {
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-        .style(move |_| modal_scrim_style(light_mode))
+        .style(move |_| modal_scrim_style())
 }
 
 /// Creates a styled user message chat bubble.
@@ -567,23 +457,21 @@ pub fn user_chat_bubble<'a, Message: 'a>(
 /// Creates a styled assistant message chat bubble.
 pub fn assistant_chat_bubble<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
-    light_mode: bool,
     glass_mode: bool,
 ) -> container::Container<'a, Message> {
     container(content)
         .padding(Padding::from([7, 15]))
-        .style(move |_| assistant_chat_bubble_style(light_mode, glass_mode))
+        .style(move |_| assistant_chat_bubble_style(glass_mode))
 }
 
 /// Creates a styled sidebar panel container.
 pub fn sidebar_panel<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
-    light_mode: bool,
     glass_mode: bool,
 ) -> container::Container<'a, Message> {
     container(content)
         .padding(12)
-        .style(move |_| sidebar_panel_style(light_mode, glass_mode))
+        .style(move |_| sidebar_panel_style(glass_mode))
 }
 
 // -----------------------------------------------------------------------------
@@ -638,8 +526,18 @@ pub enum MessageIcon {
     Regenerate,
     Edit,
     Delete,
+    Copy,
     Previous,
     Next,
+    Add,
+    Save,
+    Import,
+    Export,
+    Sparkle,
+    Emotions,
+    Image,
+    Folder,
+    Star,
 }
 
 /// Kind of vector icon.
@@ -1049,6 +947,99 @@ fn draw_message_icon(frame: &mut Frame, icon: MessageIcon, center: Point, stroke
                 b.line_to(point(x, 5.0));
             }
         }
+        MessageIcon::Copy => {
+            b.rectangle(point(-4.0, -4.0), Size::new(11.0, 12.0));
+            b.move_to(point(-7.0, 4.0));
+            b.line_to(point(-7.0, -8.0));
+            b.line_to(point(3.0, -8.0));
+        }
+        MessageIcon::Add => {
+            b.move_to(point(-7.0, 0.0));
+            b.line_to(point(7.0, 0.0));
+            b.move_to(point(0.0, -7.0));
+            b.line_to(point(0.0, 7.0));
+        }
+        MessageIcon::Save => {
+            b.move_to(point(-8.0, -8.0));
+            b.line_to(point(5.0, -8.0));
+            b.line_to(point(8.0, -5.0));
+            b.line_to(point(8.0, 8.0));
+            b.line_to(point(-8.0, 8.0));
+            b.close();
+            b.move_to(point(-4.0, -8.0));
+            b.line_to(point(-4.0, -3.0));
+            b.line_to(point(3.0, -3.0));
+            b.line_to(point(3.0, -8.0));
+            b.rectangle(point(-5.0, 2.0), Size::new(10.0, 6.0));
+        }
+        MessageIcon::Import | MessageIcon::Export => {
+            b.move_to(point(-8.0, 3.0));
+            b.line_to(point(-8.0, 8.0));
+            b.line_to(point(8.0, 8.0));
+            b.line_to(point(8.0, 3.0));
+            let (from, to) = if icon == MessageIcon::Import {
+                (-9.0, 3.0)
+            } else {
+                (4.0, -8.0)
+            };
+            let head = if icon == MessageIcon::Import { -4.0 } else { 4.0 };
+            b.move_to(point(0.0, from));
+            b.line_to(point(0.0, to));
+            b.move_to(point(-4.0, to + head));
+            b.line_to(point(0.0, to));
+            b.line_to(point(4.0, to + head));
+        }
+        MessageIcon::Sparkle => {
+            b.move_to(point(-2.0, -7.0));
+            b.quadratic_curve_to(point(-1.0, 0.0), point(6.0, 1.0));
+            b.quadratic_curve_to(point(-1.0, 2.0), point(-2.0, 9.0));
+            b.quadratic_curve_to(point(-3.0, 2.0), point(-10.0, 1.0));
+            b.quadratic_curve_to(point(-3.0, 0.0), point(-2.0, -7.0));
+            b.move_to(point(7.0, -9.0));
+            b.line_to(point(7.0, -4.0));
+            b.move_to(point(4.5, -6.5));
+            b.line_to(point(9.5, -6.5));
+        }
+        MessageIcon::Emotions => {
+            b.circle(point(0.0, 0.0), 8.5);
+            b.move_to(point(-3.0, -3.5));
+            b.line_to(point(-3.0, -1.5));
+            b.move_to(point(3.0, -3.5));
+            b.line_to(point(3.0, -1.5));
+            b.move_to(point(-4.5, 2.0));
+            b.quadratic_curve_to(point(0.0, 7.0), point(4.5, 2.0));
+        }
+        MessageIcon::Image => {
+            b.rectangle(point(-9.0, -7.0), Size::new(18.0, 14.0));
+            b.move_to(point(-9.0, 5.0));
+            b.line_to(point(-3.0, -1.0));
+            b.line_to(point(1.0, 3.0));
+            b.line_to(point(4.0, 0.0));
+            b.line_to(point(9.0, 5.0));
+            b.circle(point(4.0, -3.0), 1.5);
+        }
+        MessageIcon::Folder => {
+            b.move_to(point(-9.0, -6.0));
+            b.line_to(point(-3.0, -6.0));
+            b.line_to(point(-1.0, -4.0));
+            b.line_to(point(9.0, -4.0));
+            b.line_to(point(9.0, 7.0));
+            b.line_to(point(-9.0, 7.0));
+            b.close();
+        }
+        MessageIcon::Star => {
+            for i in 0..10 {
+                let radius = if i % 2 == 0 { 9.0 } else { 4.0 };
+                let angle = std::f32::consts::PI * (i as f32 / 5.0 - 0.5);
+                let p = point(radius * angle.cos(), radius * angle.sin() + 0.5);
+                if i == 0 {
+                    b.move_to(p);
+                } else {
+                    b.line_to(p);
+                }
+            }
+            b.close();
+        }
         MessageIcon::Read => {
             b.move_to(point(-9.0, -3.0));
             b.line_to(point(-5.0, -3.0));
@@ -1180,6 +1171,52 @@ pub fn sized_icon_button<'a, Message: Clone + 'a>(
     } else {
         btn.into()
     }
+}
+
+/// Fill style of an [`action_icon`] button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Primary,
+    Secondary,
+    Danger,
+}
+
+/// Compact icon-only action button; the tooltip names the action.
+/// `None` disables the button and dims its icon.
+pub fn action_icon<'a, Message: Clone + 'a>(
+    icon: impl Into<IconKind>,
+    label: impl Into<String>,
+    on_press: Option<Message>,
+    tone: Tone,
+) -> Element<'a, Message> {
+    let mut color = match tone {
+        Tone::Secondary => PALETTE.text,
+        Tone::Primary | Tone::Danger => Color::WHITE,
+    };
+    if on_press.is_none() {
+        color.a = 0.4;
+    }
+    let icon = canvas::Canvas::new(VectorIcon::new(icon).with_color(color))
+        .width(18)
+        .height(18);
+    let control = button(icon)
+        .width(32)
+        .height(32)
+        .padding(7)
+        .on_press_maybe(on_press)
+        .style(move |theme: &Theme, status| match tone {
+            Tone::Primary => primary_button_style()(theme, status),
+            Tone::Secondary => secondary_button_style()(theme, status),
+            Tone::Danger => danger_button_style()(theme, status),
+        });
+    tooltip(
+        control,
+        container(text(label.into()).size(12))
+            .padding(Padding::from([4, 8]))
+            .style(tooltip_style),
+        tooltip::Position::Top,
+    )
+    .into()
 }
 
 /// Creates a standard 44x44 footer icon button with hover tooltip.
@@ -1408,23 +1445,23 @@ pub fn primary_button_style() -> impl Fn(&Theme, button::Status) -> button::Styl
 }
 
 /// Style for secondary / standard dialog buttons (Cancel, Close, etc.).
-pub fn secondary_button_style(light_mode: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub fn secondary_button_style() -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let (bg, border_col, text_col) = match status {
             button::Status::Active => (
-                if light_mode { Color::from_rgba(0.0, 0.0, 0.0, 0.06) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.08) },
-                if light_mode { Color::from_rgba(0.0, 0.0, 0.0, 0.14) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.16) },
-                if light_mode { Color::from_rgb(0.1, 0.15, 0.2) } else { Color::from_rgb(0.9, 0.9, 0.95) },
+                Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.16),
+                Color::from_rgb(0.9, 0.9, 0.95),
             ),
             button::Status::Hovered => (
-                if light_mode { Color::from_rgba(0.0, 0.0, 0.0, 0.10) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.14) },
-                if light_mode { Color::from_rgba(0.0, 0.0, 0.0, 0.22) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.26) },
-                if light_mode { Color::from_rgb(0.05, 0.08, 0.12) } else { Color::WHITE },
+                Color::from_rgba(1.0, 1.0, 1.0, 0.14),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.26),
+                Color::WHITE,
             ),
             button::Status::Pressed => (
-                if light_mode { Color::from_rgba(0.0, 0.0, 0.0, 0.15) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.20) },
-                if light_mode { Color::from_rgba(0.0, 0.0, 0.3, 0.3) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.35) },
-                if light_mode { Color::from_rgb(0.05, 0.08, 0.12) } else { Color::WHITE },
+                Color::from_rgba(1.0, 1.0, 1.0, 0.20),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.35),
+                Color::WHITE,
             ),
             button::Status::Disabled => (
                 Color::TRANSPARENT,
@@ -1484,7 +1521,7 @@ pub fn danger_button_style() -> impl Fn(&Theme, button::Status) -> button::Style
 }
 
 /// Style for ghost buttons: frameless and transparent in resting state, subtle highlight on hover.
-pub fn ghost_button_style(light_mode: bool, on_accent: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub fn ghost_button_style(on_accent: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let (bg, text_col) = if on_accent {
             match status {
@@ -1506,23 +1543,18 @@ pub fn ghost_button_style(light_mode: bool, on_accent: bool) -> impl Fn(&Theme, 
                 ),
             }
         } else {
-            let text_col = if light_mode {
-                Color::from_rgb(0.25, 0.30, 0.40)
-            } else {
-                Color::from_rgb(0.80, 0.84, 0.92)
-            };
             match status {
                 button::Status::Active => (
                     Color::TRANSPARENT,
-                    text_col,
+                    Color::from_rgb(0.80, 0.84, 0.92),
                 ),
                 button::Status::Hovered => (
-                    if light_mode { Color::from_rgba(0.0, 0.0, 0.0, 0.08) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.12) },
-                    if light_mode { Color::BLACK } else { Color::WHITE },
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.12),
+                    Color::WHITE,
                 ),
                 button::Status::Pressed => (
-                    if light_mode { Color::from_rgba(0.0, 0.0, 0.0, 0.15) } else { Color::from_rgba(1.0, 1.0, 1.0, 0.20) },
-                    if light_mode { Color::BLACK } else { Color::WHITE },
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.20),
+                    Color::WHITE,
                 ),
                 button::Status::Disabled => (
                     Color::TRANSPARENT,
@@ -1546,8 +1578,8 @@ pub fn ghost_button_style(light_mode: bool, on_accent: bool) -> impl Fn(&Theme, 
 }
 
 /// Style for action buttons in assistant and user message bubbles.
-pub fn chat_action_button_style(light_mode: bool, on_accent: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    ghost_button_style(light_mode, on_accent)
+pub fn chat_action_button_style(on_accent: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    ghost_button_style(on_accent)
 }
 
 // -----------------------------------------------------------------------------
@@ -1576,21 +1608,19 @@ pub(crate) mod tests {
             let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
             assert!(ratio >= 4.5, "text contrast {ratio} on {background:?}");
         }
-        for light in [true, false] {
-            for desktop in [Color::BLACK, Color::WHITE] {
-                let base = composite(desktop, surface_color(light, true));
-                for background in [
-                    raised_background(light, true),
-                    sidebar_panel_style(light, true).background.unwrap(),
-                ] {
-                    let Background::Color(tint) = background else {
-                        panic!("expected uniform glass tint");
-                    };
-                    let composed = composite(base, tint);
-                    check(composed, palette(light).text);
-                    check(composed, secondary_text_color(light));
-                    check(composed, accent_text_color(light));
-                }
+        for desktop in [Color::BLACK, Color::WHITE] {
+            let base = composite(desktop, surface_color(true));
+            for background in [
+                raised_background(true),
+                sidebar_panel_style(true).background.unwrap(),
+            ] {
+                let Background::Color(tint) = background else {
+                    panic!("expected uniform glass tint");
+                };
+                let composed = composite(base, tint);
+                check(composed, PALETTE.text);
+                check(composed, SECONDARY_TEXT);
+                check(composed, ACCENT_TEXT);
             }
         }
     }
@@ -1603,21 +1633,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_theme_palettes() {
-        assert_eq!(LIGHT_PALETTE.primary, COLOR_PRIMARY);
-        assert_eq!(DARK_PALETTE.primary, COLOR_PRIMARY);
-        assert_eq!(palette(true).primary, COLOR_PRIMARY);
-        assert_eq!(palette(false).primary, COLOR_PRIMARY);
-        let _light = theme(true);
-        let _dark = theme(false);
+    fn test_theme_palette() {
+        assert_eq!(PALETTE.primary, COLOR_PRIMARY);
+        assert_eq!(theme().palette(), PALETTE);
     }
 
     #[test]
     fn test_surface_color_math() {
         // The window ships with a clear base pane; text gets separate backing.
-        let glass = surface_color(true, true);
+        let glass = surface_color(true);
         assert!((glass.a - glass_alpha(TRANSPARENCY)).abs() < 1e-6);
         assert!((glass.a - 0.52).abs() < 1e-4);
+        assert!(glass.r < 0.1);
 
         // Transparency 0: the base is 66% opaque.
         assert!((glass_alpha(0.0) - 0.66).abs() < 1e-4);
@@ -1632,13 +1659,7 @@ pub(crate) mod tests {
         assert_eq!(glass_alpha(100.0), glass_alpha(80.0));
 
         // Non-glass mode ignores the frost: alpha 1.0
-        let non_glass = surface_color(true, false);
-        assert_eq!(non_glass.a, 1.0);
-
-        // Dark mode glass
-        let dark_glass = surface_color(false, true);
-        assert!((dark_glass.a - glass_alpha(TRANSPARENCY)).abs() < 1e-6);
-        assert!(dark_glass.r < 0.1);
+        assert_eq!(surface_color(false).a, 1.0);
 
         // The frost never turns fully clear
         assert!(glass_alpha(80.0) > 0.3);
@@ -1665,32 +1686,26 @@ pub(crate) mod tests {
 
     #[test]
     fn test_surface_raised_and_border_colors() {
-        let raised_light_glass = surface_raised_color(true, true);
-        assert!((raised_light_glass.a - (235.0 / 255.0)).abs() < 1e-3);
-
-        let raised_dark_glass = surface_raised_color(false, true);
-        assert!((raised_dark_glass.a - (238.0 / 255.0)).abs() < 1e-3);
+        let raised_glass = surface_raised_color(true);
+        assert!((raised_glass.a - (238.0 / 255.0)).abs() < 1e-3);
 
         // Raised plates stay readable over the frosted pane behind them
-        assert!(raised_light_glass.a > surface_color(true, true).a);
+        assert!(raised_glass.a > surface_color(true).a);
 
-        let border_light_glass = border_color(true, true);
-        assert!((border_light_glass.a - (235.0 / 255.0)).abs() < 1e-3);
+        let border_glass = border_color(true);
+        assert!((border_glass.a - (87.0 / 255.0)).abs() < 1e-3);
 
-        let border_dark_glass = border_color(false, true);
-        assert!((border_dark_glass.a - (87.0 / 255.0)).abs() < 1e-3);
-
-        let border_opaque = border_color(true, false);
+        let border_opaque = border_color(false);
         assert_eq!(border_opaque.a, 1.0);
     }
 
     #[test]
     fn test_container_styles() {
-        let card = card_style(true, false);
+        let card = card_style(false);
         assert!(card.background.is_some());
         assert_eq!(card.border.radius.top_left, 14.0);
 
-        let modal = modal_dialog_frame_style(false, true);
+        let modal = modal_dialog_frame_style(true);
         assert!(modal.background.is_some());
         assert_eq!(modal.border.radius.top_left, 20.0);
 
@@ -1700,45 +1715,36 @@ pub(crate) mod tests {
         };
         assert!(tint.a > 0.9);
 
-        let scrim_light = modal_scrim_style(true);
-        let scrim_dark = modal_scrim_style(false);
-        assert!(scrim_light.background.is_some());
-        assert!(scrim_dark.background.is_some());
+        assert!(modal_scrim_style().background.is_some());
 
         let user_bubble = user_chat_bubble_style();
         assert_eq!(user_bubble.text_color, Some(COLOR_ON_PRIMARY));
         assert_eq!(user_bubble.border.radius.top_left, 18.0);
         assert!(matches!(user_bubble.background, Some(Background::Color(_))));
 
-        let assistant_bubble = assistant_chat_bubble_style(false, false);
+        let assistant_bubble = assistant_chat_bubble_style(false);
         assert_eq!(assistant_bubble.border.radius.top_left, 18.0);
 
-        let sidebar = sidebar_panel_style(false, true);
+        let sidebar = sidebar_panel_style(true);
         assert_eq!(sidebar.border.radius.top_left, 18.0);
         assert!(matches!(sidebar.background, Some(Background::Color(_))));
 
-        let window = window_backdrop_style(false, true);
+        let window = window_backdrop_style(true);
         assert!(window.background.is_some());
 
         // Navigation has stronger backing than the clear window pane.
-        let sidebar_dark = sidebar_panel_style(false, true);
+        let sidebar_dark = sidebar_panel_style(true);
         let Some(Background::Color(tint)) = sidebar_dark.background else {
             panic!("sidebar must use a uniform tint");
         };
-        assert!(tint.a > surface_color(false, true).a);
+        assert!(tint.a > surface_color(true).a);
     }
 
     #[test]
     fn test_tooltip_styles() {
-        let light_tooltip = tooltip_style(&theme(true));
-        assert!(light_tooltip.background.is_some());
-        assert!(light_tooltip.shadow.blur_radius > 0.0);
-
-        let dark_tooltip = tooltip_style(&theme(false));
-        assert!(dark_tooltip.background.is_some());
-
-        assert!(is_light_theme(&theme(true)));
-        assert!(!is_light_theme(&theme(false)));
+        let tooltip = tooltip_style(&theme());
+        assert!(tooltip.background.is_some());
+        assert!(tooltip.shadow.blur_radius > 0.0);
     }
 
     #[test]
@@ -1851,25 +1857,25 @@ pub(crate) mod tests {
 
     #[test]
     fn test_button_styles() {
-        let dummy_theme = theme(false);
+        let dummy_theme = theme();
 
         let primary = primary_button_style()(&dummy_theme, button::Status::Active);
         assert!(primary.background.is_some());
 
-        let secondary = secondary_button_style(false)(&dummy_theme, button::Status::Active);
+        let secondary = secondary_button_style()(&dummy_theme, button::Status::Active);
         assert!(secondary.background.is_some());
 
         let danger = danger_button_style()(&dummy_theme, button::Status::Active);
         assert!(danger.background.is_some());
 
-        let chat_action = chat_action_button_style(false, false)(&dummy_theme, button::Status::Active);
+        let chat_action = chat_action_button_style(false)(&dummy_theme, button::Status::Active);
         assert!(chat_action.background.is_none());
-        let chat_action_hovered = chat_action_button_style(false, false)(&dummy_theme, button::Status::Hovered);
+        let chat_action_hovered = chat_action_button_style(false)(&dummy_theme, button::Status::Hovered);
         assert!(chat_action_hovered.background.is_some());
 
-        let chat_action_accent = chat_action_button_style(false, true)(&dummy_theme, button::Status::Active);
+        let chat_action_accent = chat_action_button_style(true)(&dummy_theme, button::Status::Active);
         assert!(chat_action_accent.background.is_none());
-        let chat_action_accent_hovered = chat_action_button_style(false, true)(&dummy_theme, button::Status::Hovered);
+        let chat_action_accent_hovered = chat_action_button_style(true)(&dummy_theme, button::Status::Hovered);
         assert!(chat_action_accent_hovered.background.is_some());
     }
 }

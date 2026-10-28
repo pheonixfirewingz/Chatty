@@ -79,7 +79,7 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
         .wrap(),
         text("Generates character portraits and chat scene images. Separate from the chat model.")
             .size(12)
-            .color(ui::secondary_text_color(state.light_mode)),
+            .color(ui::SECONDARY_TEXT),
         field(
             "Service",
             "Image plugin. ComfyUI runs a single-checkpoint text-to-image workflow.",
@@ -107,16 +107,14 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
             .spacing(8)
             .align_y(Alignment::Center)
         ),
-        text(listed)
-            .size(12)
-            .color(ui::secondary_text_color(state.light_mode)),
+        text(listed).size(12).color(ui::SECONDARY_TEXT),
     ]
     .spacing(12);
     let connection = if shares_chat_host(&state.broker_config.adapter_url, &image.url) {
         connection.push(
             text("Same host as the chat model. The broker runs one kind at a time and unloads the other model before switching, so the first request after a switch is slower.")
                 .size(12)
-                .color(ui::accent_text_color(state.light_mode)),
+                .color(ui::ACCENT_TEXT),
         )
     } else {
         connection
@@ -163,7 +161,7 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
         ),
     ]
     .spacing(12);
-    let secondary = ui::secondary_text_color(state.light_mode);
+    let secondary = ui::SECONDARY_TEXT;
     let mut workflow = column![
         text("Workflow").size(16),
         text(state.image_workflow_summary).size(13),
@@ -187,11 +185,7 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
     ]
     .spacing(10);
     if let Some(notice) = state.image_notice {
-        workflow = workflow.push(
-            text(notice)
-                .size(12)
-                .color(ui::accent_text_color(state.light_mode)),
-        );
+        workflow = workflow.push(text(notice).size(12).color(ui::ACCENT_TEXT));
     }
 
     let test = state.image_test;
@@ -222,11 +216,7 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
     ]
     .spacing(10);
     if let Some(notice) = &test.notice {
-        test_card = test_card.push(
-            text(notice)
-                .size(12)
-                .color(ui::accent_text_color(state.light_mode)),
-        );
+        test_card = test_card.push(text(notice).size(12).color(ui::ACCENT_TEXT));
     }
     if let Some(handle) = test
         .result
@@ -247,14 +237,14 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
     }
 
     column![
-        ui::card(connection, state.light_mode, state.glass_mode),
-        ui::card(generation, state.light_mode, state.glass_mode),
-        ui::card(workflow, state.light_mode, state.glass_mode),
+        ui::card(connection, state.glass_mode),
+        ui::card(generation, state.glass_mode),
+        ui::card(workflow, state.glass_mode),
         button(text("Save image settings"))
             .style(super::primary_button)
             .padding([9, 16])
             .on_press(Message::from(AdminMessage::SaveBrokerConfig)),
-        ui::card(test_card, state.light_mode, state.glass_mode),
+        ui::card(test_card, state.glass_mode),
     ]
     .spacing(12)
     .width(Length::Fill)

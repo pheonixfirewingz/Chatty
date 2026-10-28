@@ -134,8 +134,8 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
     }
 
     column![
-        ui::card(connection, state.light_mode, state.glass_mode),
-        ui::card(generation, state.light_mode, state.glass_mode),
+        ui::card(connection, state.glass_mode),
+        ui::card(generation, state.glass_mode),
         button(text("Save settings"))
             .style(super::primary_button)
             .padding([9, 16])

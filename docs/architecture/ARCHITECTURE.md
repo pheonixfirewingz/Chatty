@@ -23,7 +23,7 @@ Responsibilities:
 - Applying snapshots, deltas, and streamed chunks
 - Admin controls for authorized accounts
 
-The GUI does not read SQLite or contact the inference service. The `iced` client receives asynchronous network events through subscriptions instead of polling.
+The GUI does not read SQLite or contact the inference service. The `iced` client receives asynchronous network events through subscriptions instead of polling. Visual and interaction rules for its views are in [GUI design rules](../UI.md).
 
 ### Broker (`chatty-broker`)
 

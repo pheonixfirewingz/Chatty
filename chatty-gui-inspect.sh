@@ -16,7 +16,6 @@ usage() {
         "  $0 models <0|1|2|3>  (installed, find, settings, downloads)" \
         "  $0 admin <0|1|2|3|4|5>  (broker, users, models, images, logs, data)" \
         "  $0 advanced <open|closed>" \
-        "  $0 theme <light|dark>" \
         "  $0 screen <login|main>" \
         "  $0 connect  (same as pressing Try connection)" \
         "  $0 quit"
@@ -31,7 +30,7 @@ case "${1:-}" in
             --inspect --inspect-control "$control_fifo" \
             --width "$width" --height "$height"
         ;;
-    resize|zoom|screenshot|sidebar|tools|models|admin|advanced|theme|screen|connect|quit)
+    resize|zoom|screenshot|sidebar|tools|models|admin|advanced|screen|connect|quit)
         [[ -p "$control_fifo" ]] || {
             printf 'Inspector is not running: %s\n' "$control_fifo" >&2
             exit 1

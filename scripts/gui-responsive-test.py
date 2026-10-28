@@ -139,9 +139,9 @@ class Inspector:
         raise RuntimeError("Timed out waiting for a complete PNG screenshot; see app.log.")
 
 
-def write_report(output, results, requested, theme):
+def write_report(output, results, requested):
     verified = sum(item["status"] == "captured" for item in results)
-    report = {"theme": theme, "requested": len(requested), "captured": verified, "results": results}
+    report = {"requested": len(requested), "captured": verified, "results": results}
     (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     cards = []
     for result in results:
@@ -157,13 +157,13 @@ def write_report(output, results, requested, theme):
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Chatty responsive inspection</title>
 <style>
-:root{{color-scheme:{theme};font:15px var(--font-sans,system-ui)}}body{{margin:0}}
+:root{{color-scheme:dark;font:15px var(--font-sans,system-ui)}}body{{margin:0}}
 main{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(250px,100%),1fr));gap:16px}}
 article{{border:1px solid var(--border,GrayText);border-radius:var(--radius,12px);padding:16px;min-width:0}}
 h2{{font-size:16px;margin:0 0 12px}}img{{display:block;width:100%;height:240px;object-fit:contain}}
 p{{font-size:13px;line-height:1.5}}a:focus-visible{{outline:3px solid var(--ring,Highlight)}}
 </style>
-<p>{verified} / {len(requested)} sizes captured · {theme} theme. Click an image for full size.</p>
+<p>{verified} / {len(requested)} sizes captured. Click an image for full size.</p>
 <p>Capture checks verify PNG dimensions. Review the images for clipping, overlap, and usability.</p>
 <main>{"".join(cards)}</main></html>'''
     (output / "index.html").write_text(page)
@@ -174,7 +174,6 @@ def main():
     parser.add_argument("--binary", help="Use an existing GUI binary instead of building offline.")
     parser.add_argument("--output", type=Path, default=Path("/tmp") / time.strftime("chatty-responsive-%Y%m%d-%H%M%S"))
     parser.add_argument("--sizes", type=sizes_argument, default=[(w, h) for w in WIDTHS for h in HEIGHTS])
-    parser.add_argument("--theme", choices=("dark", "light"), default="dark")
     parser.add_argument("--timeout", type=float, default=10.0, help="Seconds allowed for each control/capture operation.")
     parser.add_argument("--settle", type=float, default=0.25, help="Seconds to settle after a control command.")
     args = parser.parse_args()
@@ -199,7 +198,6 @@ def main():
                 ], cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
                 inspector = Inspector(process, fifo, args.timeout, args.settle)
                 try:
-                    inspector.send(f"theme {args.theme}")
                     inspector.prepare()
                     for index, (width, height) in enumerate(args.sizes, 1):
                         entry = {"width": width, "height": height, "status": "failed"}
@@ -216,7 +214,7 @@ def main():
                             entry["error"] = f"Requested {width}×{height}, captured {actual[0]}×{actual[1]}. Check compositor resizing and display scale."
                             raise RuntimeError(entry["error"])
                         entry["status"] = "captured"
-                        write_report(output, results, args.sizes, args.theme)
+                        write_report(output, results, args.sizes)
                         print(f"[{index:3}/{len(args.sizes)}] {width}x{height}", flush=True)
                 finally:
                     if process.poll() is None:
@@ -229,10 +227,10 @@ def main():
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         if results and results[-1]["status"] != "captured":
             results[-1]["error"] = str(error)
-        write_report(output, results, args.sizes, args.theme)
+        write_report(output, results, args.sizes)
         print(f"Failed: {error}\nPartial report: {output / 'index.html'}", flush=True)
         return 1
-    write_report(output, results, args.sizes, args.theme)
+    write_report(output, results, args.sizes)
     print(f"Gallery: {output / 'index.html'}", flush=True)
     return 0
 

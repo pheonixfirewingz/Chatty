@@ -82,7 +82,8 @@ for functional and packaging checks.
 
 Use [README](README.md#quick-start) for startup and user workflows,
 [Operations](docs/OPERATIONS.md) for environment variables, certificates, backups,
-and deployment, and [Release](docs/RELEASE.md) for packaging and publication.
+and deployment, [Release](docs/RELEASE.md) for packaging and publication, and
+[GUI design rules](docs/UI.md) before building or changing GUI views.
 
 GUI overrides: `CHATTY_BROKER` prefills the server, `CHATTY_CA` selects an explicit CA,
 `CHATTY_SESSION_FILE` isolates session storage, and `CHATTY_INSPECT_CONTROL` selects
@@ -90,7 +91,7 @@ an inspection FIFO. Inspection also accepts `--inspect`, `--width`, and `--heigh
 
 Keep each fact in its owning document. Keep engineering rules here, design contracts
 and rationale in Architecture/ADRs, user instructions in README, deployment in
-Operations, and release gates in Release. Git history preserves superseded status
+Operations, release gates in Release, and GUI design rules in UI. Git history preserves superseded status
 reports and the original implementation audit; do not maintain duplicate handoff reports.
 
 <!-- caveman-begin -->

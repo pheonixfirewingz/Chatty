@@ -33,7 +33,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use admin_monitor::{AdminMessage, AdminState, admin_dialog_view, admin_subscription};
-use characters::{CharacterMessage, DraftCharacter, ImageGeneration, character_dialog_view};
+use characters::{
+    CharacterMessage, DraftCharacter, DraftEditors, ImageGeneration, character_dialog_view,
+};
 use conversation::{
     ConversationMessage, ConversationViewState, NewChatViewState, conversation_view,
     new_chat_dialog_view,
@@ -301,6 +303,7 @@ pub struct ChattyApp {
     compact_sidebar_open: bool,
     error: Option<UiNotice>,
     draft: DraftCharacter,
+    draft_editors: DraftEditors,
     draft_world_ids: HashSet<String>,
     draft_character_open: bool,
     char_import_pending: bool,
@@ -310,7 +313,6 @@ pub struct ChattyApp {
     admin: AdminState,
     last_monitor_refresh: Option<Instant>,
     account_usage: TokenUsage,
-    light_mode: bool,
     glass_mode: bool,
     preferences_path: Option<PathBuf>,
     tts: LocalTts,
@@ -431,6 +433,7 @@ impl ChattyApp {
             compact_sidebar_open: false,
             error: None,
             draft: DraftCharacter::default(),
+            draft_editors: DraftEditors::default(),
             draft_world_ids: HashSet::new(),
             draft_character_open: false,
             char_import_pending: false,
@@ -440,7 +443,6 @@ impl ChattyApp {
             admin: AdminState::default(),
             last_monitor_refresh: None,
             account_usage: TokenUsage::default(),
-            light_mode: false,
             glass_mode: true,
             preferences_path: None,
             tts,
@@ -476,7 +478,6 @@ impl ChattyApp {
         app.preferences_path = Some(preferences_path);
         app.server_address = initial_server;
         app.tts_auto_speak = tts_auto_speak;
-        app.admin.light_mode = false;
         app.admin.glass_mode = true;
 
         if args.inspect {
@@ -560,10 +561,6 @@ impl ChattyApp {
                     }
                     "advanced" => {
                         self.admin.models.advanced_settings = parts.get(1) == Some(&"open");
-                    }
-                    "theme" => {
-                        self.light_mode = parts.get(1) == Some(&"light");
-                        self.admin.light_mode = self.light_mode;
                     }
                     "models" => {
                         self.screen = Screen::Admin;
@@ -721,7 +718,7 @@ impl ChattyApp {
             }
             Message::OpenCharactersDialog => {
                 self.draft_character_open = true;
-                self.draft = DraftCharacter::default();
+                self.set_draft(DraftCharacter::default());
                 Task::none()
             }
             Message::CloseCharactersDialog => {
@@ -874,7 +871,8 @@ impl ChattyApp {
                         // Results must not land in a different character's draft.
                         self.cancel_portrait_generation();
                         if let Some(c) = self.characters.iter().find(|c| c.id == id) {
-                            self.draft = DraftCharacter::from(c);
+                            let draft = DraftCharacter::from(c);
+                            self.set_draft(draft);
                             self.draft_world_ids = self
                                 .worlds
                                 .iter()
@@ -885,7 +883,7 @@ impl ChattyApp {
                     }
                     CharacterMessage::New => {
                         self.cancel_portrait_generation();
-                        self.draft = DraftCharacter::default();
+                        self.set_draft(DraftCharacter::default());
                         self.draft_world_ids.clear();
                     }
                     CharacterMessage::Save if self.portrait_image.pending => {}
@@ -940,8 +938,19 @@ impl ChattyApp {
                             });
                         }
                     }
+                    CharacterMessage::Export => self.export_character(),
+                    CharacterMessage::Import => self.import_character(),
+                    CharacterMessage::AiImport => self.ai_import_character(),
+                    CharacterMessage::AddImages => self.add_character_images(),
+                    CharacterMessage::AddImageFolder => self.add_character_image_folder(),
                     CharacterMessage::GenerateEmotions => self.start_emotion_batch(),
                     CharacterMessage::CancelImageGeneration => self.cancel_portrait_generation(),
+                    CharacterMessage::Edit(field, action) => {
+                        return self
+                            .draft_editors
+                            .perform(&mut self.draft, field, action)
+                            .map(Message::Character);
+                    }
                     other => {
                         self.draft.update(&other);
                     }
@@ -1134,6 +1143,9 @@ impl ChattyApp {
                     ConversationMessage::HoverMessage(id) => {
                         self.hovered_message_id = id;
                     }
+                    ConversationMessage::CopyText(text) => {
+                        return iced::clipboard::write(text);
+                    }
                     ConversationMessage::GenerateSceneImage => {
                         if let Some(conversation_id) = self.selected_conversation.clone()
                             && self.image_generation
@@ -1175,11 +1187,7 @@ impl ChattyApp {
         };
 
         let scrim_color = if self.glass_mode {
-            if self.light_mode {
-                Color::from_rgba(0.0, 0.0, 0.0, 0.32)
-            } else {
-                Color::from_rgba(0.0, 0.0, 0.0, 130.0 / 255.0)
-            }
+            Color::from_rgba(0.0, 0.0, 0.0, 130.0 / 255.0)
         } else {
             Color::from_rgba(0.0, 0.0, 0.0, 0.35)
         };
@@ -1199,9 +1207,7 @@ impl ChattyApp {
             .max_height((size.height - 16.0).max(1.0))
             .max_width(460.0)
             .on_press(Message::TrustCertificate(false))
-            .container_style(move |_| {
-                ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
-            })
+            .container_style(move |_| ui::modal_dialog_frame_style(self.glass_mode))
             .into()
         } else if let Some(err) = &self.error {
             dialog(true, base, scrollable(self.error_modal_view(err)))
@@ -1211,9 +1217,7 @@ impl ChattyApp {
                 .max_height((size.height - 16.0).max(1.0))
                 .max_width(400.0)
                 .on_press(Message::DismissError)
-                .container_style(move |_| {
-                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
-                })
+                .container_style(move |_| ui::modal_dialog_frame_style(self.glass_mode))
                 .into()
         } else if self.worlds_open {
             let world_state = WorldViewState {
@@ -1228,7 +1232,6 @@ impl ChattyApp {
                     .map(|s| s.elapsed().as_secs())
                     .unwrap_or(0),
                 import_notice: self.world_state.import_notice.as_deref(),
-                light_mode: self.light_mode,
                 glass_mode: self.glass_mode,
             };
             dialog(true, base, world_dialog_view(&world_state))
@@ -1238,9 +1241,7 @@ impl ChattyApp {
                 .max_width(740.0)
                 .max_height((size.height - 32.0).clamp(1.0, 780.0))
                 .on_press(Message::CloseWorldsDialog)
-                .container_style(move |_| {
-                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
-                })
+                .container_style(move |_| ui::modal_dialog_frame_style(self.glass_mode))
                 .into()
         } else if self.memory_dialog_open {
             let can_extract =
@@ -1251,7 +1252,6 @@ impl ChattyApp {
                 &self.conversations,
                 &self.memory_state,
                 can_extract,
-                self.light_mode,
                 self.glass_mode,
             );
             dialog(true, base, memory_dialog_view(&memory_view_state))
@@ -1261,14 +1261,13 @@ impl ChattyApp {
                 .max_width(780.0)
                 .max_height((size.height - 32.0).clamp(1.0, 780.0))
                 .on_press(Message::CloseMemoriesDialog)
-                .container_style(move |_| {
-                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
-                })
+                .container_style(move |_| ui::modal_dialog_frame_style(self.glass_mode))
                 .into()
         } else if self.draft_character_open {
             let char_view = character_dialog_view(
                 &self.characters,
                 &self.draft,
+                &self.draft_editors,
                 &self.draft_world_ids,
                 &self.worlds,
                 &self.character_search,
@@ -1280,7 +1279,6 @@ impl ChattyApp {
                     },
                     None => self.portrait_image.state(self.image_generation),
                 },
-                self.light_mode,
                 self.glass_mode,
                 size.width < 800.0,
             )
@@ -1292,9 +1290,7 @@ impl ChattyApp {
                 .max_width(940.0)
                 .max_height((size.height - 32.0).clamp(1.0, 740.0))
                 .on_press(Message::CloseCharactersDialog)
-                .container_style(move |_| {
-                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
-                })
+                .container_style(move |_| ui::modal_dialog_frame_style(self.glass_mode))
                 .into()
         } else if self.new_chat_open {
             let new_chat_state = NewChatViewState {
@@ -1302,7 +1298,6 @@ impl ChattyApp {
                 characters: &self.characters,
                 selected_character_id: self.selected_characters.iter().next().map(|s| s.as_str()),
                 title: &self.new_conversation_title,
-                light_mode: self.light_mode,
                 glass_mode: self.glass_mode,
             };
             if let Some(content) = new_chat_dialog_view(&new_chat_state, Message::Conversation) {
@@ -1315,9 +1310,7 @@ impl ChattyApp {
                     .on_press(Message::Conversation(
                         ConversationMessage::CloseNewChatDialog,
                     ))
-                    .container_style(move |_| {
-                        ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
-                    })
+                    .container_style(move |_| ui::modal_dialog_frame_style(self.glass_mode))
                     .into()
             } else {
                 dialog(false, base, Space::new()).into()
@@ -1332,12 +1325,8 @@ impl ChattyApp {
                 .max_height((size.height - 32.0).clamp(1.0, 740.0))
                 .on_press(Message::CloseAdminDialog)
                 .container_style(move |_| {
-                    let mut style = ui::modal_dialog_frame_style(self.light_mode, self.glass_mode);
-                    style.background = Some(Background::Color(if self.light_mode {
-                        Color::WHITE
-                    } else {
-                        ui::DARK_PALETTE.background
-                    }));
+                    let mut style = ui::modal_dialog_frame_style(self.glass_mode);
+                    style.background = Some(Background::Color(ui::PALETTE.background));
                     style
                 })
                 .into()
@@ -1349,21 +1338,18 @@ impl ChattyApp {
                 .max_width(440.0)
                 .max_height((size.height - 32.0).clamp(1.0, 600.0))
                 .on_press(Message::CloseSettingsDialog)
-                .container_style(move |_| {
-                    ui::modal_dialog_frame_style(self.light_mode, self.glass_mode)
-                })
+                .container_style(move |_| ui::modal_dialog_frame_style(self.glass_mode))
                 .into()
         } else {
             dialog(false, base, Space::new()).into()
         };
 
-        let light_mode = self.light_mode;
         let glass_mode = self.glass_mode;
 
         container(root)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(move |_| ui::window_backdrop_style(light_mode, glass_mode))
+            .style(move |_| ui::window_backdrop_style(glass_mode))
             .into()
     }
 
@@ -1386,7 +1372,7 @@ impl ChattyApp {
     }
 
     pub(crate) fn theme(&self) -> Theme {
-        ui::theme(self.light_mode)
+        ui::theme()
     }
 
     pub(crate) fn scale_factor(&self) -> f32 {
@@ -1400,7 +1386,7 @@ impl ChattyApp {
         });
         let subtitle = text("Enter the IP address or domain of your Chatty server.")
             .size(14)
-            .color(ui::secondary_text_color(self.light_mode));
+            .color(ui::SECONDARY_TEXT);
 
         let addr_input = text_input("192.168.0.98 or chatty.example.com", &self.server_address)
             .on_input(Message::ServerAddressChanged)
@@ -1425,9 +1411,7 @@ impl ChattyApp {
         .width(Length::Fill)
         .style(ui::primary_button_style());
 
-        let status_txt = text(&self.status)
-            .size(13)
-            .color(ui::secondary_text_color(self.light_mode));
+        let status_txt = text(&self.status).size(13).color(ui::SECONDARY_TEXT);
 
         let card_content = column![
             title,
@@ -1445,7 +1429,7 @@ impl ChattyApp {
         .align_x(Alignment::Center);
 
         container(scrollable(
-            container(ui::card(card_content, self.light_mode, self.glass_mode).max_width(460))
+            container(ui::card(card_content, self.glass_mode).max_width(460))
                 .padding(16)
                 .center_x(Length::Fill),
         ))
@@ -1467,7 +1451,7 @@ impl ChattyApp {
             .align_x(Alignment::Center);
 
         container(scrollable(
-            container(ui::card(card_content, self.light_mode, self.glass_mode).max_width(460))
+            container(ui::card(card_content, self.glass_mode).max_width(460))
                 .padding(16)
                 .center_x(Length::Fill),
         ))
@@ -1482,9 +1466,7 @@ impl ChattyApp {
             weight: font::Weight::Bold,
             ..Default::default()
         });
-        let status_txt = text(&self.status)
-            .size(13)
-            .color(ui::secondary_text_color(self.light_mode));
+        let status_txt = text(&self.status).size(13).color(ui::SECONDARY_TEXT);
 
         let username_input = text_input("Username", &self.username)
             .on_input(Message::LoginUsernameChanged)
@@ -1528,20 +1510,20 @@ impl ChattyApp {
                 .on_press(Message::SubmitRegister)
                 .padding(8)
                 .width(Length::Fill)
-                .style(ui::secondary_button_style(self.light_mode));
+                .style(ui::secondary_button_style());
             card_col = card_col.push(register_btn);
         }
 
         let change_server_btn = button(text("Change server").size(13))
             .on_press(Message::ChangeServer)
             .padding(6)
-            .style(ui::secondary_button_style(self.light_mode));
+            .style(ui::secondary_button_style());
         card_col = card_col
             .push(Space::new().height(6))
             .push(change_server_btn);
 
         container(scrollable(
-            container(ui::card(card_col, self.light_mode, self.glass_mode).max_width(460))
+            container(ui::card(card_col, self.glass_mode).max_width(460))
                 .padding(16)
                 .center_x(Length::Fill),
         ))
@@ -1575,9 +1557,7 @@ impl ChattyApp {
         ]
         .align_y(Alignment::Center);
 
-        let recent_label = text("RECENT CHATS")
-            .size(11)
-            .color(ui::secondary_text_color(self.light_mode));
+        let recent_label = text("RECENT CHATS").size(11).color(ui::SECONDARY_TEXT);
 
         let mut conv_col = column![].spacing(4).width(Length::Fill);
         for conv in &self.conversations {
@@ -1646,12 +1626,8 @@ impl ChattyApp {
                 let tile_bg = if is_selected {
                     ui::COLOR_PRIMARY_STRONG
                 } else {
-                    let base = ui::surface_color(self.light_mode, self.glass_mode);
-                    let overlay = if self.light_mode {
-                        Color::BLACK
-                    } else {
-                        Color::WHITE
-                    };
+                    let base = ui::surface_color(self.glass_mode);
+                    let overlay = Color::WHITE;
                     Color::from_rgb(
                         base.r * 0.92 + overlay.r * 0.08,
                         base.g * 0.92 + overlay.g * 0.08,
@@ -1766,11 +1742,7 @@ impl ChattyApp {
             .height(if short { Length::Shrink } else { Length::Fill })
             .width(Length::Fill);
 
-        let status_row = row![
-            text(&self.status)
-                .size(12)
-                .color(ui::secondary_text_color(self.light_mode))
-        ];
+        let status_row = row![text(&self.status).size(12).color(ui::SECONDARY_TEXT)];
 
         let mut actions = vec![
             (
@@ -1851,7 +1823,7 @@ impl ChattyApp {
         } else {
             sidebar_content.into()
         };
-        sidebar_panel(sidebar_content, self.light_mode, self.glass_mode)
+        sidebar_panel(sidebar_content, self.glass_mode)
             .height(Length::Fill)
             .into()
     }
@@ -1892,7 +1864,6 @@ impl ChattyApp {
                 size.width - if sidebar_visible { 272.0 } else { 0.0 },
                 size.height,
             ),
-            light_mode: self.light_mode,
             glass_mode: self.glass_mode,
             message_images: &self.message_images,
             scene_image: self.scene_image.state(self.image_generation),
@@ -1934,7 +1905,7 @@ impl ChattyApp {
                 author_id: None,
             }))
             .padding([6, 12])
-            .style(ui::secondary_button_style(self.light_mode));
+            .style(ui::secondary_button_style());
 
         let usage_header = text("Account Token Usage").size(14).font(font::Font {
             weight: font::Weight::Semibold,
@@ -2014,7 +1985,7 @@ impl ChattyApp {
         let cancel_btn = button(text("Cancel").size(14))
             .on_press(Message::TrustCertificate(false))
             .padding(10)
-            .style(ui::secondary_button_style(self.light_mode));
+            .style(ui::secondary_button_style());
 
         let btn_row = row![trust_btn, cancel_btn].spacing(12);
 
@@ -2039,15 +2010,13 @@ impl ChattyApp {
             weight: font::Weight::Bold,
             ..Default::default()
         });
-        let time_txt = text(&err.timestamp)
-            .size(11)
-            .color(ui::secondary_text_color(self.light_mode));
+        let time_txt = text(&err.timestamp).size(11).color(ui::SECONDARY_TEXT);
         let msg_txt = text(&err.message).size(13);
 
         let close_btn = button(text("Close").size(13))
             .on_press(Message::DismissError)
             .padding([6, 14])
-            .style(ui::secondary_button_style(self.light_mode));
+            .style(ui::secondary_button_style());
 
         let content = column![
             title,
@@ -2369,8 +2338,9 @@ impl ChattyApp {
                             self.worlds_open = true;
                         }
                         Response::CharacterImportPreview(character) => {
-                            self.draft = DraftCharacter::from(character.as_ref());
-                            self.draft.owned_by_user = true;
+                            let mut draft = DraftCharacter::from(character.as_ref());
+                            draft.owned_by_user = true;
+                            self.set_draft(draft);
                             self.char_import_pending = false;
                             self.char_import_started = None;
                             self.draft_character_open = true;
@@ -2730,6 +2700,215 @@ impl ChattyApp {
                 });
             }
         }
+    }
+
+    /// Load a SillyTavern JSON or PNG card into a new, unsaved draft.
+    fn import_character(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Character archive or card", &["zip", "json", "png"])
+            .pick_file()
+        else {
+            return;
+        };
+        let extension = path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(str::to_ascii_lowercase);
+        let draft = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| match extension.as_deref() {
+                Some("zip") => characters::draft_from_zip(&bytes),
+                Some("png") => characters::png_card_json(&bytes)
+                    .and_then(|json| serde_json::from_slice(&json).ok())
+                    .and_then(characters::draft_from_card),
+                _ => serde_json::from_slice(&bytes)
+                    .ok()
+                    .and_then(characters::draft_from_card),
+            });
+        match draft {
+            Some(draft) => {
+                self.cancel_portrait_generation();
+                self.set_draft(draft);
+                self.draft_world_ids.clear();
+            }
+            None => self.set_error("Could not read that character archive or SillyTavern card."),
+        }
+    }
+
+    /// Ask the broker to turn a free-form text file into a character draft.
+    fn ai_import_character(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Text file", &["txt", "md", "text"])
+            .pick_file()
+        else {
+            return;
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => return self.set_error(format!("Failed to read file: {error}")),
+        };
+        if text.trim().is_empty() {
+            return self.set_error("Text file is empty.");
+        }
+        let source_name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Imported character")
+            .replace(['_', '-'], " ");
+        self.char_import_pending = true;
+        self.char_import_started = Some(Instant::now());
+        self.send(Request::ImportCharacterFromText {
+            session_token: self.token.clone(),
+            source_name,
+            text,
+        });
+    }
+
+    fn add_character_images(&mut self) {
+        let Some(paths) = rfd::FileDialog::new()
+            .add_filter("PNG image", &["png"])
+            .pick_files()
+        else {
+            return;
+        };
+        self.import_character_image_paths(paths, None);
+    }
+
+    /// Add every PNG in a folder; an image named after the folder becomes the default.
+    fn add_character_image_folder(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let mut paths = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                return self.set_error(format!("Could not read {}: {error}", folder.display()));
+            }
+        };
+        paths.sort();
+        let folder_name = folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        self.import_character_image_paths(paths, folder_name.as_deref());
+    }
+
+    fn import_character_image_paths(&mut self, paths: Vec<PathBuf>, default_stem: Option<&str>) {
+        let remaining = characters::MAX_CHARACTER_IMAGES.saturating_sub(self.draft.images.len());
+        let truncated = paths.len() > remaining;
+        let mut used: usize = self.draft.images.iter().map(|image| image.data.len()).sum();
+        let mut imported_default = None;
+        for path in paths.into_iter().take(remaining) {
+            let Ok(source) = std::fs::read(&path) else {
+                self.set_error(format!("Could not read {}.", path.display()));
+                continue;
+            };
+            if source.len() > 2 * 1024 * 1024 {
+                self.set_error(format!(
+                    "{} must be a PNG no larger than 2 MB.",
+                    path.display()
+                ));
+                continue;
+            }
+            let data = match characters::normalize_character_image_png(&source) {
+                Ok(data) => data,
+                Err(error) => {
+                    self.set_error(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
+            // The broker rejects a save over the total image budget.
+            if used + data.len() > characters::MAX_CHARACTER_IMAGE_BYTES {
+                self.set_error(format!(
+                    "{} was not added: this character's images would exceed 5 MiB.",
+                    path.display()
+                ));
+                continue;
+            }
+            used += data.len();
+            let mut label = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("portrait")
+                .replace(['_', '-'], " ");
+            let id = chatty_protocol::util::new_uuid();
+            if default_stem.is_some_and(|stem| label.eq_ignore_ascii_case(stem))
+                || (!self.draft.name.trim().is_empty()
+                    && label.eq_ignore_ascii_case(self.draft.name.trim()))
+            {
+                imported_default = Some(id.clone());
+                label = "default".into();
+            }
+            if self.draft.default_image_id.is_none() {
+                self.draft.default_image_id = Some(id.clone());
+            }
+            self.draft.images.push(CharacterImage { id, label, data });
+        }
+        if let Some(id) = imported_default {
+            self.draft.default_image_id = Some(id);
+        }
+        if truncated {
+            self.set_error(format!(
+                "Only the first {} character images were added.",
+                characters::MAX_CHARACTER_IMAGES
+            ));
+        }
+    }
+
+    /// Save the draft and all its images as a zip archive the user picks.
+    fn export_character(&mut self) {
+        if self.draft.images.iter().any(|image| image.data.is_empty()) {
+            return self.set_error(
+                "Character images are still downloading. Try exporting again in a moment.",
+            );
+        }
+        let bytes = match characters::export_card_zip(&self.draft) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return self.set_error(format!("Could not build the character archive: {error}"));
+            }
+        };
+        let name: String = self
+            .draft
+            .name
+            .trim()
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let name = if name.is_empty() {
+            "character".into()
+        } else {
+            name
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{name}.zip"))
+            .add_filter("Character archive", &["zip"])
+            .save_file()
+        else {
+            return;
+        };
+        if let Err(error) = std::fs::write(&path, bytes) {
+            self.set_error(format!("Could not write {}: {error}", path.display()));
+        }
+    }
+
+    /// Replace the character draft and its multi-line editor buffers together.
+    fn set_draft(&mut self, draft: DraftCharacter) {
+        self.draft_editors.load(&draft);
+        self.draft = draft;
     }
 
     fn store_character_image(&mut self, character_id: &str, image_id: &str, data: Vec<u8>) {
@@ -4148,6 +4327,36 @@ mod tests {
                 .any(|command| matches!(command, Command::Cancel(9))),
             "the running job is cancelled on the broker"
         );
+    }
+
+    #[test]
+    fn folder_images_are_added_with_the_folder_named_image_as_default() {
+        let (commands, _rx) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        let dir = std::env::temp_dir().join(format!("chatty-images-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for name in ["happy", "Mara", "tiny"] {
+            let side = if name == "tiny" { 16 } else { 160 };
+            let path = dir.join(format!("{name}.png"));
+            ::image::RgbImage::new(side, side).save(&path).unwrap();
+            paths.push(path);
+        }
+        app.import_character_image_paths(paths, Some("mara"));
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let labels: Vec<_> = app.draft.images.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["happy", "default"],
+            "undersized images are rejected"
+        );
+        assert_eq!(
+            app.draft.default_image_id.as_ref(),
+            Some(&app.draft.images[1].id)
+        );
+        assert!(app.error.is_some(), "the rejected image is reported");
     }
 
     #[test]

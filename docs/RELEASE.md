@@ -50,8 +50,8 @@ matrix:
 
 ```sh
 ./scripts/gui-responsive-test.py --binary target/release/chatty-gui \
-  --sizes 375x640,800x600,1280x720 --theme light \
-  --output /tmp/chatty-responsive-light
+  --sizes 375x640,800x600,1280x720 \
+  --output /tmp/chatty-responsive-small
 ```
 
 The default matrix crosses ten widths (320–1920) with ten heights (240–1080).
@@ -86,6 +86,23 @@ flatpak install --user ./dist/chatty-*.flatpak
 flatpak run io.github.pheonixfirewingz.Chatty//25.08
 flatpak run io.github.pheonixfirewingz.Chatty//25.08 --test-speech
 ```
+
+For repeated local testing, install from the build repository instead of the bundle:
+
+```sh
+./scripts/build-flatpak.sh --install
+```
+
+The script keeps `build/flatpak/repo` between builds and registers it as the unsigned
+`chatty-local` remote. The first run switches an existing bundle install to that remote
+in its current installation scope; app data in `~/.var/app` is kept. Later runs update
+in place, as does `flatpak update` after a rebuild. Set `CHATTY_FLATPAK_SCOPE=user` or
+`system` to override the scope. Do not delete `build/flatpak/repo` while the remote is in use.
+
+To publish a build to the signed self-hosted repository, install the
+`flatpak-repo` publisher and run
+`./scripts/build-flatpak.sh --publish`. Clients add it once with
+`flatpak remote-add --if-not-exists pheonix http://192.168.0.98:8090/repo/pheonix.flatpakrepo`.
 
 The sandbox has network, Wayland, audio server, and DRI permissions. ONNX Runtime is
 bundled; speech model files download once into the app-private cache at

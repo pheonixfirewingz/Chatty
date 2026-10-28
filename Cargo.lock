@@ -853,6 +853,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+ "zip",
 ]
 
 [[package]]

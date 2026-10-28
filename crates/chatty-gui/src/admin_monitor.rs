@@ -290,7 +290,6 @@ pub struct AdminViewState<'a> {
     pub admin_log_search: &'a str,
     pub admin_data: &'a [AdminDataRow],
     pub admin_tab: usize,
-    pub light_mode: bool,
     pub glass_mode: bool,
 }
 
@@ -320,7 +319,6 @@ pub struct AdminState {
     pub admin_log_search: String,
     pub admin_data: Vec<AdminDataRow>,
     pub admin_tab: usize,
-    pub light_mode: bool,
     pub glass_mode: bool,
 }
 
@@ -365,7 +363,6 @@ impl Default for AdminState {
             admin_log_search: String::new(),
             admin_data: Vec::new(),
             admin_tab: 0,
-            light_mode: false,
             glass_mode: false,
         }
     }
@@ -396,7 +393,6 @@ impl AdminState {
             admin_log_search: &self.admin_log_search,
             admin_data: &self.admin_data,
             admin_tab: self.admin_tab,
-            light_mode: self.light_mode,
             glass_mode: self.glass_mode,
         }
     }
@@ -1004,7 +1000,7 @@ where
         let tab_btn = button(text(*name).size(13).color(if is_selected {
             ui::COLOR_ON_PRIMARY
         } else {
-            ui::secondary_text_color(state.light_mode)
+            ui::SECONDARY_TEXT
         }))
         .padding(Padding::from([6, 14]))
         .style(move |theme: &Theme, status: button::Status| {
@@ -1077,20 +1073,17 @@ where
 fn metric_card<'a, Message: 'a>(
     label: &'static str,
     val: String,
-    light_mode: bool,
     glass_mode: bool,
 ) -> Element<'a, Message> {
     let content = column![
-        text(label)
-            .size(12)
-            .color(ui::secondary_text_color(light_mode)),
+        text(label).size(12).color(ui::SECONDARY_TEXT),
         text(val).size(15),
     ]
     .spacing(3);
 
     container(content)
         .padding(Padding::from([8, 12]))
-        .style(move |_| ui::card_style(light_mode, glass_mode))
+        .style(move |_| ui::card_style(glass_mode))
         .into()
 }
 
@@ -1123,23 +1116,16 @@ where
             metric_card(
                 "Uptime",
                 format_duration(m.uptime_seconds),
-                state.light_mode,
                 state.glass_mode
             ),
-            metric_card(
-                "CPU",
-                format!("{:.1}%", m.cpu_percent),
-                state.light_mode,
-                state.glass_mode
-            ),
-            metric_card("Memory", mem_str, state.light_mode, state.glass_mode),
+            metric_card("CPU", format!("{:.1}%", m.cpu_percent), state.glass_mode),
+            metric_card("Memory", mem_str, state.glass_mode),
             metric_card(
                 "Connections",
                 m.active_connections.to_string(),
-                state.light_mode,
                 state.glass_mode
             ),
-            metric_card("Adapter", adapter_str, state.light_mode, state.glass_mode),
+            metric_card("Adapter", adapter_str, state.glass_mode),
         ]
         .spacing(8);
 
@@ -1292,7 +1278,7 @@ where
                 card_row = card_row.push(role_btn).push(del_btn);
             }
 
-            let card = ui::card(card_row.wrap(), state.light_mode, state.glass_mode);
+            let card = ui::card(card_row.wrap(), state.glass_mode);
             items = items.push(card);
         }
     }
@@ -1358,7 +1344,7 @@ where
     items = items.push(hint(
         text("Private chat data · current boot")
             .size(12)
-            .color(ui::secondary_text_color(state.light_mode)),
+            .color(ui::SECONDARY_TEXT),
         "Includes AI prompts and private chat data. Restarting the broker clears this log.",
     ));
 
@@ -1405,12 +1391,11 @@ where
         lines_col.into()
     };
 
-    let light_mode = state.light_mode;
     let glass_mode = state.glass_mode;
     let log_box = container(log_view)
         .padding(10)
         .width(Length::Fill)
-        .style(move |_| ui::card_style(light_mode, glass_mode));
+        .style(move |_| ui::card_style(glass_mode));
 
     items = items.push(log_box);
 
@@ -1436,9 +1421,7 @@ where
     for record in state.admin_data {
         let mut title = row![
             text(&record.label).size(15).wrapping(text::Wrapping::Glyph),
-            text(&record.kind)
-                .size(12)
-                .color(ui::secondary_text_color(state.light_mode)),
+            text(&record.kind).size(12).color(ui::SECONDARY_TEXT),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -1462,7 +1445,7 @@ where
                 .wrapping(text::Wrapping::Glyph)
         ]
         .spacing(6);
-        items = items.push(ui::card(card, state.light_mode, state.glass_mode));
+        items = items.push(ui::card(card, state.glass_mode));
     }
     if state.admin_data.is_empty() {
         items = items.push(text("No records").size(13));
@@ -1521,17 +1504,14 @@ pub mod tests {
                 .is_empty()
         );
         assert_eq!(state.admin_tab, 2);
-        for light in [false, true] {
-            state.light_mode = light;
-            for advanced in [false, true] {
-                assert!(
-                    state
-                        .update(AdminMessage::ToggleAdvancedSettings(advanced), "admin")
-                        .is_empty()
-                );
-                assert_eq!(state.broker_config, expected);
-                let _view: Element<'_, AdminMessage> = model_settings::view(&state.as_view_state());
-            }
+        for advanced in [false, true] {
+            assert!(
+                state
+                    .update(AdminMessage::ToggleAdvancedSettings(advanced), "admin")
+                    .is_empty()
+            );
+            assert_eq!(state.broker_config, expected);
+            let _view: Element<'_, AdminMessage> = model_settings::view(&state.as_view_state());
         }
         let saved = state.update(AdminMessage::SaveBrokerConfig, "admin");
         assert!(

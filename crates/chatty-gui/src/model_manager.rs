@@ -156,7 +156,7 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
                 .spacing(8),
             ]
             .spacing(10);
-            items = items.push(ui::card(card, state.light_mode, state.glass_mode));
+            items = items.push(ui::card(card, state.glass_mode));
         }
         return items.into();
     }
@@ -228,11 +228,7 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
             title = title.push(text("Chat model").size(12).color(ui::COLOR_PRIMARY));
         }
         if running.is_some() {
-            title = title.push(
-                text("Loaded")
-                    .size(12)
-                    .color(ui::secondary_text_color(state.light_mode)),
-            );
+            title = title.push(text("Loaded").size(12).color(ui::SECONDARY_TEXT));
         }
         let metadata = [
             human_bytes(model.size),
@@ -254,12 +250,7 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
         };
         let mut card = column![
             title.wrap(),
-            hint(
-                text(metadata)
-                    .size(13)
-                    .color(ui::secondary_text_color(state.light_mode)),
-                details
-            )
+            hint(text(metadata).size(13).color(ui::SECONDARY_TEXT), details)
         ]
         .spacing(10)
         .width(Length::Fill);
@@ -313,11 +304,7 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
                 delete_help,
             ));
         }
-        items = items.push(ui::card(
-            card.push(controls.wrap()),
-            state.light_mode,
-            state.glass_mode,
-        ));
+        items = items.push(ui::card(card.push(controls.wrap()), state.glass_mode));
     }
     if count == 0 {
         items = items.push(
@@ -428,7 +415,7 @@ fn downloads_view<'a, Message: 'a + Clone + From<AdminMessage>>(
                 details,
             ));
         }
-        items = items.push(ui::card(card, state.light_mode, state.glass_mode));
+        items = items.push(ui::card(card, state.glass_mode));
     }
     items.into()
 }

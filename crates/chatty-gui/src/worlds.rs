@@ -344,7 +344,6 @@ pub struct WorldViewState<'a> {
     pub import_pending: bool,
     pub import_elapsed_secs: u64,
     pub import_notice: Option<&'a str>,
-    pub light_mode: bool,
     pub glass_mode: bool,
 }
 
@@ -354,7 +353,6 @@ impl<'a> WorldViewState<'a> {
         world_draft: &'a World,
         characters: &'a [Character],
         entry_search: &'a str,
-        light_mode: bool,
         glass_mode: bool,
     ) -> Self {
         Self {
@@ -365,7 +363,6 @@ impl<'a> WorldViewState<'a> {
             import_pending: false,
             import_elapsed_secs: 0,
             import_notice: None,
-            light_mode,
             glass_mode,
         }
     }
@@ -591,7 +588,7 @@ where
 
         card_col = card_col.push(content_input);
 
-        let card_widget = ui::card(card_col, state.light_mode, state.glass_mode)
+        let card_widget = ui::card(card_col, state.glass_mode)
             .width(Length::Fill);
         entries_col = entries_col.push(card_widget);
     }
@@ -898,7 +895,6 @@ pub mod tests {
             &worlds[0],
             &characters,
             "",
-            false,
             false,
         );
 

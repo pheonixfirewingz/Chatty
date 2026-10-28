@@ -372,7 +372,6 @@ pub struct MemoryViewState<'a> {
     pub conversations: &'a [Conversation],
     pub state: &'a MemoryDialogState,
     pub can_extract: bool,
-    pub light_mode: bool,
     pub glass_mode: bool,
 }
 
@@ -383,7 +382,6 @@ impl<'a> MemoryViewState<'a> {
         conversations: &'a [Conversation],
         state: &'a MemoryDialogState,
         can_extract: bool,
-        light_mode: bool,
         glass_mode: bool,
     ) -> Self {
         Self {
@@ -392,7 +390,6 @@ impl<'a> MemoryViewState<'a> {
             conversations,
             state,
             can_extract,
-            light_mode,
             glass_mode,
         }
     }
@@ -567,13 +564,9 @@ where
                 .on_press(Message::from(MemoryMessage::CancelDelete));
             let actions = row![confirm_btn, cancel_btn].spacing(8);
 
-            ui::card(
-                column![prompt_text, actions].spacing(8),
-                view.light_mode,
-                view.glass_mode,
-            )
-            .width(Length::Fill)
-            .into()
+            ui::card(column![prompt_text, actions].spacing(8), view.glass_mode)
+                .width(Length::Fill)
+                .into()
         });
 
     // 4. Memory Editor (if active)
@@ -693,7 +686,6 @@ where
                 button_row,
             ]
             .spacing(8),
-            view.light_mode,
             view.glass_mode,
         )
         .width(Length::Fill);
@@ -780,8 +772,7 @@ where
 
             let card_inner = column![meta_row, content_display, scope_label,].spacing(6);
 
-            let memory_card =
-                ui::card(card_inner, view.light_mode, view.glass_mode).width(Length::Fill);
+            let memory_card = ui::card(card_inner, view.glass_mode).width(Length::Fill);
 
             list_column = list_column.push(memory_card);
         }
@@ -1185,15 +1176,8 @@ pub mod tests {
         }];
         let state = MemoryDialogState::new();
 
-        let view_state = MemoryViewState::new(
-            &entries,
-            &characters,
-            &conversations,
-            &state,
-            true,
-            false,
-            false,
-        );
+        let view_state =
+            MemoryViewState::new(&entries, &characters, &conversations, &state, true, false);
 
         let _element: Element<'_, MemoryMessage> = memory_dialog_view(&view_state);
     }
