@@ -823,7 +823,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
                 tooltip::Position::Top,
             ));
         }
-        ImageGeneration::Pending => {
+        ImageGeneration::Pending | ImageGeneration::Batch { .. } => {
             composer_row = composer_row.push(
                 button(text("Cancel image").size(13))
                     .padding([10, 14])

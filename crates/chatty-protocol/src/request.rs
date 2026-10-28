@@ -216,12 +216,14 @@ pub enum Request {
         session_token: String,
     },
     /// Generate one unsaved PNG, such as a character portrait draft.
-    /// Zero dimensions select the configured size; `square` forces equal sides.
+    /// `square` forces equal sides. A shared `seed` keeps a series, such as a
+    /// character's emotion portraits, visually consistent; `None` is random.
     GenerateImage {
         session_token: String,
         prompt: String,
         negative_prompt: String,
         square: bool,
+        seed: Option<u64>,
     },
     /// Generate and persist an image message in a conversation. An empty prompt
     /// asks the text model to describe the current scene from recent messages.

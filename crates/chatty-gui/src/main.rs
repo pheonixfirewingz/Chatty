@@ -25,7 +25,7 @@ use iced::{
     Task, Theme, font, window,
 };
 use iced_dialog::dialog;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -267,6 +267,7 @@ pub struct ChattyApp {
     image_generation: bool,
     scene_image: ImageJob,
     portrait_image: ImageJob,
+    emotion_batch: Option<EmotionBatch>,
     message_images: HashMap<String, Vec<u8>>,
     message_image_requests: HashSet<String>,
     state: HashMap<(String, String), DeltaPayload>,
@@ -343,6 +344,17 @@ impl ImageJob {
     }
 }
 
+/// A running emotion set. Every image shares one seed so the face stays consistent.
+#[derive(Debug)]
+struct EmotionBatch {
+    seed: u64,
+    /// Label of the image currently being generated.
+    current: Option<&'static str>,
+    queue: VecDeque<(&'static str, &'static str)>,
+    done: usize,
+    total: usize,
+}
+
 #[derive(Clone)]
 pub struct Args {
     pub broker: String,
@@ -386,6 +398,7 @@ impl ChattyApp {
             image_generation: false,
             scene_image: ImageJob::default(),
             portrait_image: ImageJob::default(),
+            emotion_batch: None,
             message_images: HashMap::new(),
             message_image_requests: HashSet::new(),
             state: HashMap::new(),
@@ -860,6 +873,8 @@ impl ChattyApp {
                         self.draft_character_open = false;
                     }
                     CharacterMessage::Select(id) => {
+                        // Results must not land in a different character's draft.
+                        self.cancel_portrait_generation();
                         if let Some(c) = self.characters.iter().find(|c| c.id == id) {
                             self.draft = DraftCharacter::from(c);
                             self.draft_world_ids = self
@@ -871,6 +886,7 @@ impl ChattyApp {
                         }
                     }
                     CharacterMessage::New => {
+                        self.cancel_portrait_generation();
                         self.draft = DraftCharacter::default();
                         self.draft_world_ids.clear();
                     }
@@ -918,12 +934,15 @@ impl ChattyApp {
                             self.portrait_image.pending = true;
                             self.send(Request::GenerateImage {
                                 session_token: self.token.clone(),
-                                prompt: characters::portrait_prompt(&self.draft),
+                                prompt: characters::portrait_prompt(&self.draft, None),
                                 negative_prompt: String::new(),
                                 square: true,
+                                seed: None,
                             });
                         }
                     }
+                    CharacterMessage::GenerateEmotions => self.start_emotion_batch(),
+                    CharacterMessage::CancelImageGeneration => self.cancel_portrait_generation(),
                     other => {
                         self.draft.update(&other);
                     }
@@ -1255,7 +1274,13 @@ impl ChattyApp {
                 &self.worlds,
                 &self.character_search,
                 self.char_import_pending,
-                self.portrait_image.state(self.image_generation),
+                match &self.emotion_batch {
+                    Some(batch) => ImageGeneration::Batch {
+                        done: batch.done,
+                        total: batch.total,
+                    },
+                    None => self.portrait_image.state(self.image_generation),
+                },
                 self.light_mode,
                 self.glass_mode,
                 size.width < 800.0,
@@ -2136,6 +2161,7 @@ impl ChattyApp {
                     // The broker cancels image jobs when their connection closes.
                     self.scene_image = ImageJob::default();
                     self.portrait_image = ImageJob::default();
+                    self.emotion_batch = None;
                     self.message_image_requests.clear();
                     self.memory_state.condensing = false;
                     self.admin.models.interrupt_downloads();
@@ -2255,6 +2281,8 @@ impl ChattyApp {
                     self.add_generated_portrait(&data);
                     return;
                 }
+                // A failed image ends the batch; the error itself is shown below.
+                self.emotion_batch = None;
             }
         }
         if frame.message_type == MessageType::Error
@@ -2604,6 +2632,7 @@ impl ChattyApp {
     fn clear_image_jobs(&mut self) {
         self.scene_image = ImageJob::default();
         self.portrait_image = ImageJob::default();
+        self.emotion_batch = None;
         self.message_images.clear();
         self.message_image_requests.clear();
     }
@@ -2632,20 +2661,95 @@ impl ChattyApp {
         }
     }
 
+    fn start_emotion_batch(&mut self) {
+        if !self.image_generation || self.portrait_image.pending || self.emotion_batch.is_some() {
+            return;
+        }
+        let queue: VecDeque<_> = characters::missing_emotions(&self.draft).into();
+        if queue.is_empty() {
+            return;
+        }
+        // A random UUID is a convenient source of seed entropy.
+        let uuid = chatty_protocol::util::new_uuid().replace('-', "");
+        let seed = u64::from_str_radix(&uuid[..16], 16).unwrap_or_default();
+        self.emotion_batch = Some(EmotionBatch {
+            seed,
+            current: None,
+            total: queue.len(),
+            queue,
+            done: 0,
+        });
+        self.send_next_emotion();
+    }
+
+    /// Request the next queued emotion, or end the batch when none remain.
+    fn send_next_emotion(&mut self) {
+        let Some(batch) = &mut self.emotion_batch else {
+            return;
+        };
+        let Some((label, expression)) = batch.queue.pop_front() else {
+            self.emotion_batch = None;
+            return;
+        };
+        batch.current = Some(label);
+        let seed = batch.seed;
+        self.portrait_image.pending = true;
+        self.send(Request::GenerateImage {
+            session_token: self.token.clone(),
+            prompt: characters::portrait_prompt(&self.draft, Some(expression)),
+            negative_prompt: "multiple people, text, watermark".into(),
+            square: true,
+            seed: Some(seed),
+        });
+    }
+
+    fn cancel_portrait_generation(&mut self) {
+        if let Some(id) = self.portrait_image.request_id {
+            let _ = self.commands.send(Command::Cancel(id));
+        }
+        self.portrait_image = ImageJob::default();
+        self.emotion_batch = None;
+    }
+
     fn add_generated_portrait(&mut self, png: &[u8]) {
-        match characters::generated_portrait_png(png) {
-            Ok(data) => {
-                let id = chatty_protocol::util::new_uuid();
-                if self.draft.default_image_id.is_none() {
-                    self.draft.default_image_id = Some(id.clone());
-                }
-                self.draft.images.push(CharacterImage {
-                    id,
-                    label: "generated portrait".into(),
-                    data,
-                });
+        let label = self
+            .emotion_batch
+            .as_mut()
+            .and_then(|batch| batch.current.take());
+        let side = if label.is_some() {
+            characters::EMOTION_PORTRAIT_SIDE
+        } else {
+            characters::PORTRAIT_SIDE
+        };
+        let data = match characters::generated_portrait_png(png, side) {
+            Ok(data) => data,
+            Err(error) => {
+                self.emotion_batch = None;
+                return self.set_error(error);
             }
-            Err(error) => self.set_error(error),
+        };
+        // Stop before a save would exceed the broker's character limits.
+        let used: usize = self.draft.images.iter().map(|image| image.data.len()).sum();
+        if self.draft.images.len() >= characters::MAX_CHARACTER_IMAGES
+            || used + data.len() > characters::MAX_CHARACTER_IMAGE_BYTES
+        {
+            self.emotion_batch = None;
+            return self.set_error(
+                "This character has reached its image limit (32 images or 5 MiB). Remove some images to generate more.",
+            );
+        }
+        let id = chatty_protocol::util::new_uuid();
+        if self.draft.default_image_id.is_none() {
+            self.draft.default_image_id = Some(id.clone());
+        }
+        self.draft.images.push(CharacterImage {
+            id,
+            label: label.unwrap_or("generated portrait").into(),
+            data,
+        });
+        if let Some(batch) = &mut self.emotion_batch {
+            batch.done += 1;
+            self.send_next_emotion();
         }
     }
 
@@ -3821,5 +3925,112 @@ mod tests {
         });
         assert!(!app.memory_state.condensing);
         assert_eq!(app.memory_state.status_message, None);
+    }
+
+    fn generated_png(side: u32) -> Vec<u8> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::RgbImage::from_pixel(side, side, ::image::Rgb([90, 60, 40]))
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        png.into_inner()
+    }
+
+    fn next_image_request(rx: &mut mpsc::UnboundedReceiver<Command>) -> (String, Option<u64>) {
+        while let Ok(command) = rx.try_recv() {
+            if let Command::Request(request) = command
+                && let Request::GenerateImage { prompt, seed, .. } = *request
+            {
+                return (prompt, seed);
+            }
+        }
+        panic!("no image request was sent")
+    }
+
+    fn reply(app: &mut ChattyApp, request_id: u64, response: MessageType, payload: Vec<u8>) {
+        app.handle_event(Event::ImageRequestStarted {
+            request_id,
+            scene: false,
+        });
+        app.handle_frame(Frame {
+            compressed: false,
+            message_type: response,
+            request_id,
+            payload,
+        });
+    }
+
+    #[test]
+    fn emotion_batch_fills_missing_emotions_with_one_seed() {
+        let (commands, mut rx) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.token = "token".into();
+        app.image_generation = true;
+        app.draft.appearance = "silver hair, wool coat".into();
+        app.draft.images.push(CharacterImage {
+            id: "existing".into(),
+            label: "Happy".into(),
+            data: generated_png(128),
+        });
+        let _ = app.update(Message::Character(CharacterMessage::GenerateEmotions));
+        let total = characters::EMOTIONS.len() - 1;
+        let (prompt, seed) = next_image_request(&mut rx);
+        assert!(prompt.contains("neutral calm expression") && prompt.contains("silver hair"));
+        assert!(matches!(
+            app.emotion_batch,
+            Some(EmotionBatch { done: 0, total: t, .. }) if t == total
+        ));
+
+        let image = encode(&Response::GeneratedImage {
+            data: generated_png(768),
+        })
+        .unwrap();
+        reply(&mut app, 1, MessageType::Response, image.clone());
+        let neutral = app.draft.images.last().unwrap();
+        assert_eq!(neutral.label, "neutral");
+        let size = ::image::load_from_memory(&neutral.data).unwrap();
+        assert_eq!((size.width(), size.height()), (384, 384));
+        let (prompt, next_seed) = next_image_request(&mut rx);
+        assert!(
+            prompt.contains("laughing"),
+            "existing Happy image is skipped"
+        );
+        assert_eq!(next_seed, seed, "the whole set shares one seed");
+        assert!(seed.is_some());
+
+        // An error ends the batch and keeps the images already received.
+        let error = encode(&WireError {
+            code: ErrorCode::BackendUnavailable,
+            message: "image generation cancelled".into(),
+            retryable: false,
+        })
+        .unwrap();
+        reply(&mut app, 2, MessageType::Error, error);
+        assert!(app.emotion_batch.is_none());
+        assert!(!app.portrait_image.pending);
+        assert_eq!(app.draft.images.len(), 2);
+    }
+
+    #[test]
+    fn switching_characters_cancels_an_emotion_batch() {
+        let (commands, mut rx) = mpsc::unbounded_channel();
+        let (_, events) = mpsc::unbounded_channel();
+        let mut app = ChattyApp::new(commands, events);
+        app.token = "token".into();
+        app.image_generation = true;
+        app.draft.appearance = "red cloak".into();
+        let _ = app.update(Message::Character(CharacterMessage::GenerateEmotions));
+        next_image_request(&mut rx);
+        app.handle_event(Event::ImageRequestStarted {
+            request_id: 9,
+            scene: false,
+        });
+        let _ = app.update(Message::Character(CharacterMessage::New));
+        assert!(app.emotion_batch.is_none());
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|command| matches!(command, Command::Cancel(9))),
+            "the running job is cancelled on the broker"
+        );
     }
 }

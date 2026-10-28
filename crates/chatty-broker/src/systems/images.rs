@@ -29,11 +29,13 @@ pub(super) async fn image_models(app: &App) -> Result<Vec<String>> {
 }
 
 /// Generate one PNG. `square` uses the shorter configured side for both sides.
+/// `seed` repeats a composition across a series; `None` picks a random seed.
 pub(super) async fn generate_png(
     app: &App,
     prompt: &str,
     negative_prompt: &str,
     square: bool,
+    seed: Option<u64>,
 ) -> Result<Vec<u8>> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -70,8 +72,15 @@ pub(super) async fn generate_png(
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(", ");
-    let mut seed = [0u8; 8];
-    getrandom::fill(&mut seed).map_err(|error| format_err!("generate image seed: {error}"))?;
+    let seed = match seed {
+        Some(seed) => seed,
+        None => {
+            let mut bytes = [0u8; 8];
+            getrandom::fill(&mut bytes)
+                .map_err(|error| format_err!("generate image seed: {error}"))?;
+            u64::from_le_bytes(bytes)
+        }
+    };
     let _permit = IMAGE_JOBS
         .acquire()
         .await
@@ -87,7 +96,7 @@ pub(super) async fn generate_png(
             steps: image.steps,
             guidance: image.guidance,
             // Some backends reject seeds above i64::MAX.
-            seed: u64::from_le_bytes(seed) >> 1,
+            seed: seed & i64::MAX as u64,
             timeout_ms: IMAGE_TIMEOUT.as_millis() as u64,
         })
         .await?

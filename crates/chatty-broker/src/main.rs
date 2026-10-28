@@ -2069,6 +2069,7 @@ async fn dispatch(
             prompt,
             negative_prompt,
             square,
+            seed,
         } => {
             auth(&app.db, &session_token).await?;
             let data = cancellable_image_job(
@@ -2077,7 +2078,7 @@ async fn dispatch(
                 &connection_id,
                 id,
                 busy,
-                generate_png(&app, &prompt, &negative_prompt, square),
+                generate_png(&app, &prompt, &negative_prompt, square, seed),
             )
             .await?;
             send!(MessageType::Response, Response::GeneratedImage { data });
@@ -2095,7 +2096,7 @@ async fn dispatch(
                     "" => describe_scene(&app, &uid, &conversation_id).await?,
                     prompt => prompt.to_owned(),
                 };
-                let png = generate_png(&app, &prompt, "", false).await?;
+                let png = generate_png(&app, &prompt, "", false, None).await?;
                 Ok((prompt, png))
             };
             let (prompt, png) =

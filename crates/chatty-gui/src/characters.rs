@@ -472,6 +472,10 @@ pub enum CharacterMessage {
     AddImages,
     /// Ask the broker's image service for a portrait from the draft's details.
     GeneratePortrait,
+    /// Generate one portrait per missing emotion in [`EMOTIONS`], with one seed.
+    GenerateEmotions,
+    /// Stop a running portrait or emotion generation.
+    CancelImageGeneration,
     AddImageFolder,
     SetDefaultImage(String),
     DeleteImage(String),
@@ -500,25 +504,92 @@ pub enum ImageGeneration {
     Unavailable,
     Ready,
     Pending,
+    /// An emotion set is generating; `done` of `total` images have arrived.
+    Batch {
+        done: usize,
+        total: usize,
+    },
 }
 
-/// Builds an image prompt from the visible details of a character draft.
+/// Emotion labels and the expression text given to the image model. Labels are
+/// what the reply-time portrait selector matches against. Expressions are
+/// deliberately explicit: fast distilled models follow subtle wording weakly.
+/// Avoid colour words, which leak into clothing and backgrounds.
+pub const EMOTIONS: [(&str, &str); 12] = [
+    ("neutral", "neutral calm expression"),
+    ("happy", "happy, warm smile"),
+    ("laughing", "laughing, eyes crinkled with joy"),
+    (
+        "sad",
+        "sad tearful face, teary eyes, trembling lips, eyebrows drawn together",
+    ),
+    ("angry", "angry, furrowed brows, clenched jaw"),
+    (
+        "surprised",
+        "shocked surprised face, eyebrows raised high, eyes wide open, mouth open in a gasp",
+    ),
+    (
+        "scared",
+        "terrified frightened face, eyes wide with fear, eyebrows pulled up, mouth open",
+    ),
+    (
+        "embarrassed",
+        "embarrassed flustered face, blushing cheeks, shy awkward smile, eyes looking away",
+    ),
+    ("flirty", "flirty, playful smile, half-lidded eyes"),
+    ("thoughtful", "thoughtful, pensive gaze"),
+    ("smug", "smug, confident smirk"),
+    (
+        "disgusted",
+        "disgusted grossed-out face, nose wrinkled, upper lip curled in revulsion",
+    ),
+];
+
+/// Character limits enforced by the broker on save.
+pub const MAX_CHARACTER_IMAGES: usize = 32;
+pub const MAX_CHARACTER_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Emotion sets use a smaller side so a full set fits the byte budget.
+pub const EMOTION_PORTRAIT_SIDE: u32 = 384;
+pub const PORTRAIT_SIDE: u32 = 512;
+
+/// Emotions in [`EMOTIONS`] without an image of that label in the draft.
 #[must_use]
-pub fn portrait_prompt(draft: &DraftCharacter) -> String {
+pub fn missing_emotions(draft: &DraftCharacter) -> Vec<(&'static str, &'static str)> {
+    EMOTIONS
+        .into_iter()
+        .filter(|(label, _)| {
+            !draft
+                .images
+                .iter()
+                .any(|image| image.label.trim().eq_ignore_ascii_case(label))
+        })
+        .collect()
+}
+
+/// Builds an image prompt from the visible details of a character draft. The
+/// expression comes first so models weight it strongly.
+#[must_use]
+pub fn portrait_prompt(draft: &DraftCharacter, expression: Option<&str>) -> String {
     let details = [&draft.age, &draft.gender, &draft.race, &draft.appearance]
         .into_iter()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>()
         .join(", ");
+    let expression = expression
+        .map(|value| format!("{value}, "))
+        .unwrap_or_default();
     let prompt = format!(
-        "character portrait, head and shoulders, looking at viewer, detailed face, {details}"
+        "character portrait, {expression}head and shoulders, looking at viewer, detailed face, {details}"
     );
     prompt.chars().take(2000).collect()
 }
 
-/// Crops a generated PNG to a top-aligned square and downsizes it to portrait bounds.
-pub fn generated_portrait_png(source: &[u8]) -> std::result::Result<Vec<u8>, String> {
+/// Crops a generated PNG to a top-aligned square and downsizes it to at most `max_side`.
+pub fn generated_portrait_png(
+    source: &[u8],
+    max_side: u32,
+) -> std::result::Result<Vec<u8>, String> {
     let decoded = ::image::load_from_memory_with_format(source, ::image::ImageFormat::Png)
         .map_err(|_| "the image service did not return a valid PNG".to_owned())?;
     let side = decoded.width().min(decoded.height());
@@ -526,8 +597,8 @@ pub fn generated_portrait_png(source: &[u8]) -> std::result::Result<Vec<u8>, Str
         return Err("the generated image is smaller than 128×128".into());
     }
     let square = decoded.crop_imm((decoded.width() - side) / 2, 0, side, side);
-    let portrait = if side > 512 {
-        square.resize_exact(512, 512, ::image::imageops::FilterType::Triangle)
+    let portrait = if side > max_side {
+        square.resize_exact(max_side, max_side, ::image::imageops::FilterType::Triangle)
     } else {
         square
     };
@@ -1015,7 +1086,7 @@ fn character_editor_at_width<'a>(
 
     let mut gallery_col = column![
         text("Character images").size(14),
-        text("Add PNG portraits and describe the expression or scene. Images are top-centered, cropped square, and shown as circles.").size(12),
+        text("Add PNG portraits and describe the expression or scene. Images are top-centered, cropped square, and shown as circles. Generated emotions use one seed and the Appearance field; review them, then save.").size(12),
     ]
     .spacing(4);
 
@@ -1032,17 +1103,42 @@ fn character_editor_at_width<'a>(
         match portrait {
             ImageGeneration::Unavailable => {}
             ImageGeneration::Ready => {
-                image_actions = image_actions.push(
-                    button(text("Generate portrait").size(13))
-                        .padding(Padding::from([4, 10]))
-                        .on_press_maybe(
-                            (!draft.appearance.trim().is_empty())
-                                .then_some(CharacterMessage::GeneratePortrait),
-                        ),
-                );
+                let described = !draft.appearance.trim().is_empty();
+                let missing = missing_emotions(draft).len();
+                image_actions = image_actions
+                    .push(
+                        button(text("Generate portrait").size(13))
+                            .padding(Padding::from([4, 10]))
+                            .on_press_maybe(
+                                described.then_some(CharacterMessage::GeneratePortrait),
+                            ),
+                    )
+                    .push(
+                        button(text(format!("Generate emotions ({missing})")).size(13))
+                            .padding(Padding::from([4, 10]))
+                            .on_press_maybe(
+                                (described && missing > 0)
+                                    .then_some(CharacterMessage::GenerateEmotions),
+                            ),
+                    );
             }
             ImageGeneration::Pending => {
-                image_actions = image_actions.push(text("Generating portrait…").size(13));
+                image_actions = image_actions
+                    .push(text("Generating portrait…").size(13))
+                    .push(
+                        button(text("Cancel").size(13))
+                            .padding(Padding::from([4, 10]))
+                            .on_press(CharacterMessage::CancelImageGeneration),
+                    );
+            }
+            ImageGeneration::Batch { done, total } => {
+                image_actions = image_actions
+                    .push(text(format!("Generating emotions {done}/{total}…")).size(13))
+                    .push(
+                        button(text("Cancel").size(13))
+                            .padding(Padding::from([4, 10]))
+                            .on_press(CharacterMessage::CancelImageGeneration),
+                    );
             }
         }
         gallery_col = gallery_col.push(image_actions.wrap());
@@ -1257,6 +1353,43 @@ pub fn character_dialog_view_mapped<'a, Message: 'a>(
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn emotion_prompts_lead_with_the_expression_and_skip_existing_labels() {
+        let mut draft = DraftCharacter {
+            appearance: "short silver hair".into(),
+            age: "45".into(),
+            ..DraftCharacter::default()
+        };
+        let prompt = portrait_prompt(&draft, Some("sad, downcast eyes"));
+        assert!(prompt.starts_with("character portrait, sad, downcast eyes, head and shoulders"));
+        assert!(prompt.ends_with("45, short silver hair"));
+        assert_eq!(missing_emotions(&draft).len(), EMOTIONS.len());
+        draft.images.push(CharacterImage {
+            id: "a".into(),
+            label: " SAD ".into(),
+            data: vec![],
+        });
+        assert!(
+            !missing_emotions(&draft)
+                .iter()
+                .any(|(label, _)| *label == "sad")
+        );
+        // A full set at the emotion size is expected to fit the broker's byte budget.
+        assert!(EMOTIONS.len() <= MAX_CHARACTER_IMAGES);
+    }
+
+    #[test]
+    fn generated_portraits_are_cropped_and_bounded() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::RgbImage::new(1024, 768)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let portrait = generated_portrait_png(png.get_ref(), EMOTION_PORTRAIT_SIDE).unwrap();
+        let decoded = ::image::load_from_memory(&portrait).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (384, 384));
+        assert!(normalize_character_image_png(&portrait).is_ok());
+    }
 
     #[test]
     fn test_draft_character_conversions() {
