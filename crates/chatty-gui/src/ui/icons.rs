@@ -62,6 +62,8 @@ pub enum MessageIcon {
     Image,
     Folder,
     Star,
+    Pin,
+    Merge,
 }
 
 /// Kind of vector icon.
@@ -544,6 +546,28 @@ fn draw_message_icon(frame: &mut Frame, icon: MessageIcon, center: Point, stroke
                 }
             }
             b.close();
+        }
+        MessageIcon::Pin => {
+            b.move_to(point(-4.0, -8.0));
+            b.line_to(point(4.0, -8.0));
+            b.move_to(point(-2.0, -8.0));
+            b.line_to(point(-3.0, -1.0));
+            b.move_to(point(2.0, -8.0));
+            b.line_to(point(3.0, -1.0));
+            b.move_to(point(-7.0, -1.0));
+            b.line_to(point(7.0, -1.0));
+            b.move_to(point(0.0, -1.0));
+            b.line_to(point(0.0, 9.0));
+        }
+        MessageIcon::Merge => {
+            b.move_to(point(-8.0, -7.0));
+            b.line_to(point(-1.0, 0.0));
+            b.line_to(point(-8.0, 7.0));
+            b.move_to(point(-1.0, 0.0));
+            b.line_to(point(8.0, 0.0));
+            b.move_to(point(4.0, -4.0));
+            b.line_to(point(8.0, 0.0));
+            b.line_to(point(4.0, 4.0));
         }
         MessageIcon::Read => {
             b.move_to(point(-9.0, -3.0));

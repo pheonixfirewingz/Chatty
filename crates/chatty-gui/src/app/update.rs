@@ -207,10 +207,7 @@ impl ChattyApp {
                 self.update_world(msg);
                 Task::none()
             }
-            Message::Memory(msg) => {
-                self.update_memory(msg);
-                Task::none()
-            }
+            Message::Memory(msg) => self.update_memory(msg),
             Message::Conversation(msg) => self.update_conversation(msg),
             Message::Admin(msg) => {
                 self.update_admin(msg);
@@ -420,7 +417,10 @@ impl ChattyApp {
         }
     }
 
-    pub(super) fn update_memory(&mut self, msg: MemoryMessage) {
+    pub(super) fn update_memory(&mut self, msg: MemoryMessage) -> Task<Message> {
+        if let MemoryMessage::Edit(action) = msg {
+            return self.memory_state.perform(action).map(Message::Memory);
+        }
         let action = self.memory_state.update(&self.memories, msg);
         match action {
             MemoryAction::Save(input) => {
@@ -470,6 +470,7 @@ impl ChattyApp {
             }
             MemoryAction::None => {}
         }
+        Task::none()
     }
 
     pub(super) fn update_admin(&mut self, msg: AdminMessage) {

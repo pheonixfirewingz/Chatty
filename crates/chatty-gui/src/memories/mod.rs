@@ -7,6 +7,13 @@ mod view;
 pub use view::*;
 
 use chatty_protocol::{MemoryEntry, MemoryInput, MemoryKind};
+use iced::widget::text_editor;
+
+/// Broker importance scale; retrieval ranks by it, and learned memories use 50.
+pub const MAX_IMPORTANCE: u8 = 100;
+const DEFAULT_IMPORTANCE: u8 = 50;
+/// Tallest the content editor grows before it scrolls.
+pub const EDITOR_MAX_HEIGHT: f32 = 180.0;
 
 /// User interaction messages for the Memories dialog and editor.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,8 +38,8 @@ pub enum MemoryMessage {
     Refresh,
     /// Open editor for an existing memory entry.
     EditMemory(String),
-    /// Memory content text changed in editor.
-    ContentChanged(String),
+    /// Cursor, selection, or edit in the content editor.
+    Edit(text_editor::Action),
     /// Memory kind changed in editor.
     KindChanged(MemoryKind),
     /// Linked character changed in editor (None = Global).
@@ -41,8 +48,10 @@ pub enum MemoryMessage {
     ConversationChanged(Option<String>),
     /// Pinned state toggled in editor.
     PinnedToggled(bool),
-    /// Importance rating changed in editor (1..=10).
+    /// Importance rating changed in editor (0..=100).
     ImportanceChanged(u8),
+    /// Pin or unpin a saved memory without opening the editor.
+    TogglePin(String),
     /// Save the memory currently in the editor.
     SaveMemory,
     /// Cancel editing or adding a memory.
@@ -71,13 +80,15 @@ pub enum MemoryAction {
 }
 
 /// Standalone state for memory dialog management.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct MemoryDialogState {
     pub filter_character_id: Option<String>,
     pub filter_conversation_id: Option<String>,
     pub filter_kind: Option<MemoryKind>,
     pub search_query: String,
     pub editing_memory: Option<MemoryInput>,
+    /// Buffer for `editing_memory.content`; reloaded whenever the draft is replaced.
+    pub editor: text_editor::Content,
     pub delete_confirm_id: Option<String>,
     pub condensing: bool,
     pub status_message: Option<String>,
@@ -116,7 +127,7 @@ impl MemoryDialogState {
                 MemoryAction::None
             }
             MemoryMessage::AddMemory => {
-                self.editing_memory = Some(blank_memory(
+                self.start_editing(blank_memory(
                     self.filter_character_id.clone(),
                     self.filter_conversation_id.clone(),
                 ));
@@ -134,22 +145,13 @@ impl MemoryDialogState {
             MemoryMessage::Refresh => MemoryAction::Refresh,
             MemoryMessage::EditMemory(id) => {
                 if let Some(entry) = memories.iter().find(|m| m.id == id) {
-                    self.editing_memory = Some(MemoryInput {
-                        id: Some(entry.id.clone()),
-                        conversation_id: entry.conversation_id.clone(),
-                        character_id: entry.character_id.clone(),
-                        kind: entry.kind,
-                        content: entry.content.clone(),
-                        importance: entry.importance,
-                        pinned: entry.pinned,
-                    });
+                    self.start_editing(memory_input(entry));
                 }
                 MemoryAction::None
             }
-            MemoryMessage::ContentChanged(content) => {
-                if let Some(ref mut input) = self.editing_memory {
-                    input.content = content;
-                }
+            MemoryMessage::Edit(action) => {
+                // The app calls `perform` directly so the scroll task reaches the runtime.
+                let _ = self.perform(action);
                 MemoryAction::None
             }
             MemoryMessage::KindChanged(kind) => {
@@ -178,10 +180,17 @@ impl MemoryDialogState {
             }
             MemoryMessage::ImportanceChanged(importance) => {
                 if let Some(ref mut input) = self.editing_memory {
-                    input.importance = importance.clamp(1, 10);
+                    input.importance = importance.min(MAX_IMPORTANCE);
                 }
                 MemoryAction::None
             }
+            MemoryMessage::TogglePin(id) => match memories.iter().find(|m| m.id == id) {
+                Some(entry) => MemoryAction::Save(MemoryInput {
+                    pinned: !entry.pinned,
+                    ..memory_input(entry)
+                }),
+                None => MemoryAction::None,
+            },
             MemoryMessage::SaveMemory => {
                 if let Some(input) = self.editing_memory.take() {
                     if input.content.trim().is_empty() {
@@ -213,6 +222,66 @@ impl MemoryDialogState {
             MemoryMessage::Close => MemoryAction::Close,
         }
     }
+
+    fn start_editing(&mut self, input: MemoryInput) {
+        self.editor = text_editor::Content::with_text(&input.content);
+        self.delete_confirm_id = None;
+        self.editing_memory = Some(input);
+    }
+
+    /// Apply an editor action and copy edits back into the draft.
+    ///
+    /// Typing and keyboard movement return a task that scrolls the editor to keep
+    /// the cursor in view; clicks and drags leave it alone.
+    pub fn perform(&mut self, action: text_editor::Action) -> iced::Task<MemoryMessage> {
+        let follow = matches!(
+            action,
+            text_editor::Action::Edit(_) | text_editor::Action::Move(_)
+        );
+        let edit = action.is_edit();
+        self.editor.perform(action);
+        if edit && let Some(input) = &mut self.editing_memory {
+            input.content = self.editor.text();
+        }
+        if !follow {
+            return iced::Task::none();
+        }
+        // The text offset of the cursor approximates its height in the wrapped
+        // layout, which the editor does not expose.
+        let cursor = self.editor.cursor().position;
+        let (mut before, mut total) = (0, 0);
+        for index in 0..self.editor.line_count() {
+            let len = self.editor.line(index).map_or(0, |line| line.text.len()) + 1;
+            if index < cursor.line {
+                before += len;
+            }
+            total += len;
+        }
+        let y = (before + cursor.column) as f32 / total.saturating_sub(1).max(1) as f32;
+        iced::widget::operation::snap_to(
+            editor_scroll_id(),
+            iced::widget::scrollable::RelativeOffset {
+                x: None,
+                y: Some(y.min(1.0)),
+            },
+        )
+    }
+}
+
+pub(crate) fn editor_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("memory-content")
+}
+
+fn memory_input(entry: &MemoryEntry) -> MemoryInput {
+    MemoryInput {
+        id: Some(entry.id.clone()),
+        conversation_id: entry.conversation_id.clone(),
+        character_id: entry.character_id.clone(),
+        kind: entry.kind,
+        content: entry.content.clone(),
+        importance: entry.importance,
+        pinned: entry.pinned,
+    }
 }
 
 /// Constructs a blank `MemoryInput` pre-populated with optional scope and default values.
@@ -223,7 +292,7 @@ pub fn blank_memory(character_id: Option<String>, conversation_id: Option<String
         character_id,
         kind: MemoryKind::Fact,
         content: String::new(),
-        importance: 5,
+        importance: DEFAULT_IMPORTANCE,
         pinned: false,
     }
 }

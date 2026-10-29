@@ -156,12 +156,6 @@ fn test_memory_message_variants() {
     let msg_edit = MemoryMessage::EditMemory("m1".into());
     assert_eq!(msg_edit, MemoryMessage::EditMemory("m1".into()));
 
-    let msg_content = MemoryMessage::ContentChanged("new text".into());
-    assert_eq!(
-        msg_content,
-        MemoryMessage::ContentChanged("new text".into())
-    );
-
     let msg_prio = MemoryMessage::ImportanceChanged(9);
     assert_eq!(msg_prio, MemoryMessage::ImportanceChanged(9));
 
@@ -238,7 +232,7 @@ fn test_blank_memory() {
     assert_eq!(blank.conversation_id, Some("cv1".into()));
     assert_eq!(blank.kind, MemoryKind::Fact);
     assert_eq!(blank.content, "");
-    assert_eq!(blank.importance, 5);
+    assert_eq!(blank.importance, 50);
     assert!(!blank.pinned);
 }
 
@@ -262,21 +256,23 @@ fn test_dialog_state_crud_and_editing() {
     assert!(state.editing_memory.is_some());
     let draft = state.editing_memory.as_ref().unwrap();
     assert_eq!(draft.character_id, Some("char-1".into()));
-    assert_eq!(draft.importance, 5);
+    assert_eq!(draft.importance, 50);
 
     // 3. Edit fields
     state.update(
         &entries,
-        MemoryMessage::ContentChanged("Valuable ancient coin".into()),
+        MemoryMessage::Edit(text_editor::Action::Edit(text_editor::Edit::Paste(
+            std::sync::Arc::new("Valuable ancient coin".into()),
+        ))),
     );
     state.update(&entries, MemoryMessage::KindChanged(MemoryKind::Fact));
-    state.update(&entries, MemoryMessage::ImportanceChanged(9));
+    state.update(&entries, MemoryMessage::ImportanceChanged(90));
     state.update(&entries, MemoryMessage::PinnedToggled(true));
 
     let draft = state.editing_memory.as_ref().unwrap();
     assert_eq!(draft.content, "Valuable ancient coin");
     assert_eq!(draft.kind, MemoryKind::Fact);
-    assert_eq!(draft.importance, 9);
+    assert_eq!(draft.importance, 90);
     assert!(draft.pinned);
 
     // 4. Save memory
@@ -284,7 +280,7 @@ fn test_dialog_state_crud_and_editing() {
     match save_act {
         MemoryAction::Save(input) => {
             assert_eq!(input.content, "Valuable ancient coin");
-            assert_eq!(input.importance, 9);
+            assert_eq!(input.importance, 90);
             assert!(input.pinned);
         }
         _ => panic!("Expected MemoryAction::Save"),
@@ -300,6 +296,7 @@ fn test_dialog_state_crud_and_editing() {
         editing.content,
         "The party defeated the shadow beast at the river crossing."
     );
+    assert_eq!(state.editor.text(), editing.content);
 
     // Cancel editing
     state.update(&entries, MemoryMessage::CancelEdit);
@@ -362,4 +359,26 @@ fn test_memory_dialog_view_creation() {
         MemoryViewState::new(&entries, &characters, &conversations, &state, true, false);
 
     let _element: Element<'_, MemoryMessage> = memory_dialog_view(&view_state);
+}
+
+#[test]
+fn importance_uses_the_broker_scale_and_pin_toggles_save_directly() {
+    let entries = sample_entries();
+    let mut state = MemoryDialogState::default();
+    state.update(&entries, MemoryMessage::AddMemory);
+    state.update(&entries, MemoryMessage::ImportanceChanged(250));
+    assert_eq!(state.editing_memory.as_ref().unwrap().importance, 100);
+
+    match state.update(&entries, MemoryMessage::TogglePin("m2".into())) {
+        MemoryAction::Save(input) => {
+            assert_eq!(input.id.as_deref(), Some("m2"));
+            assert!(input.pinned);
+            assert_eq!(input.content, entries[1].content);
+        }
+        other => panic!("expected save, got {other:?}"),
+    }
+    assert!(matches!(
+        state.update(&entries, MemoryMessage::TogglePin("missing".into())),
+        MemoryAction::None
+    ));
 }
