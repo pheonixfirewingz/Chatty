@@ -851,6 +851,7 @@ fn management_and_inference_use_the_same_administrator_selection() {
         allow_self_registration: false,
         image: Default::default(),
         emotion_model: String::new(),
+        memory_model: String::new(),
         reasoning: Default::default(),
     };
     host.configuration_changed(&config).unwrap();

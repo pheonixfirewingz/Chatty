@@ -43,6 +43,7 @@ pub enum AdminMessage {
     SeedChanged(i64),
     KeepAliveChanged(String),
     EmotionModelChanged(String),
+    MemoryModelChanged(String),
     ReasoningChanged(chatty_protocol::ReasoningLevel),
     InstallEmotionModel,
     TogglePublicCharacters(bool),
@@ -332,6 +333,7 @@ impl Default for AdminState {
                 allow_self_registration: true,
                 image: Default::default(),
                 emotion_model: String::new(),
+                memory_model: String::new(),
                 reasoning: Default::default(),
             },
             broker_monitor: None,
@@ -516,7 +518,7 @@ impl AdminState {
             AdminMessage::SaveBrokerConfig => {
                 vec![Request::AdminSetBrokerConfig {
                     session_token: session_token.to_string(),
-                    config: self.broker_config.clone(),
+                    config: Box::new(self.broker_config.clone()),
                 }]
             }
             AdminMessage::ToggleAdapter(enabled) => {
@@ -572,6 +574,10 @@ impl AdminState {
             }
             AdminMessage::EmotionModelChanged(path) => {
                 self.broker_config.emotion_model = path;
+                vec![]
+            }
+            AdminMessage::MemoryModelChanged(model) => {
+                self.broker_config.memory_model = model;
                 vec![]
             }
             AdminMessage::ReasoningChanged(level) => {

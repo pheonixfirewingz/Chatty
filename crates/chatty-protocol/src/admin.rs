@@ -29,6 +29,9 @@ pub struct BrokerConfig {
     /// Broker-host path to the emotion classifier GGUF, run in-process after
     /// each reply to pick a portrait. Empty disables classification.
     pub emotion_model: String,
+    /// Inference model for memory extraction, usually a small fast one. The
+    /// server swaps it in for the chat model. Empty uses the chat model.
+    pub memory_model: String,
     /// Hidden reasoning effort for chat replies. Auxiliary calls such as
     /// memory extraction always disable reasoning.
     pub reasoning: ReasoningLevel,

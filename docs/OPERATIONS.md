@@ -95,6 +95,18 @@ The model loads on the first reply after saving and stays resident, using about 
 
 **Admin Portal → Models → Reasoning** sets hidden reasoning effort for chat replies. **Model default** sends no option. **Off** disables reasoning. **Low**, **Medium**, and **High** are sent as Ollama `think` or OpenAI `reasoning_effort`; models with only on/off reasoning treat them all as on. Memory extraction, titles, and other auxiliary calls keep their own settings. While the model reasons, the chat shows "is thinking…". Reasoning text is never shown or stored. Migration 0017 adds the setting, and protocol 24 carries it; upgrade broker and GUI together.
 
+### Memory model
+
+**Admin Portal → Models → Memory model** names a small, fast model on the inference server for memory extraction and condensation, for example `qwen3:4b-instruct`. Pull it first, like any other model. Empty uses the chat model.
+
+- The memory model runs with at most a 16384-token context, whatever the chat context setting is.
+- When the chat model fills GPU memory, the inference server unloads it to load the memory model, and reloads the chat model for the next reply.
+- So the broker learns memories only after a chat has been quiet for 60 seconds. Each reply restarts the wait. After six replies, extraction runs anyway, so long sessions still save memories.
+- **Learn from chat** and **Merge duplicates** run at once and use the same model.
+- If the named model is not installed, extraction fails, is logged, and retries after the next reply.
+
+Migration 0018 adds the setting, and protocol 26 carries it; upgrade broker and GUI together.
+
 ### Image generation with ComfyUI
 
 Image generation is separate from text inference and disabled by default. It produces character portrait drafts and persisted scene images in chats. Migration 0014 adds its settings and the encrypted `message_images` table. Protocol 20 carries the settings and image requests; upgrade broker and GUI together.

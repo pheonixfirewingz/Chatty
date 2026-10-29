@@ -544,7 +544,7 @@ async fn extract_memories(
 ) -> Result<MemoryExtraction> {
     own_conversation(&app.db, owner_id, conversation_id).await?;
     let config = load_broker_config(&app.db).await?;
-    let model = selected_model(app).await?;
+    let (model, num_ctx) = memory_model(app, &config).await?;
     let recent = sqlx::query(
         "SELECT m.id,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.revision DESC LIMIT 40",
     )
@@ -562,8 +562,8 @@ async fn extract_memories(
         MEMORY_EXTRACTION_INSTRUCTIONS
     };
     // Reserve separate shares so a large card cannot hide saved memories or lore.
-    let output_tokens = (config.num_ctx as usize / 4).clamp(32, 512);
-    let input_tokens = (config.num_ctx as usize).saturating_sub(output_tokens);
+    let output_tokens = (num_ctx as usize / 4).clamp(32, 512);
+    let input_tokens = (num_ctx as usize).saturating_sub(output_tokens);
     let mut system = clip_to_token_budget(instructions, input_tokens / 3);
     let mut known = Vec::new();
     if let Some(character_id) = character_id {
@@ -655,7 +655,7 @@ async fn extract_memories(
         AdapterMessage::new("system", system),
         AdapterMessage::new("user", transcript.join("\n")),
     ];
-    debug_messages("extract_memory", &messages, Some(config.num_ctx));
+    debug_messages("extract_memory", &messages, Some(num_ctx));
     let response = complete(
         app,
         &model,
@@ -663,7 +663,7 @@ async fn extract_memories(
         GenerationOptions {
             max_tokens: Some(output_tokens as i32),
             temperature: Some(0.0),
-            context_tokens: Some(config.num_ctx),
+            context_tokens: Some(num_ctx),
             keep_alive: Some(config.keep_alive),
             disable_reasoning: true,
             ..Default::default()
@@ -826,6 +826,12 @@ async fn schedule_automatic_memory(
     let mut character_id = character_id.to_owned();
     tokio::spawn(async move {
         loop {
+            let swaps_model = load_broker_config(&app.db)
+                .await
+                .is_ok_and(|config| !config.memory_model.is_empty());
+            if swaps_model {
+                wait_for_quiet_chat(&app, &key, &mut character_id).await;
+            }
             if let Err(error) =
                 maybe_extract_automatic_memory(&app, &key.0, &key.1, &character_id).await
             {
@@ -841,6 +847,30 @@ async fn schedule_automatic_memory(
             }
         }
     });
+}
+
+/// Quiet period before a dedicated memory model is swapped in.
+const MEMORY_SWAP_QUIET: Duration = Duration::from_secs(60);
+/// Replies that may postpone extraction before it runs during an active chat.
+const MEMORY_SWAP_MAX_DEFERRALS: usize = 6;
+
+/// A dedicated memory model evicts the chat model, so the next reply would wait
+/// for the chat model to reload. Wait until the chat goes quiet; each reply
+/// during the wait restarts it, up to a bound so memories still get saved.
+async fn wait_for_quiet_chat(app: &App, key: &(String, String), character_id: &mut String) {
+    for _ in 0..MEMORY_SWAP_MAX_DEFERRALS {
+        tokio::time::sleep(MEMORY_SWAP_QUIET).await;
+        match app
+            .memory_jobs
+            .lock()
+            .await
+            .get_mut(key)
+            .and_then(Option::take)
+        {
+            Some(next_character) => *character_id = next_character,
+            None => return,
+        }
+    }
 }
 
 pub(super) fn validate_extracted_memory(value: &str) -> Result<String> {
@@ -977,9 +1007,9 @@ pub(super) async fn condense_memories(
     }
 
     let config = load_broker_config(&app.db).await?;
-    let model = selected_model(app).await?;
-    let output_tokens = (config.num_ctx as usize / 4).clamp(64, 1_024);
-    let input_tokens = (config.num_ctx as usize).saturating_sub(output_tokens);
+    let (model, num_ctx) = memory_model(app, &config).await?;
+    let output_tokens = (num_ctx as usize / 4).clamp(64, 1_024);
+    let input_tokens = (num_ctx as usize).saturating_sub(output_tokens);
     let system = clip_to_token_budget(MEMORY_CONDENSATION_INSTRUCTIONS, input_tokens / 2);
     let mut remaining =
         input_tokens.saturating_sub(estimated_message_tokens(&system) + MESSAGE_OVERHEAD_TOKENS);
@@ -1040,7 +1070,7 @@ pub(super) async fn condense_memories(
         AdapterMessage::new("system", system),
         AdapterMessage::new("user", transcript),
     ];
-    debug_messages("condense_memories", &messages, Some(config.num_ctx));
+    debug_messages("condense_memories", &messages, Some(num_ctx));
     let response = complete(
         app,
         &model,
@@ -1048,7 +1078,7 @@ pub(super) async fn condense_memories(
         GenerationOptions {
             max_tokens: Some(output_tokens as i32),
             temperature: Some(0.0),
-            context_tokens: Some(config.num_ctx),
+            context_tokens: Some(num_ctx),
             keep_alive: Some(config.keep_alive),
             disable_reasoning: true,
             ..Default::default()
@@ -1225,6 +1255,28 @@ pub(super) async fn selected_model(app: &App) -> Result<String> {
     } else {
         bail!("configured model '{}' is not installed", config.model)
     }
+}
+
+/// Context window for a dedicated memory model. Extraction input is bounded, so
+/// a small window keeps the model fast and its swap cheap.
+const MEMORY_MODEL_CONTEXT: u32 = 16_384;
+
+/// Model and context window for memory extraction and condensation. A
+/// dedicated memory model replaces the chat model on the inference server.
+async fn memory_model(app: &App, config: &BrokerConfig) -> Result<(String, u32)> {
+    if config.memory_model.is_empty() {
+        return Ok((selected_model(app).await?, config.num_ctx));
+    }
+    if !probe_backend(app).await?.contains(&config.memory_model) {
+        bail!(
+            "configured memory model '{}' is not installed",
+            config.memory_model
+        )
+    }
+    Ok((
+        config.memory_model.clone(),
+        config.num_ctx.min(MEMORY_MODEL_CONTEXT),
+    ))
 }
 
 pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
@@ -1844,6 +1896,7 @@ mod prompt_budget_tests {
             allow_self_registration: false,
             image: Default::default(),
             emotion_model: String::new(),
+            memory_model: String::new(),
             reasoning: Default::default(),
         };
         assert_eq!(prompt_input_budget(&config), 3_072);
@@ -2520,6 +2573,67 @@ mod automatic_memory_tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn automatic_memory_uses_the_dedicated_memory_model() {
+        let mut server = server().await;
+        let app = app(&server.url).await;
+        // The chat model is not needed when a memory model is configured.
+        sqlx::query("UPDATE broker_settings SET model='absent-chat-model',memory_model='missing'")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let error = maybe_extract_automatic_memory(&app, "owner", "chat", "character")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("memory model 'missing' is not installed")
+        );
+
+        sqlx::query("UPDATE broker_settings SET memory_model='test-model'")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        server
+            .responses
+            .send((200, r#"["The user enjoys tea at dawn."]"#.into()))
+            .await
+            .unwrap();
+        maybe_extract_automatic_memory(&app, "owner", "chat", "character")
+            .await
+            .unwrap();
+        let request = server.requests.recv().await.unwrap();
+        assert_eq!(request["model"], "test-model");
+        assert_eq!(checkpoint(&app).await, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_model_swap_waits_for_a_quiet_chat() {
+        let server = server().await;
+        let app = app(&server.url).await;
+        // Pause only after setup: a paused clock times out SQLite pool connects.
+        tokio::time::pause();
+        let key = ("owner".to_owned(), "chat".to_owned());
+        app.memory_jobs.lock().await.insert(key.clone(), None);
+        let mut character_id = "character".to_owned();
+        let started = tokio::time::Instant::now();
+        {
+            let wait = wait_for_quiet_chat(&app, &key, &mut character_id);
+            tokio::pin!(wait);
+            // A reply during the first quiet period restarts the wait.
+            tokio::select! {
+                _ = &mut wait => panic!("finished before the chat went quiet"),
+                _ = tokio::time::sleep(MEMORY_SWAP_QUIET / 2) => {}
+            }
+            *app.memory_jobs.lock().await.get_mut(&key).unwrap() = Some("other".into());
+            wait.await;
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed >= MEMORY_SWAP_QUIET * 2 && elapsed < MEMORY_SWAP_QUIET * 3);
+        assert_eq!(character_id, "other");
     }
 
     #[tokio::test]

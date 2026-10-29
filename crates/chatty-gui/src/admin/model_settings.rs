@@ -76,6 +76,9 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
         field("Chat model", "Use a model from Installed, or enter a custom model ID. Empty selects the first available model.",
             text_input("Automatic", &config.model)
                 .on_input(|value| Message::from(AdminMessage::SelectAdapterModel(value)))),
+        field("Memory model", "Small, fast model for learning memories, e.g. qwen3:4b-instruct. The server swaps it in for the chat model once a chat is quiet for a minute. Empty uses the chat model.",
+            text_input("Same as chat model", &config.memory_model)
+                .on_input(|value| Message::from(AdminMessage::MemoryModelChanged(value)))),
         field("Emotion classifier", "GGUF path on the broker host, run inside the broker after each reply to pick a portrait. Empty disables it.",
             row![
                 text_input("/var/lib/chatty/EmotionTextClassifierLLM.gguf", &config.emotion_model)

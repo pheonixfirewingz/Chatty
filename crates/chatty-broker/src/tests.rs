@@ -234,7 +234,7 @@ async fn runtime_adapter_selection_is_authorized_validated_and_persisted() {
             &app,
             Request::AdminSetBrokerConfig {
                 session_token: tokens[1].clone(),
-                config: config.clone(),
+                config: Box::new(config.clone()),
             }
         )
         .await
@@ -244,7 +244,7 @@ async fn runtime_adapter_selection_is_authorized_validated_and_persisted() {
         &app,
         Request::AdminSetBrokerConfig {
             session_token: tokens[0].clone(),
-            config: config.clone(),
+            config: Box::new(config.clone()),
         },
     )
     .await
@@ -267,7 +267,7 @@ async fn runtime_adapter_selection_is_authorized_validated_and_persisted() {
                 &app,
                 Request::AdminSetBrokerConfig {
                     session_token: tokens[0].clone(),
-                    config: config.clone(),
+                    config: Box::new(config.clone()),
                 }
             )
             .await
@@ -1142,7 +1142,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         &app,
         Request::AdminSetBrokerConfig {
             session_token: first_token.clone(),
-            config: BrokerConfig {
+            config: Box::new(BrokerConfig {
                 adapter_enabled: false,
                 adapter_url: "http://127.0.0.1:11434/v1".into(),
                 adapter_plugin: String::new(),
@@ -1160,8 +1160,9 @@ async fn cross_tenant_character_update_is_forbidden() {
                 allow_self_registration: false,
                 image: Default::default(),
                 emotion_model: String::new(),
+                memory_model: String::new(),
                 reasoning: Default::default(),
-            },
+            }),
         },
     )
     .await
@@ -1578,7 +1579,7 @@ async fn scene_images_are_generated_encrypted_and_owner_scoped() {
         &app,
         Request::AdminSetBrokerConfig {
             session_token: tokens[1].clone(),
-            config: config.clone(),
+            config: Box::new(config.clone()),
         },
     )
     .await;
@@ -1587,7 +1588,7 @@ async fn scene_images_are_generated_encrypted_and_owner_scoped() {
         &app,
         Request::AdminSetBrokerConfig {
             session_token: tokens[0].clone(),
-            config,
+            config: Box::new(config),
         },
     )
     .await

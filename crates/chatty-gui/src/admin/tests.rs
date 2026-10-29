@@ -56,7 +56,7 @@ fn model_settings_navigation_and_disclosure_preserve_saved_values() {
     }
     let saved = state.update(AdminMessage::SaveBrokerConfig, "admin");
     assert!(
-        matches!(&saved[..], [Request::AdminSetBrokerConfig { config, .. }] if config == &expected)
+        matches!(&saved[..], [Request::AdminSetBrokerConfig { config, .. }] if **config == expected)
     );
     for page in 0..4 {
         state.update(AdminMessage::ModelsPage(page), "admin");
@@ -290,6 +290,9 @@ fn test_admin_state_update() {
         token,
     );
     assert_eq!(state.broker_config.emotion_model, "/models/emotion.gguf");
+
+    state.update(AdminMessage::MemoryModelChanged("qwen3:4b".into()), token);
+    assert_eq!(state.broker_config.memory_model, "qwen3:4b");
 
     state.update(
         AdminMessage::ReasoningChanged(chatty_protocol::ReasoningLevel::Off),

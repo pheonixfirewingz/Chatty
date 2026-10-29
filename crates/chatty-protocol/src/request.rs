@@ -57,7 +57,7 @@ pub enum Request {
     },
     AdminSetBrokerConfig {
         session_token: String,
-        config: crate::admin::BrokerConfig,
+        config: Box<crate::admin::BrokerConfig>,
     },
     AdminGetOllamaState {
         session_token: String,

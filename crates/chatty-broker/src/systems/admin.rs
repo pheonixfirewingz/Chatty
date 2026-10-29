@@ -136,7 +136,7 @@ pub(super) async fn adapter_health(app: &App) -> (AdapterStatus, u32, Option<u64
 }
 
 pub(super) async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> {
-    let row = sqlx::query("SELECT adapter_enabled,adapter_url,adapter_plugin,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration,image_enabled,image_url,image_plugin,image_model,image_width,image_height,image_steps,image_guidance,image_negative_prompt,image_workflow,emotion_model,reasoning FROM broker_settings WHERE singleton=1")
+    let row = sqlx::query("SELECT adapter_enabled,adapter_url,adapter_plugin,use_ollama_api,model,temperature,top_p,top_k,num_ctx,num_predict,repeat_penalty,seed,keep_alive,allow_public_characters,allow_self_registration,image_enabled,image_url,image_plugin,image_model,image_width,image_height,image_steps,image_guidance,image_negative_prompt,image_workflow,emotion_model,reasoning,memory_model FROM broker_settings WHERE singleton=1")
         .fetch_one(db)
         .await?;
     Ok(BrokerConfig {
@@ -168,6 +168,7 @@ pub(super) async fn load_broker_config(db: &SqlitePool) -> Result<BrokerConfig> 
             workflow: row.get("image_workflow"),
         },
         emotion_model: row.get("emotion_model"),
+        memory_model: row.get("memory_model"),
         // The CHECK constraint keeps stored names valid.
         reasoning: ReasoningLevel::from_name(row.get("reasoning")).unwrap_or_default(),
     })
@@ -200,6 +201,9 @@ pub(super) fn validate_broker_config(config: &BrokerConfig) -> Result<()> {
     }
     if config.emotion_model.len() > 4096 || config.emotion_model.chars().any(char::is_control) {
         bail!("emotion model path is invalid")
+    }
+    if config.memory_model.len() > 256 || config.memory_model.chars().any(char::is_control) {
+        bail!("memory model name is invalid")
     }
     let image = &config.image;
     if !image.url.starts_with("http://") && !image.url.starts_with("https://") {
