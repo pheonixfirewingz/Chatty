@@ -237,4 +237,10 @@ pub enum Request {
         session_token: String,
         message_id: String,
     },
+    /// Download the recommended emotion classifier into the broker's data
+    /// directory and select it. Progress arrives as `ModelDownloadProgress`;
+    /// success ends with the updated `BrokerConfig`.
+    AdminInstallEmotionModel {
+        session_token: String,
+    },
 }

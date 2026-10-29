@@ -79,6 +79,11 @@ impl ChattyApp {
                     let _ = self.commands.send(Command::Cancel(request_id));
                 }
             }
+            Event::EmotionInstallStarted(id) => {
+                if self.admin.emotion_install.pending {
+                    self.admin.emotion_install.request_id = Some(id);
+                }
+            }
             Event::ModelRequestStarted(id) => {
                 self.admin.models.request_id = Some(id);
                 self.admin.models.busy = true;
@@ -236,6 +241,17 @@ impl ChattyApp {
             }
         }
         if frame.message_type == MessageType::Error
+            && self.admin.emotion_install.owns(frame.request_id)
+        {
+            let message = decode::<WireError>(&frame.payload)
+                .map(|error| error.message)
+                .unwrap_or_else(|_| "Download failed.".into());
+            self.admin
+                .emotion_install
+                .finish(format!("Download failed: {message}"));
+            return;
+        }
+        if frame.message_type == MessageType::Error
             && let Some(download) = self.admin.models.download_for_request(frame.request_id)
         {
             download.finished = true;
@@ -385,6 +401,11 @@ impl ChattyApp {
                                 self.refresh();
                             }
                         }
+                        Response::ModelDownloadProgress(progress)
+                            if self.admin.emotion_install.owns(frame.request_id) =>
+                        {
+                            self.admin.emotion_install.progress(&progress);
+                        }
                         Response::ModelDownloadProgress(progress) => {
                             if let Some(download) =
                                 self.admin.models.download_for_request(frame.request_id)
@@ -419,6 +440,11 @@ impl ChattyApp {
                             adapter_override,
                             image_plugins,
                         } => {
+                            if self.admin.emotion_install.owns(frame.request_id) {
+                                self.admin.emotion_install.finish(
+                                    "Installed and selected. Replies now pick emotion portraits.",
+                                );
+                            }
                             self.image_generation = v.image.enabled;
                             self.admin.image_plugins = image_plugins;
                             self.admin.adapter_plugins = adapter_plugins;

@@ -43,6 +43,7 @@ pub(crate) enum Command {
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
     ModelRequestStarted(u64),
+    EmotionInstallStarted(u64),
     DownloadStarted {
         request_id: u64,
         model: String,
@@ -270,6 +271,8 @@ pub(crate) async fn run(
                             let _ = events.send(Event::DownloadStarted { request_id: next_id, model: model.clone() });
                         } else if matches!(&*request, Request::AdminOllamaAction { .. } | Request::AdminSearchModels { .. } | Request::AdminGetOllamaState { .. }) {
                             let _ = events.send(Event::ModelRequestStarted(next_id));
+                        } else if matches!(&*request, Request::AdminInstallEmotionModel { .. }) {
+                            let _ = events.send(Event::EmotionInstallStarted(next_id));
                         } else if let Request::GenerateImage { .. } | Request::GenerateSceneImage { .. } = &*request {
                             let scene = matches!(&*request, Request::GenerateSceneImage { .. });
                             let _ = events.send(Event::ImageRequestStarted { request_id: next_id, scene });

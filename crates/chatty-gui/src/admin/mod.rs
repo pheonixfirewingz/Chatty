@@ -44,6 +44,7 @@ pub enum AdminMessage {
     KeepAliveChanged(String),
     EmotionModelChanged(String),
     ReasoningChanged(chatty_protocol::ReasoningLevel),
+    InstallEmotionModel,
     TogglePublicCharacters(bool),
     ToggleRegistration(bool),
 
@@ -255,6 +256,7 @@ pub struct AdminViewState<'a> {
     pub image_workflow_summary: &'a str,
     pub image_notice: Option<&'a str>,
     pub image_test: &'a ImageTest,
+    pub emotion_install: &'a EmotionInstall,
     pub broker_monitor: Option<&'a BrokerMonitor>,
     pub ollama_state: Option<&'a OllamaState>,
     pub ollama_pull_model: &'a str,
@@ -284,6 +286,7 @@ pub struct AdminState {
     pub image_workflow_summary: String,
     pub image_notice: Option<String>,
     pub image_test: ImageTest,
+    pub emotion_install: EmotionInstall,
     pub broker_monitor: Option<BrokerMonitor>,
     pub ollama_state: Option<OllamaState>,
     pub ollama_pull_model: String,
@@ -310,6 +313,7 @@ impl Default for AdminState {
             image_workflow_summary: workflow_summary(""),
             image_notice: None,
             image_test: ImageTest::default(),
+            emotion_install: EmotionInstall::default(),
             broker_config: BrokerConfig {
                 adapter_enabled: false,
                 adapter_url: String::new(),
@@ -360,6 +364,7 @@ impl AdminState {
             image_workflow_summary: &self.image_workflow_summary,
             image_notice: self.image_notice.as_deref(),
             image_test: &self.image_test,
+            emotion_install: &self.emotion_install,
             broker_monitor: self.broker_monitor.as_ref(),
             ollama_state: self.ollama_state.as_ref(),
             ollama_pull_model: &self.ollama_pull_model,
@@ -572,6 +577,19 @@ impl AdminState {
             AdminMessage::ReasoningChanged(level) => {
                 self.broker_config.reasoning = level;
                 vec![]
+            }
+            AdminMessage::InstallEmotionModel => {
+                if self.emotion_install.pending {
+                    return vec![];
+                }
+                self.emotion_install = EmotionInstall {
+                    pending: true,
+                    request_id: None,
+                    status: "Starting download on the broker…".into(),
+                };
+                vec![Request::AdminInstallEmotionModel {
+                    session_token: session_token.into(),
+                }]
             }
             AdminMessage::TogglePublicCharacters(allow) => {
                 self.broker_config.allow_public_characters = allow;
@@ -864,6 +882,39 @@ pub fn admin_subscription(active: bool) -> iced::Subscription<AdminMessage> {
 
 /// Prompt used by the Images tab test when its prompt box is empty.
 pub const DEFAULT_TEST_PROMPT: &str = "a lighthouse on a cliff at dusk, dramatic sky";
+
+/// Broker-side download of the recommended emotion classifier.
+#[derive(Debug, Clone, Default)]
+pub struct EmotionInstall {
+    pub pending: bool,
+    pub request_id: Option<u64>,
+    pub status: String,
+}
+
+impl EmotionInstall {
+    pub fn owns(&self, request_id: u64) -> bool {
+        self.pending && self.request_id == Some(request_id)
+    }
+
+    pub fn progress(&mut self, progress: &chatty_protocol::admin::ModelDownloadProgress) {
+        self.status = match (progress.completed, progress.total) {
+            (Some(done), Some(total)) if total > 0 => format!(
+                "{}: {} of {} ({}%)",
+                progress.status,
+                human_bytes(done),
+                human_bytes(total),
+                done * 100 / total
+            ),
+            _ => format!("{}…", progress.status),
+        };
+    }
+
+    pub fn finish(&mut self, status: impl Into<String>) {
+        self.pending = false;
+        self.request_id = None;
+        self.status = status.into();
+    }
+}
 
 /// One administrator test render using the broker's saved image settings.
 #[derive(Debug, Clone, Default)]

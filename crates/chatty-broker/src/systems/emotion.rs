@@ -321,6 +321,132 @@ async fn persist_portrait(
     }))
 }
 
+/// Recommended classifier, pinned to a reviewed revision and verified by hash.
+const RECOMMENDED_MODEL_URL: &str = "https://huggingface.co/JusteLeo/emotion-text-classifier-LLM/resolve/bef09f442f532bcd438a803de6877d7309e279ce/EmotionTextClassifierLLM.gguf";
+const RECOMMENDED_MODEL_FILE: &str = "EmotionTextClassifierLLM.gguf";
+const RECOMMENDED_MODEL_BYTES: u64 = 720_424_992;
+const RECOMMENDED_MODEL_SHA256: &str =
+    "fe8f3aa8e7b7f5662cc6c18ccb04b10a364197251b8920656759b7bb37cf1a50";
+/// One install at a time; a second request fails instead of racing the file.
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct InstallGuard;
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::Release);
+    }
+}
+
+/// Download the recommended classifier into `<data dir>/models` and return its
+/// path. An existing verified copy is reused. The download streams to a
+/// `.partial` file that replaces the target only after size and SHA-256 match,
+/// so an interrupted install never leaves a truncated model selected.
+/// Dropping the future (for example on disconnect) abandons the partial file.
+pub(super) async fn install_recommended_model(
+    tx: &mpsc::Sender<Out>,
+    request_id: u64,
+) -> Result<PathBuf> {
+    use futures_util::StreamExt;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    if INSTALLING.swap(true, Ordering::AcqRel) {
+        bail!("the emotion classifier is already being downloaded")
+    }
+    let _guard = InstallGuard;
+    let dir = default_user_data_dir(
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+    .context("could not determine the broker data directory; set XDG_DATA_HOME or HOME")?
+    .join("models");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("create model directory {}", dir.display()))?;
+    let target = dir.join(RECOMMENDED_MODEL_FILE);
+    let progress = |status: &str, completed: Option<u64>| -> Result<Out> {
+        Ok((
+            MessageType::Response,
+            request_id,
+            encode(&Response::ModelDownloadProgress(
+                chatty_protocol::admin::ModelDownloadProgress {
+                    status: status.into(),
+                    digest: None,
+                    total: Some(RECOMMENDED_MODEL_BYTES),
+                    completed,
+                },
+            ))?
+            .into(),
+        ))
+    };
+    if tokio::fs::metadata(&target)
+        .await
+        .is_ok_and(|metadata| metadata.len() == RECOMMENDED_MODEL_BYTES)
+    {
+        tx.send(progress("Verifying existing download", None)?)
+            .await?;
+        let path = target.clone();
+        let digest = tokio::task::spawn_blocking(move || -> Result<String> {
+            let mut file = std::fs::File::open(&path)?;
+            let mut hasher = Sha256::new();
+            std::io::copy(&mut file, &mut hasher)?;
+            Ok(format!("{:x}", hasher.finalize()))
+        })
+        .await??;
+        if digest == RECOMMENDED_MODEL_SHA256 {
+            return Ok(target);
+        }
+    }
+    let partial = dir.join(format!("{RECOMMENDED_MODEL_FILE}.partial"));
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
+        .build()?
+        .get(RECOMMENDED_MODEL_URL)
+        .send()
+        .await?
+        .error_for_status()
+        .context("emotion classifier download failed")?;
+    if response
+        .content_length()
+        .is_some_and(|length| length != RECOMMENDED_MODEL_BYTES)
+    {
+        bail!("emotion classifier download has an unexpected size")
+    }
+    let mut file = tokio::fs::File::create(&partial)
+        .await
+        .with_context(|| format!("create {}", partial.display()))?;
+    let mut hasher = Sha256::new();
+    let mut completed = 0_u64;
+    let mut last_sent = None::<Instant>;
+    let mut body = response.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.context("emotion classifier download interrupted")?;
+        completed += chunk.len() as u64;
+        if completed > RECOMMENDED_MODEL_BYTES {
+            bail!("emotion classifier download is larger than expected")
+        }
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+        if last_sent.is_none_or(|last| last.elapsed() >= Duration::from_millis(250)) {
+            tx.send(progress("Downloading emotion classifier", Some(completed))?)
+                .await?;
+            last_sent = Some(Instant::now());
+        }
+    }
+    file.sync_all().await?;
+    drop(file);
+    if completed != RECOMMENDED_MODEL_BYTES
+        || format!("{:x}", hasher.finalize()) != RECOMMENDED_MODEL_SHA256
+    {
+        let _ = tokio::fs::remove_file(&partial).await;
+        bail!("emotion classifier download failed verification; try again")
+    }
+    tokio::fs::rename(&partial, &target).await?;
+    tx.send(progress("Download complete", Some(completed))?)
+        .await?;
+    Ok(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

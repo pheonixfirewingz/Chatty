@@ -778,6 +778,28 @@ async fn dispatch(
             app.adapters.configuration_changed(&config)?;
             send!(MessageType::Response, app.adapters.config_response(config));
         }
+        Request::AdminInstallEmotionModel { session_token } => {
+            require_admin(&app.db, &session_token).await?;
+            // The download can outlast the idle limit between progress frames.
+            busy.fetch_add(1, Ordering::Relaxed);
+            let _busy_guard = BusyGuard(busy.clone());
+            let path = tokio::select! {
+                biased;
+                _ = tx.closed() => return Ok(()),
+                path = install_recommended_model(&tx, id) => path?,
+            };
+            let path = path
+                .to_str()
+                .context("emotion classifier path is not valid UTF-8")?
+                .to_owned();
+            sqlx::query("UPDATE broker_settings SET emotion_model=?,updated_at=CURRENT_TIMESTAMP WHERE singleton=1")
+                .bind(&path)
+                .execute(&app.db)
+                .await?;
+            info!(path = %path, "installed recommended emotion classifier");
+            let config = load_broker_config(&app.db).await?;
+            send!(MessageType::Response, app.adapters.config_response(config));
+        }
         Request::AdminSearchModels {
             session_token,
             query,

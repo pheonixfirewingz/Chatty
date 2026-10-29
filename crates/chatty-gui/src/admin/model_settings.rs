@@ -77,9 +77,28 @@ pub(super) fn view<'a, Message: 'a + Clone + From<AdminMessage>>(
             text_input("Automatic", &config.model)
                 .on_input(|value| Message::from(AdminMessage::SelectAdapterModel(value)))),
         field("Emotion classifier", "GGUF path on the broker host, run inside the broker after each reply to pick a portrait. Empty disables it.",
-            text_input("/var/lib/chatty/EmotionTextClassifierLLM.gguf", &config.emotion_model)
-                .on_input(|value| Message::from(AdminMessage::EmotionModelChanged(value)))),
+            row![
+                text_input("/var/lib/chatty/EmotionTextClassifierLLM.gguf", &config.emotion_model)
+                    .on_input(|value| Message::from(AdminMessage::EmotionModelChanged(value))),
+                hint(
+                    button(text("Download recommended").size(13))
+                        .on_press_maybe((!state.emotion_install.pending)
+                            .then(|| Message::from(AdminMessage::InstallEmotionModel)))
+                        .padding([6, 12])
+                        .style(ui::secondary_button_style()),
+                    "Downloads JusteLeo/emotion-text-classifier-LLM (720 MB) to the broker's data folder, verifies it, and selects it. No save needed.",
+                ),
+            ].spacing(8).align_y(Alignment::Center)),
     ].spacing(12);
+    let connection = if state.emotion_install.status.is_empty() {
+        connection
+    } else {
+        connection.push(
+            text(&state.emotion_install.status)
+                .size(12)
+                .color(ui::SECONDARY_TEXT),
+        )
+    };
 
     let mut generation = column![
         text("Generation").size(16),
