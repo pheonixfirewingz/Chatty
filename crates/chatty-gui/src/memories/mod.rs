@@ -234,37 +234,12 @@ impl MemoryDialogState {
     /// Typing and keyboard movement return a task that scrolls the editor to keep
     /// the cursor in view; clicks and drags leave it alone.
     pub fn perform(&mut self, action: text_editor::Action) -> iced::Task<MemoryMessage> {
-        let follow = matches!(
-            action,
-            text_editor::Action::Edit(_) | text_editor::Action::Move(_)
-        );
-        let edit = action.is_edit();
-        self.editor.perform(action);
+        let (edit, task) =
+            crate::ui::perform_editor_action(&mut self.editor, action, editor_scroll_id());
         if edit && let Some(input) = &mut self.editing_memory {
             input.content = self.editor.text();
         }
-        if !follow {
-            return iced::Task::none();
-        }
-        // The text offset of the cursor approximates its height in the wrapped
-        // layout, which the editor does not expose.
-        let cursor = self.editor.cursor().position;
-        let (mut before, mut total) = (0, 0);
-        for index in 0..self.editor.line_count() {
-            let len = self.editor.line(index).map_or(0, |line| line.text.len()) + 1;
-            if index < cursor.line {
-                before += len;
-            }
-            total += len;
-        }
-        let y = (before + cursor.column) as f32 / total.saturating_sub(1).max(1) as f32;
-        iced::widget::operation::snap_to(
-            editor_scroll_id(),
-            iced::widget::scrollable::RelativeOffset {
-                x: None,
-                y: Some(y.min(1.0)),
-            },
-        )
+        task
     }
 }
 

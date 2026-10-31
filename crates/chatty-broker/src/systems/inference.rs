@@ -546,15 +546,18 @@ async fn extract_memories(
     let config = load_broker_config(&app.db).await?;
     let (model, num_ctx) = memory_model(app, &config).await?;
     let recent = sqlx::query(
-        "SELECT m.id,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.revision DESC LIMIT 40",
+        "SELECT m.id,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 40",
     )
     .bind(conversation_id)
     .fetch_all(&app.db)
     .await?;
+    // Edits raise a message's revision without moving it, so the newest
+    // revision can belong to any loaded row.
     let latest_revision = recent
-        .first()
-        .context("conversation has no history to extract")?
-        .get("revision");
+        .iter()
+        .map(|row| row.get::<i64, _>("revision"))
+        .max()
+        .context("conversation has no history to extract")?;
     let automatic = after_revision.is_some();
     let instructions = if automatic {
         AUTOMATIC_MEMORY_INSTRUCTIONS
@@ -1232,7 +1235,7 @@ pub(super) async fn probe_backend(app: &App) -> Result<Vec<String>> {
 
 /// Recent root messages for reply prompts, newest first. Image messages are
 /// excluded: their prompt is only a caption for the user and would spend context.
-const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.revision DESC LIMIT 23";
+const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 23";
 
 /// Map a stored message to a chat role.
 fn history_message(author_type: &str, content: String) -> (String, String) {
@@ -2033,7 +2036,7 @@ pub(super) async fn select_speaker(
             .iter()
             .map(|r| r.get::<String, _>("name"))
             .collect::<Vec<_>>();
-        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL AND author_type<>'image' ORDER BY revision DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
+        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL AND author_type<>'image' ORDER BY created_at DESC,rowid DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
         let choice = async {
             let model = selected_model(app).await.ok()?;
             let messages = vec![

@@ -4,13 +4,14 @@ use crate::admin;
 use crate::admin::AdminMessage;
 use crate::app::{ChattyApp, Message, Screen};
 use crate::characters::DraftCharacter;
-use crate::conversation::ConversationMessage;
+use crate::conversation::{self, ConversationMessage};
 use crate::memories::{MemoryAction, MemoryDialogState, MemoryMessage};
 use crate::network::{Command, connection_target, save_preferences};
 use crate::tts::TtsEvent;
 use crate::worlds::{WorldAction, WorldMessage};
 use chatty_protocol::{ChatMessage, ConversationKind, EntityKind, Request};
 use iced::Task;
+use iced::widget::text_editor;
 use std::time::{Duration, Instant};
 
 impl ChattyApp {
@@ -81,7 +82,7 @@ impl ChattyApp {
             Message::SelectConversation(id) => {
                 self.compact_sidebar_open = false;
                 self.open_conversation(&id);
-                Task::none()
+                conversation::scroll_chat_to_bottom()
             }
             Message::DeleteConversation(id) => {
                 self.send(Request::DeleteEntity {
@@ -514,20 +515,28 @@ impl ChattyApp {
             }
             ConversationMessage::SubmitMessage => {
                 self.submit_message();
+                return conversation::scroll_chat_to_bottom();
             }
             ConversationMessage::CancelRequest(id) => {
                 let _ = self.commands.send(Command::Cancel(id));
             }
             ConversationMessage::StartEditMessage { id, content } => {
                 self.editing_message_id = Some(id);
-                self.editing_message_content = content;
+                self.editing_message_content = text_editor::Content::with_text(&content);
             }
-            ConversationMessage::EditContentChanged(val) => {
-                self.editing_message_content = val;
+            ConversationMessage::EditAction(action) => {
+                // Only edits change the message; the text is read when saving.
+                return crate::ui::perform_editor_action(
+                    &mut self.editing_message_content,
+                    action,
+                    conversation::edit_scroll_id(),
+                )
+                .1;
             }
             ConversationMessage::SaveMessageEdit => {
                 if let Some(id) = self.editing_message_id.take() {
-                    let content = std::mem::take(&mut self.editing_message_content);
+                    let content = self.editing_message_content.text();
+                    self.editing_message_content = text_editor::Content::new();
                     self.send(Request::UpdateMessage {
                         session_token: self.token.clone(),
                         message_id: id,
@@ -537,7 +546,7 @@ impl ChattyApp {
             }
             ConversationMessage::CancelMessageEdit => {
                 self.editing_message_id = None;
-                self.editing_message_content.clear();
+                self.editing_message_content = text_editor::Content::new();
             }
             ConversationMessage::DeleteMessage(id) => {
                 self.send(Request::DeleteEntity {

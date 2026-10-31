@@ -170,7 +170,7 @@ pub(super) async fn describe_scene(
             format!("{}: {}", row.get::<String, _>("name"), clip(&detail, 1024))
         })
         .collect::<Vec<_>>();
-    let mut recent = sqlx::query("SELECT COALESCE(c.name,m.author_type) AS author,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.revision DESC LIMIT 6")
+    let mut recent = sqlx::query("SELECT COALESCE(c.name,m.author_type) AS author,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 6")
         .bind(conversation_id)
         .fetch_all(&app.db)
         .await?
@@ -296,4 +296,33 @@ pub(super) async fn load_message_image(
         .await?
         .context("message image not found")?;
     decrypt_message_image(&app.image_key, user_id, message_id, &stored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::auxiliary_completion_tests::test_app;
+
+    #[tokio::test]
+    async fn deleted_scene_image_leaves_the_timeline() {
+        let app = test_app("http://127.0.0.1:9").await;
+        let (id, _, _) = save_scene_image(&app, "owner", "chat", "a lake", b"png")
+            .await
+            .unwrap();
+        assert_eq!(
+            load_message_image(&app, "owner", &id).await.unwrap(),
+            b"png"
+        );
+        let mut transaction = app.db.begin().await.unwrap();
+        delete_owned_entity(&mut transaction, "owner", EntityKind::Message, &id)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let view = load_owned_conversation(&app.db, "chat", "owner")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(view.messages.is_empty());
+        assert!(load_message_image(&app, "owner", &id).await.is_err());
+    }
 }

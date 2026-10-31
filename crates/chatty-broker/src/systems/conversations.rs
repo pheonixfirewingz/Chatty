@@ -177,7 +177,7 @@ pub(super) async fn load_conversation_from_row(
 ) -> Result<ConversationView> {
     let id: String = row.get("id");
     let conversation = conversation_from_row(db, row).await?;
-    let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,character_image_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY revision,id LIMIT 2000")
+    let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,character_image_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY created_at,rowid LIMIT 2000")
         .bind(&id).fetch_all(db).await?;
     // Fetch variants for exactly the bounded timeline, rather than issuing one
     // SQLite round trip per message. Stream rows to avoid a second full row set.
@@ -596,5 +596,34 @@ mod loading_tests {
                 .messages
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn edited_messages_keep_their_timeline_position() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username,password_hash) VALUES('owner','owner','hash')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('chat','owner','Chat',0,1)")
+            .execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,revision) VALUES('u1','chat','user','hi',2),('c1','chat','character','hello',3),('u2','chat','user','bye',4)")
+            .execute(&db).await.unwrap();
+        // Editing raises the revision, as UpdateMessage does.
+        sqlx::query("UPDATE messages SET content='hello again',revision=9 WHERE id='c1'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let view = load_owned_conversation(&db, "chat", "owner")
+            .await
+            .unwrap()
+            .unwrap();
+        let order: Vec<&str> = view.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(order, ["u1", "c1", "u2"]);
     }
 }

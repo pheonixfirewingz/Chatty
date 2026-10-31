@@ -53,6 +53,11 @@ pub(crate) enum Event {
         request_id: u64,
         scene: bool,
     },
+    /// A message image fetch was sent; its error must not interrupt the chat.
+    MessageImageRequestStarted {
+        request_id: u64,
+        message_id: String,
+    },
     Status(String),
     Connected {
         resuming_session: bool,
@@ -276,6 +281,8 @@ pub(crate) async fn run(
                         } else if let Request::GenerateImage { .. } | Request::GenerateSceneImage { .. } = &*request {
                             let scene = matches!(&*request, Request::GenerateSceneImage { .. });
                             let _ = events.send(Event::ImageRequestStarted { request_id: next_id, scene });
+                        } else if let Request::GetMessageImage { message_id, .. } = &*request {
+                            let _ = events.send(Event::MessageImageRequestStarted { request_id: next_id, message_id: message_id.clone() });
                         }
                         if matches!(&*request, Request::Logout { .. }) {
                             remembered = None;

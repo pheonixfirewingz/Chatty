@@ -424,3 +424,104 @@ pub fn chat_action_button_style(
 ) -> impl Fn(&Theme, button::Status) -> button::Style {
     ghost_button_style(on_accent)
 }
+
+/// Custom key handling for a [`capped_editor`].
+pub type EditorKeyBinding<'a, Message> = Box<
+    dyn Fn(
+            iced::widget::text_editor::KeyPress,
+        ) -> Option<iced::widget::text_editor::Binding<Message>>
+        + 'a,
+>;
+
+/// Multi-line input that grows with its text up to `max_height`, then scrolls
+/// with a visible scrollbar. Read-only when `on_action` is `None`.
+///
+/// `text_editor` has no scrollbar of its own, so it takes its full text height
+/// inside a capped `scrollable`; the input plate is drawn by the container so it
+/// does not scroll away. Pair it with [`perform_editor_action`] using the same
+/// `id`. `key_binding` replaces the default key handling when given.
+pub fn capped_editor<'a, Message: Clone + 'a>(
+    content: &'a iced::widget::text_editor::Content,
+    placeholder: &'a str,
+    on_action: Option<impl Fn(iced::widget::text_editor::Action) -> Message + 'a>,
+    key_binding: Option<EditorKeyBinding<'a, Message>>,
+    id: iced::widget::Id,
+    max_height: f32,
+) -> Element<'a, Message> {
+    use iced::widget::{scrollable, text_editor, text_input};
+    let mut editor = text_editor(content)
+        .placeholder(placeholder)
+        .size(14)
+        .padding(Padding::from([8, 10]))
+        .min_height(72.0)
+        .style(|theme, status| {
+            let mut style = editor_style(theme, status);
+            style.background = Background::Color(Color::TRANSPARENT);
+            style.border = Border::default();
+            style
+        });
+    if let Some(on_action) = on_action {
+        editor = editor.on_action(on_action);
+    }
+    if let Some(key_binding) = key_binding {
+        editor = editor.key_binding(key_binding);
+    }
+    container(
+        scrollable(editor)
+            .id(id)
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new()
+                    .width(6)
+                    .scroller_width(6)
+                    .margin(3),
+            )),
+    )
+    .max_height(max_height)
+    .style(|theme: &Theme| container::Style {
+        background: Some(input_style(theme, text_input::Status::Active).background),
+        border: Border {
+            radius: 12.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Apply `action` to `content`, returning whether it edited the text and a task
+/// that keeps the cursor of a [`capped_editor`] in view.
+///
+/// Typing and keyboard movement scroll the editor; clicks and drags leave it alone.
+pub fn perform_editor_action<Message: Send + 'static>(
+    content: &mut iced::widget::text_editor::Content,
+    action: iced::widget::text_editor::Action,
+    id: iced::widget::Id,
+) -> (bool, iced::Task<Message>) {
+    use iced::widget::text_editor::Action;
+    let follow = matches!(action, Action::Edit(_) | Action::Move(_));
+    let edit = action.is_edit();
+    content.perform(action);
+    if !follow {
+        return (edit, iced::Task::none());
+    }
+    // The text offset of the cursor approximates its height in the wrapped
+    // layout, which the editor does not expose.
+    let cursor = content.cursor().position;
+    let (mut before, mut total) = (0, 0);
+    for index in 0..content.line_count() {
+        let len = content.line(index).map_or(0, |line| line.text.len()) + 1;
+        if index < cursor.line {
+            before += len;
+        }
+        total += len;
+    }
+    let y = (before + cursor.column) as f32 / total.saturating_sub(1).max(1) as f32;
+    let task = iced::widget::operation::snap_to(
+        id,
+        iced::widget::scrollable::RelativeOffset {
+            x: None,
+            y: Some(y.min(1.0)),
+        },
+    );
+    (edit, task)
+}

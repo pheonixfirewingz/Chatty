@@ -140,3 +140,68 @@ fn thinking_status_shows_until_reply_text_streams() {
     assert_eq!(app.generation_status, None);
     assert_eq!(app.stream_text, "Hello");
 }
+
+#[test]
+fn failed_message_image_fetch_marks_the_image_unavailable_quietly() {
+    let mut app = Harness::demo();
+    app.messages.push(ChatMessage {
+        id: "img".into(),
+        author_type: "image".into(),
+        author_id: None,
+        content: "a lake".into(),
+        parent_id: None,
+        selected_variant_id: None,
+        character_image_id: None,
+        created_at: String::new(),
+        revision: 9,
+        variants: Vec::new(),
+    });
+    app.request_message_images();
+    assert!(matches!(
+        app.requests().as_slice(),
+        [Request::GetMessageImage { message_id, .. }] if message_id == "img"
+    ));
+    app.event(crate::network::Event::MessageImageRequestStarted {
+        request_id: 41,
+        message_id: "img".into(),
+    });
+    app.active_request = Some(7);
+    app.fail(41, "message image not found");
+    assert!(app.error.is_none());
+    assert_eq!(app.active_request, Some(7));
+    assert_eq!(app.message_images.get("img").map(Vec::len), Some(0));
+    app.request_message_images();
+    assert!(app.requests().is_empty());
+}
+
+#[test]
+fn message_edits_use_a_multi_line_editor() {
+    use crate::conversation::ConversationMessage;
+    use iced::widget::text_editor::{Action, Edit};
+    let mut app = Harness::demo();
+    let id = app.messages[0].id.clone();
+    app.update(crate::app::Message::Conversation(
+        ConversationMessage::StartEditMessage {
+            id: id.clone(),
+            content: "Hi".into(),
+        },
+    ));
+    for action in [
+        Action::Move(iced::widget::text_editor::Motion::DocumentEnd),
+        Action::Edit(Edit::Enter),
+        Action::Edit(Edit::Insert('x')),
+    ] {
+        app.update(crate::app::Message::Conversation(
+            ConversationMessage::EditAction(action),
+        ));
+    }
+    app.update(crate::app::Message::Conversation(
+        ConversationMessage::SaveMessageEdit,
+    ));
+    assert!(app.editing_message_id.is_none());
+    assert!(matches!(
+        app.requests().as_slice(),
+        [Request::UpdateMessage { message_id, content, .. }]
+            if message_id == &id && content == "Hi\nx"
+    ));
+}

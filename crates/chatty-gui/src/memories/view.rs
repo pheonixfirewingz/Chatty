@@ -4,10 +4,9 @@ use super::*;
 use crate::ui::{self, MessageIcon, SidebarToggle, Tone, action_icon};
 use chatty_protocol::{Character, Conversation, MemoryEntry, MemoryKind};
 use iced::widget::{
-    Space, button, column, container, pick_list, row, scrollable, slider, text, text_editor,
-    text_input,
+    Space, button, column, container, pick_list, row, scrollable, slider, text, text_input,
 };
-use iced::{Alignment, Background, Color, Element, Length, Padding, Theme};
+use iced::{Alignment, Element, Length, Padding};
 
 /// Below this width filters and editor fields stack into one column.
 const STACK_WIDTH: f32 = 600.0;
@@ -429,39 +428,14 @@ where
     };
     let has_content = !draft.content.trim().is_empty();
 
-    let content = container(
-        scrollable(
-            text_editor(&state.editor)
-                .placeholder("e.g. The user is afraid of deep water.")
-                .on_action(move |action| Message::from(MemoryMessage::Edit(action)))
-                .size(14)
-                .padding(Padding::from([8, 10]))
-                .min_height(72.0)
-                .style(|theme, status| {
-                    // The plate is drawn by the container so it does not scroll away.
-                    let mut style = ui::editor_style(theme, status);
-                    style.background = Background::Color(Color::TRANSPARENT);
-                    style.border = iced::Border::default();
-                    style
-                }),
-        )
-        .id(editor_scroll_id())
-        .direction(scrollable::Direction::Vertical(
-            scrollable::Scrollbar::new()
-                .width(6)
-                .scroller_width(6)
-                .margin(3),
-        )),
-    )
-    .max_height(EDITOR_MAX_HEIGHT)
-    .style(|theme: &Theme| container::Style {
-        background: Some(ui::input_style(theme, text_input::Status::Active).background),
-        border: iced::Border {
-            radius: 12.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
+    let content = ui::capped_editor(
+        &state.editor,
+        "e.g. The user is afraid of deep water.",
+        Some(move |action| Message::from(MemoryMessage::Edit(action))),
+        None,
+        editor_scroll_id(),
+        EDITOR_MAX_HEIGHT,
+    );
 
     let kind_picker = pick_list(
         KINDS.map(MemoryKindItem).to_vec(),

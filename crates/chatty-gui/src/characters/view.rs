@@ -3,8 +3,7 @@
 use super::*;
 use chatty_protocol::{Character, World};
 use iced::widget::{
-    Space, button, column, container, image, row, scrollable, text, text_editor, text_input,
-    toggler,
+    Space, button, column, container, image, row, scrollable, text, text_input, toggler,
 };
 use iced::{Alignment, Background, Color, Element, Length, Padding, Theme};
 use std::collections::HashSet;
@@ -238,52 +237,20 @@ fn line_input<'a>(
 
 /// Multi-line field that grows with its text up to the field's height limit,
 /// then scrolls with a visible scrollbar.
-///
-/// `text_editor` has no scrollbar of its own, so it always takes its full text
-/// height inside a capped `scrollable`.
 fn long_input<'a>(
     editors: &'a DraftEditors,
     field: LongField,
     placeholder: &'a str,
     can_edit: bool,
 ) -> Element<'a, CharacterMessage> {
-    let mut editor = text_editor(editors.content(field))
-        .placeholder(placeholder)
-        .size(14)
-        .padding(Padding::from([8, 10]))
-        .min_height(72.0)
-        .style(|theme, status| {
-            // The plate is drawn by the container so it does not scroll away.
-            let mut style = crate::ui::editor_style(theme, status);
-            style.background = Background::Color(Color::TRANSPARENT);
-            style.border = iced::Border::default();
-            style
-        });
-    if can_edit {
-        editor = editor.on_action(move |action| CharacterMessage::Edit(field, action));
-    }
-    container(
-        scrollable(editor)
-            .id(field.scroll_id())
-            .direction(scrollable::Direction::Vertical(
-                scrollable::Scrollbar::new()
-                    .width(6)
-                    .scroller_width(6)
-                    .margin(3),
-            )),
+    crate::ui::capped_editor(
+        editors.content(field),
+        placeholder,
+        can_edit.then_some(move |action| CharacterMessage::Edit(field, action)),
+        None,
+        field.scroll_id(),
+        field.max_height(),
     )
-    .max_height(field.max_height())
-    .style(|theme: &Theme| container::Style {
-        background: Some(
-            crate::ui::input_style(theme, iced::widget::text_input::Status::Active).background,
-        ),
-        border: iced::Border {
-            radius: 12.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
 }
 
 /// Bold section heading with a muted explanation underneath.

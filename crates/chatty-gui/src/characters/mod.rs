@@ -305,38 +305,15 @@ impl DraftEditors {
         field: LongField,
         action: text_editor::Action,
     ) -> iced::Task<CharacterMessage> {
-        let content = &mut self.contents[field as usize];
-        let follow = matches!(
+        let (edit, task) = crate::ui::perform_editor_action(
+            &mut self.contents[field as usize],
             action,
-            text_editor::Action::Edit(_) | text_editor::Action::Move(_)
-        );
-        let edit = action.is_edit();
-        content.perform(action);
-        if edit {
-            *field.value_mut(draft) = content.text();
-        }
-        if !follow {
-            return iced::Task::none();
-        }
-        // The text offset of the cursor approximates its height in the wrapped
-        // layout, which the editor does not expose.
-        let cursor = content.cursor().position;
-        let (mut before, mut total) = (0, 0);
-        for index in 0..content.line_count() {
-            let len = content.line(index).map_or(0, |line| line.text.len()) + 1;
-            if index < cursor.line {
-                before += len;
-            }
-            total += len;
-        }
-        let y = (before + cursor.column) as f32 / total.saturating_sub(1).max(1) as f32;
-        iced::widget::operation::snap_to(
             field.scroll_id(),
-            iced::widget::scrollable::RelativeOffset {
-                x: None,
-                y: Some(y.min(1.0)),
-            },
-        )
+        );
+        if edit {
+            *field.value_mut(draft) = self.contents[field as usize].text();
+        }
+        task
     }
 }
 

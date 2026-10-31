@@ -11,7 +11,7 @@ use chatty_protocol::conversation::ChatMessage;
 use chatty_protocol::response::GenerationStatus;
 use iced::widget::{
     Id, Space, button, canvas, column, container, image, mouse_area, row, scrollable, stack, text,
-    text_input, tooltip,
+    text_editor, text_input, tooltip,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
@@ -92,6 +92,9 @@ pub fn emotion_portrait_card<'a, Message: 'a>(
         .into()
 }
 
+/// Tallest the in-chat message editor grows before it scrolls.
+const EDIT_MAX_HEIGHT: f32 = 320.0;
+
 /// Renders an individual chat message bubble (user or assistant).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
@@ -100,7 +103,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
     markdown: &'a crate::ui::Markdown,
     characters: &'a [Character],
     is_editing: bool,
-    editing_content: &'a str,
+    editing_content: &'a iced::widget::text_editor::Content,
     is_hovered: bool,
     glass_mode: bool,
     on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
@@ -108,10 +111,26 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
     let is_user = message.author_type == "user";
 
     if is_editing {
-        let input_box = text_input("Edit message content…", editing_content)
-            .on_input(move |c| on_msg(ConversationMessage::EditContentChanged(c)))
-            .padding(10)
-            .size(14);
+        let input_box = crate::ui::capped_editor(
+            editing_content,
+            "Edit message content…",
+            Some(move |action| on_msg(ConversationMessage::EditAction(action))),
+            Some(Box::new(move |key: text_editor::KeyPress| {
+                use iced::keyboard::{Key, key::Named};
+                let focused = matches!(key.status, text_editor::Status::Focused { .. });
+                match key.key {
+                    Key::Named(Named::Escape) if focused => Some(text_editor::Binding::Custom(
+                        on_msg(ConversationMessage::CancelMessageEdit),
+                    )),
+                    Key::Named(Named::Enter) if focused && key.modifiers.command() => Some(
+                        text_editor::Binding::Custom(on_msg(ConversationMessage::SaveMessageEdit)),
+                    ),
+                    _ => text_editor::Binding::from_key_press(key),
+                }
+            })),
+            edit_scroll_id(),
+            EDIT_MAX_HEIGHT,
+        );
 
         let save_btn = button(text("Save").size(12))
             .padding([5, 12])
@@ -123,13 +142,17 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
             .on_press(on_msg(ConversationMessage::CancelMessageEdit))
             .style(crate::ui::secondary_button_style());
 
-        let actions = row![save_btn, cancel_btn, text("Esc to cancel").size(11)]
+        let hint = text("Ctrl+Enter to save · Esc to cancel")
+            .size(12)
+            .color(crate::ui::SECONDARY_TEXT);
+        let actions = row![save_btn, cancel_btn, hint]
             .spacing(8)
             .align_y(Alignment::Center);
 
         return container(column![input_box, actions].spacing(8))
             .padding(12)
-            .max_width(620)
+            .max_width(700)
+            .width(Length::Fill)
             .style(move |_| card_style(glass_mode))
             .into();
     }
@@ -354,10 +377,15 @@ fn render_image_message<'a, Message: Clone + 'a>(
                 picture.into()
             }
         }
-        None => text("Loading image…")
-            .size(12)
-            .color(crate::ui::SECONDARY_TEXT)
-            .into(),
+        // Empty bytes mark an image the broker no longer has.
+        None => text(if png.is_some() {
+            "Image unavailable"
+        } else {
+            "Loading image…"
+        })
+        .size(12)
+        .color(crate::ui::SECONDARY_TEXT)
+        .into(),
     };
     let delete = message_action_button(
         MessageIcon::Delete,
@@ -422,6 +450,28 @@ fn message_action_style(visible: bool) -> impl Fn(&Theme, button::Status) -> but
             }
         }
     }
+}
+
+/// Scrollable holding the chat transcript.
+pub fn chat_scroll_id() -> Id {
+    Id::new("chat-messages")
+}
+
+/// Scrollable around the in-chat message editor.
+pub fn edit_scroll_id() -> Id {
+    Id::new("chat-message-edit")
+}
+
+/// Task that shows the newest message.
+pub fn scroll_chat_to_bottom<Message: Send + 'static>() -> iced::Task<Message> {
+    // With a bottom anchor, offset zero is the end of the transcript.
+    iced::widget::operation::scroll_to(
+        chat_scroll_id(),
+        iced::widget::scrollable::AbsoluteOffset {
+            x: None,
+            y: Some(0.0),
+        },
+    )
 }
 
 /// Primary conversation view combining chat history, streaming responses, and composer.
@@ -564,7 +614,10 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             })
             .width(Length::Fill),
     )
-    .id(Id::new("chat-messages"))
+    .id(chat_scroll_id())
+    // Offsets count from the bottom: the newest message stays in view as
+    // replies stream in, and a rebuilt widget tree starts at the latest message.
+    .anchor_bottom()
     .height(Length::Fill)
     .width(Length::Fill);
 

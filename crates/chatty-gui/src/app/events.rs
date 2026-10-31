@@ -103,6 +103,13 @@ impl ChattyApp {
                     self.admin.image_test.request_id = Some(request_id);
                 }
             }
+            Event::MessageImageRequestStarted {
+                request_id,
+                message_id,
+            } => {
+                self.message_image_request_ids
+                    .insert(request_id, message_id);
+            }
             Event::Status(status) => {
                 if status.contains("Offline:") || status.contains("Idle · offline:") {
                     // The broker cancels image jobs when their connection closes.
@@ -111,6 +118,7 @@ impl ChattyApp {
                     self.emotion_batch = None;
                     self.admin.image_test.pending = false;
                     self.message_image_requests.clear();
+                    self.message_image_request_ids.clear();
                     self.memory_state.condensing = false;
                     self.interrupt_models(
                         "Connection interrupted. Refresh to check whether the operation finished on the server.",
@@ -462,6 +470,7 @@ impl ChattyApp {
                         Response::OllamaState(v) => self.admin.ollama_state = Some(v),
                         Response::ImageModels(v) => self.admin.image_models = Some(v),
                         Response::MessageImage { message_id, data } => {
+                            self.message_image_request_ids.remove(&frame.request_id);
                             if self.message_image_requests.remove(&message_id) {
                                 self.message_images.insert(message_id, data);
                             }
@@ -560,6 +569,19 @@ impl ChattyApp {
                     }
                 }
             }
+            MessageType::Error
+                if self
+                    .message_image_request_ids
+                    .contains_key(&frame.request_id) =>
+            {
+                // The image was deleted, possibly by a request that raced this
+                // fetch. Empty bytes mark it unavailable so it is not refetched.
+                if let Some(message_id) = self.message_image_request_ids.remove(&frame.request_id)
+                    && self.message_image_requests.remove(&message_id)
+                {
+                    self.message_images.insert(message_id, Vec::new());
+                }
+            }
             MessageType::Error => {
                 self.world_state.import_pending = false;
                 self.world_state.import_started = None;
@@ -595,6 +617,7 @@ impl ChattyApp {
         self.emotion_batch = None;
         self.message_images.clear();
         self.message_image_requests.clear();
+        self.message_image_request_ids.clear();
     }
 
     /// Keep bytes only for the newest image messages in the open chat.

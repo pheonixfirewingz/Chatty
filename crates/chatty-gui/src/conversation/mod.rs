@@ -24,8 +24,8 @@ pub enum ConversationMessage {
     CancelRequest(u64),
     /// Start editing an existing message.
     StartEditMessage { id: String, content: String },
-    /// Editing message content changed.
-    EditContentChanged(String),
+    /// Cursor, selection, or edit in the message editor.
+    EditAction(iced::widget::text_editor::Action),
     /// Save the edited message.
     SaveMessageEdit,
     /// Cancel the message edit.
@@ -101,7 +101,7 @@ pub struct ConversationViewState<'a> {
     pub generation_status: Option<GenerationStatus>,
     pub context_usage: Option<&'a GenerationContext>,
     pub editing_message_id: Option<&'a str>,
-    pub editing_message_content: &'a str,
+    pub editing_message_content: &'a iced::widget::text_editor::Content,
     pub hovered_message_id: Option<&'a str>,
     pub sidebar_visible: bool,
     pub available_size: iced::Size,
