@@ -104,8 +104,10 @@ To publish a build to the signed self-hosted repository, install the
 `./scripts/build-flatpak.sh --publish`. Clients add it once with
 `flatpak remote-add --if-not-exists pheonix http://192.168.0.98:8090/repo/pheonix.flatpakrepo`.
 
-The sandbox has network, Wayland, audio server, and DRI permissions. ONNX Runtime is
-bundled; speech model files download once into the app-private cache at
+The sandbox has network, Wayland, audio server, and DRI permissions. Flatpak has no
+XDG portal for audio playback; the client uses the PulseAudio socket and does not
+fall back to raw ALSA devices. ONNX Runtime is bundled; speech model files download
+once into the app-private cache at
 `~/.var/app/io.github.pheonixfirewingz.Chatty/cache/huggingface/`. Test both first-use
 download and subsequent cached playback with `--test-speech`. It does not package or
 start the broker. Install a trusted broker CA in the app-private configuration directory:

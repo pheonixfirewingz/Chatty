@@ -255,6 +255,31 @@ fn update_state(state: &Mutex<State>, id: u64, update: impl FnOnce(&mut State)) 
     true
 }
 
+fn open_output_stream() -> Result<rodio::OutputStream, String> {
+    // Flatpak has no audio playback portal. Its audio permission is the
+    // PulseAudio socket. Never fall back to another ALSA device, because that
+    // would bypass the sandbox grant and can reach raw hardware.
+    #[cfg(target_os = "linux")]
+    if std::path::Path::new("/.flatpak-info").exists() {
+        if std::env::var_os("PULSE_SERVER").is_none() {
+            return Err(
+                "Audio permission is not granted to the Flatpak sandbox. Grant the PulseAudio socket and retry."
+                    .into(),
+            );
+        }
+        return rodio::OutputStreamBuilder::from_default_device()
+            .and_then(|builder| builder.open_stream_or_fallback())
+            .map_err(|error| {
+                format!(
+                    "Cannot open the Flatpak audio server: {error}. Check that PulseAudio or PipeWire is running."
+                )
+            });
+    }
+    rodio::OutputStreamBuilder::open_default_stream().map_err(|error| {
+        format!("Cannot open audio output: {error}. Check your output device and volume.")
+    })
+}
+
 fn run(commands: mpsc::Receiver<Command>, state: &Mutex<State>) {
     let mut stream = None;
     let mut model = None;
@@ -282,9 +307,7 @@ fn run(commands: mpsc::Receiver<Command>, state: &Mutex<State>) {
         }
         let result = (|| -> Result<(), String> {
             if stream.is_none() {
-                stream = Some(rodio::OutputStreamBuilder::open_default_stream().map_err(|error| {
-                    format!("Cannot open audio output: {error}. Check your output device and volume. Flatpak requires audio permission (pulseaudio).")
-                })?);
+                stream = Some(open_output_stream()?);
             }
             if model.is_none() {
                 let loaded = load_model(|status| {
