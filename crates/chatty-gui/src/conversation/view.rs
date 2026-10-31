@@ -662,18 +662,25 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
     .height(Length::Fill)
     .width(Length::Fill);
 
-    let composer_input = text_input("Message your character…", view.input)
-        .style(crate::ui::input_style)
-        .on_input(move |v| on_msg(ConversationMessage::InputChanged(v)))
-        .on_submit(on_msg(ConversationMessage::SubmitMessage))
-        .padding(iced::Padding {
-            top: 12.0,
-            right: 88.0,
-            bottom: 12.0,
-            left: 12.0,
-        })
-        .size(14)
-        .width(Length::Fill);
+    let composer_input = text_input(
+        if view.participant_ids.len() > 1 {
+            "Message the group…"
+        } else {
+            "Message your character…"
+        },
+        view.input,
+    )
+    .style(crate::ui::input_style)
+    .on_input(move |v| on_msg(ConversationMessage::InputChanged(v)))
+    .on_submit(on_msg(ConversationMessage::SubmitMessage))
+    .padding(iced::Padding {
+        top: 12.0,
+        right: 88.0,
+        bottom: 12.0,
+        left: 12.0,
+    })
+    .size(14)
+    .width(Length::Fill);
     let composer_input = iced::widget::stack![
         composer_input,
         container(super::context_usage::indicator(view.context_usage))
@@ -740,7 +747,11 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
     }
     let composer_row = composer_row.push(action_btn);
 
-    let composer_box = card(column![composer_row, hint].spacing(4), glass_mode).width(Length::Fill);
+    let composer_box = card(
+        column![speaker_bar(view, on_msg), composer_row, hint].spacing(6),
+        glass_mode,
+    )
+    .width(Length::Fill);
 
     let mut chat_content = column![]
         .spacing(8)
@@ -782,170 +793,78 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
     }
 }
 
-/// Modal dialog for creating a new chat conversation.
-#[must_use]
-pub fn new_chat_dialog_view<'a, Message: Clone + 'a>(
-    view: &NewChatViewState<'a>,
+/// Edit button for the open chat and, in a group, a picker for who replies next.
+fn speaker_bar<'a, Message: Clone + 'a>(
+    view: &ConversationViewState<'a>,
     on_msg: impl Fn(ConversationMessage) -> Message + Copy + 'a,
-) -> Option<Element<'a, Message>> {
-    if !view.is_open {
-        return None;
-    }
-    let _glass_mode = view.glass_mode;
-
-    let title_text = text("New chat").size(20).color(crate::ui::ACCENT_TEXT);
-    let desc_text = text("Choose a character for a private chat.")
-        .size(13)
-        .color(crate::ui::SECONDARY_TEXT);
-
-    let name_label = text("CONVERSATION NAME").size(11);
-    let name_input = text_input("Optional — we can name it for you", view.title)
-        .on_input(move |t| on_msg(ConversationMessage::NewChatTitleChanged(t)))
-        .padding(8)
-        .size(13);
-
-    let char_label = text("CHARACTERS").size(11);
-
-    let mut char_list = column![].spacing(8);
-
-    for c in view.characters {
-        let is_selected = view.selected_character_id == Some(c.id.as_str());
-
-        let avatar = character_avatar_view(
-            &c.name,
-            c.images.first().map(|img| img.data.as_slice()),
-            36.0,
-        );
-
-        let name_t = text(&c.name).size(14);
-        let summary_t = text(if c.personality.trim().is_empty() {
-            "Ready to chat"
+) -> Element<'a, Message> {
+    let group = view.participant_ids.len() > 1;
+    let mut bar = row![crate::ui::action_icon(
+        MessageIcon::Edit,
+        if group {
+            "Edit group characters and reply mode"
         } else {
-            &c.personality
-        })
-        .size(11)
-        .color(crate::ui::SECONDARY_TEXT);
-
-        let char_info = column![name_t, summary_t].spacing(2);
-
-        let radio_marker =
-            text(if is_selected { "●" } else { "○" })
-                .size(16)
-                .color(if is_selected {
-                    COLOR_PRIMARY
-                } else {
-                    crate::ui::SECONDARY_TEXT
-                });
-
-        let card_row = row![
-            avatar,
-            char_info,
-            Space::new().width(Length::Fill),
-            radio_marker
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
-
-        let char_id = c.id.clone();
-        let card_btn = button(card_row)
-            .width(Length::Fill)
-            .padding(10)
-            .on_press(on_msg(ConversationMessage::SelectNewChatCharacter(char_id)))
-            .style(move |theme: &Theme, status: button::Status| {
-                if is_selected {
-                    button::Style {
-                        background: Some(Background::Color(crate::ui::COLOR_PRIMARY_STRONG)),
-                        text_color: Color::WHITE,
-                        border: Border {
-                            radius: 8.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                } else {
-                    let (bg, border_color) = match status {
-                        button::Status::Hovered => (
-                            Color::from_rgba(
-                                theme.palette().text.r,
-                                theme.palette().text.g,
-                                theme.palette().text.b,
-                                0.08,
-                            ),
-                            Color::from_rgba(
-                                theme.palette().text.r,
-                                theme.palette().text.g,
-                                theme.palette().text.b,
-                                0.16,
-                            ),
-                        ),
-                        _ => (
-                            Color::from_rgba(
-                                theme.palette().text.r,
-                                theme.palette().text.g,
-                                theme.palette().text.b,
-                                0.04,
-                            ),
-                            Color::from_rgba(
-                                theme.palette().text.r,
-                                theme.palette().text.g,
-                                theme.palette().text.b,
-                                0.08,
-                            ),
-                        ),
-                    };
-                    button::Style {
-                        background: Some(Background::Color(bg)),
-                        text_color: theme.palette().text,
-                        border: Border {
-                            color: border_color,
-                            width: 0.0,
-                            radius: 8.0.into(),
-                        },
-                        ..Default::default()
-                    }
-                }
-            });
-
-        char_list = char_list.push(card_btn);
-    }
-
-    let scrollable_chars = scrollable(char_list).height(Length::Fill);
-
-    let create_enabled = view.selected_character_id.is_some();
-    let mut create_btn = button(text("Create conversation").size(14).font(crate::ui::BOLD))
-        .padding([10, 20])
-        .width(Length::Fill)
-        .style(crate::ui::primary_button_style());
-
-    if create_enabled {
-        create_btn = create_btn.on_press(on_msg(ConversationMessage::CreateNewChat));
-    }
-
-    let cancel_btn = button(text("Cancel").size(13))
-        .padding([8, 16])
-        .on_press(on_msg(ConversationMessage::CloseNewChatDialog))
-        .style(crate::ui::secondary_button_style());
-
-    let dialog_content = column![
-        title_text,
-        desc_text,
-        Space::new().height(10),
-        name_label,
-        name_input,
-        Space::new().height(10),
-        char_label,
-        scrollable_chars,
-        Space::new().height(14),
-        create_btn,
-        cancel_btn,
-    ]
+            "Edit chat or add characters for a group"
+        },
+        Some(on_msg(ConversationMessage::EditConversation)),
+        crate::ui::Tone::Secondary,
+    )]
     .spacing(6)
-    .align_x(Alignment::Center);
-
-    Some(
-        container(dialog_content)
-            .padding(20)
-            .width(Length::Fill)
-            .into(),
-    )
+    .align_y(Alignment::Center);
+    if !group {
+        return bar.into();
+    }
+    let manual = view.conversation_kind == ConversationKind::GroupManual;
+    let chip = |label: Element<'a, Message>, active: bool, message: ConversationMessage| {
+        button(label)
+            .padding([4, 10])
+            .on_press(on_msg(message))
+            .style(move |theme: &Theme, status| {
+                if active {
+                    crate::ui::primary_button_style()(theme, status)
+                } else {
+                    crate::ui::secondary_button_style()(theme, status)
+                }
+            })
+    };
+    bar = bar.push(
+        text("Next reply:")
+            .size(12)
+            .color(crate::ui::SECONDARY_TEXT),
+    );
+    if !manual {
+        let mode = GROUP_MODES
+            .iter()
+            .find(|(kind, ..)| *kind == view.conversation_kind)
+            .map_or("Automatic", |(_, label, _)| *label);
+        bar = bar.push(chip(
+            text(mode).size(12).into(),
+            view.selected_speaker.is_none(),
+            ConversationMessage::SelectNextSpeaker(None),
+        ));
+    }
+    for id in view.participant_ids {
+        let Some(character) = view.characters.iter().find(|c| c.id == *id) else {
+            continue;
+        };
+        let active = view.selected_speaker == Some(id.as_str());
+        let label = row![
+            character_avatar_view(
+                &character.name,
+                character.images.first().map(|img| img.data.as_slice()),
+                18.0,
+            ),
+            text(&character.name).size(12),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        // Outside manual mode a pick is one reply; picking it again returns to automatic.
+        let next = (!active || manual).then(|| id.clone());
+        bar = bar.push(chip(
+            label.into(),
+            active,
+            ConversationMessage::SelectNextSpeaker(next),
+        ));
+    }
+    bar.wrap().into()
 }

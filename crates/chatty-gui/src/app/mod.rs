@@ -21,8 +21,8 @@ use crate::worlds::WorldDialogState;
 use crate::{Args, characters, conversation, network, ui};
 use chatty_protocol::util::current_utc_timestamp;
 use chatty_protocol::{
-    Character, ChatMessage, Conversation, DeltaPayload, GenerationContext, GenerationStatus,
-    MemoryEntry, Request, Role, TokenUsage, World,
+    Character, ChatMessage, Conversation, ConversationKind, DeltaPayload, GenerationContext,
+    GenerationStatus, MemoryEntry, Request, Role, TokenUsage, World,
 };
 use iced::{Task, Theme};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -97,7 +97,14 @@ pub struct ChattyApp {
     markdown: conversation::ConversationMarkdown,
     selected_conversation: Option<String>,
     auto_select_conversation: bool,
-    selected_characters: HashSet<String>,
+    /// Characters chosen in the chat dialog, in speaking order.
+    selected_characters: Vec<String>,
+    /// Speaker mode chosen in the chat dialog for two or more characters.
+    new_chat_kind: ConversationKind,
+    /// The chat dialog edits this conversation instead of creating one.
+    editing_conversation: Option<String>,
+    /// Speaker picked for the next reply in the open group chat.
+    next_speaker: Option<String>,
     input: String,
     editing_message_id: Option<String>,
     editing_message_content: iced::widget::text_editor::Content,
@@ -126,6 +133,7 @@ pub struct ChattyApp {
     char_import_started: Option<Instant>,
     new_chat_open: bool,
     new_conversation_title: String,
+    new_chat_search: String,
     admin: AdminState,
     last_monitor_refresh: Option<Instant>,
     account_usage: TokenUsage,
@@ -225,7 +233,10 @@ impl ChattyApp {
             markdown: conversation::ConversationMarkdown::default(),
             selected_conversation: None,
             auto_select_conversation: true,
-            selected_characters: HashSet::new(),
+            selected_characters: Vec::new(),
+            new_chat_kind: ConversationKind::GroupAutomatic,
+            editing_conversation: None,
+            next_speaker: None,
             input: String::new(),
             editing_message_id: None,
             editing_message_content: iced::widget::text_editor::Content::new(),
@@ -251,6 +262,7 @@ impl ChattyApp {
             char_import_started: None,
             new_chat_open: false,
             new_conversation_title: String::new(),
+            new_chat_search: String::new(),
             admin: AdminState::default(),
             last_monitor_refresh: None,
             account_usage: TokenUsage::default(),

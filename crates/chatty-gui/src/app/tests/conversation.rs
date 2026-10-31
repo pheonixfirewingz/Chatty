@@ -1,4 +1,5 @@
 use super::{Harness, png};
+use crate::conversation::ConversationMessage;
 use crate::network::Command;
 use chatty_protocol::{
     CharacterImage, ChatMessage, DeltaOperation, DeltaPayload, ErrorCode, GenerationContext,
@@ -347,7 +348,6 @@ fn chat_follows_new_content_only_while_at_the_bottom() {
 
 #[test]
 fn message_edits_use_a_multi_line_editor() {
-    use crate::conversation::ConversationMessage;
     use iced::widget::text_editor::{Action, Edit};
     let mut app = Harness::demo();
     let id = app.messages[0].id.clone();
@@ -379,4 +379,118 @@ fn message_edits_use_a_multi_line_editor() {
         [Request::UpdateMessage { message_id, content, .. }]
             if message_id == &id && content == "Hi\nx"
     ));
+}
+
+/// The demo chat turned into a group with a second character.
+fn group_demo(kind: chatty_protocol::ConversationKind) -> Harness {
+    let mut app = Harness::demo();
+    let mut second = app.characters[0].clone();
+    second.id = "bob".into();
+    second.name = "Bob".into();
+    app.characters.push(second);
+    app.conversations[0].participant_ids = vec!["assistant".into(), "bob".into()];
+    app.conversations[0].kind = kind;
+    app
+}
+
+fn generated_speaker(app: &mut Harness) -> Option<String> {
+    app.submit_message();
+    match app.requests().as_slice() {
+        [Request::Generate { speaker_id, .. }] => speaker_id.clone(),
+        other => panic!("unexpected requests: {other:?}"),
+    }
+}
+
+#[test]
+fn several_characters_create_a_group_in_selection_order() {
+    use chatty_protocol::ConversationKind;
+    let mut app = group_demo(ConversationKind::GroupAutomatic);
+    app.update(ConversationMessage::OpenNewChatDialog);
+    for id in ["bob", "assistant", "bob", "bob"] {
+        app.update(ConversationMessage::ToggleNewChatCharacter(id.into()));
+    }
+    app.update(ConversationMessage::NewChatModeChanged(
+        ConversationKind::GroupRoundRobin,
+    ));
+    app.update(ConversationMessage::CreateNewChat);
+    assert!(!app.new_chat_open);
+    assert!(matches!(
+        app.requests().as_slice(),
+        [Request::CreateConversation { kind: ConversationKind::GroupRoundRobin, participant_ids, title, .. }]
+            if participant_ids == &["assistant".to_owned(), "bob".to_owned()] && title == "Group chat"
+    ));
+
+    // One character is always a direct chat, whatever mode was last chosen.
+    app.update(ConversationMessage::OpenNewChatDialog);
+    app.update(ConversationMessage::NewChatModeChanged(
+        ConversationKind::GroupManual,
+    ));
+    app.update(ConversationMessage::ToggleNewChatCharacter("bob".into()));
+    app.update(ConversationMessage::CreateNewChat);
+    assert!(matches!(
+        app.requests().as_slice(),
+        [Request::CreateConversation {
+            kind: ConversationKind::Direct,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn editing_a_chat_adds_characters_and_changes_its_mode() {
+    use chatty_protocol::ConversationKind;
+    let mut app = group_demo(ConversationKind::Direct);
+    app.conversations[0].participant_ids = vec!["assistant".into()];
+    app.update(ConversationMessage::EditConversation);
+    assert!(app.new_chat_open);
+    assert_eq!(app.selected_characters, ["assistant"]);
+    app.update(ConversationMessage::ToggleNewChatCharacter("bob".into()));
+    app.update(ConversationMessage::NewChatModeChanged(
+        ConversationKind::GroupManual,
+    ));
+    app.update(ConversationMessage::CreateNewChat);
+    assert!(app.editing_conversation.is_none());
+    assert!(matches!(
+        app.requests().as_slice(),
+        [Request::UpdateConversation { conversation_id, kind: ConversationKind::GroupManual, participant_ids, title, .. }]
+            if conversation_id == "demo"
+                && participant_ids == &["assistant".to_owned(), "bob".to_owned()]
+                && title == "Night watch at the observatory"
+    ));
+}
+
+#[test]
+fn group_speaker_picks_apply_to_one_reply_outside_manual_mode() {
+    use chatty_protocol::ConversationKind;
+    let mut app = group_demo(ConversationKind::GroupAutomatic);
+    // The broker chooses unless the user picks someone.
+    assert_eq!(generated_speaker(&mut app), None);
+    app.update(ConversationMessage::SelectNextSpeaker(Some("bob".into())));
+    assert_eq!(generated_speaker(&mut app).as_deref(), Some("bob"));
+    assert_eq!(generated_speaker(&mut app), None);
+    // A pick for a character that left the group is ignored.
+    app.update(ConversationMessage::SelectNextSpeaker(Some("gone".into())));
+    assert_eq!(generated_speaker(&mut app), None);
+}
+
+#[test]
+fn manual_groups_keep_the_picked_speaker() {
+    use chatty_protocol::ConversationKind;
+    let mut app = group_demo(ConversationKind::GroupManual);
+    assert_eq!(generated_speaker(&mut app).as_deref(), Some("assistant"));
+    app.update(ConversationMessage::SelectNextSpeaker(Some("bob".into())));
+    assert_eq!(generated_speaker(&mut app).as_deref(), Some("bob"));
+    assert_eq!(generated_speaker(&mut app).as_deref(), Some("bob"));
+}
+
+#[test]
+fn new_chat_search_filters_the_gallery_and_resets_on_open() {
+    use chatty_protocol::ConversationKind;
+    let mut app = group_demo(ConversationKind::Direct);
+    app.update(ConversationMessage::OpenNewChatDialog);
+    app.update(ConversationMessage::NewChatSearchChanged("bb".into()));
+    assert_eq!(app.new_chat_search, "bb");
+    app.update(ConversationMessage::CloseNewChatDialog);
+    app.update(ConversationMessage::OpenNewChatDialog);
+    assert!(app.new_chat_search.is_empty());
 }

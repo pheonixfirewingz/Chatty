@@ -9,7 +9,9 @@ use crate::memories::{MemoryAction, MemoryDialogState, MemoryMessage};
 use crate::network::{Command, connection_target, save_preferences};
 use crate::tts::TtsEvent;
 use crate::worlds::{WorldAction, WorldMessage};
-use chatty_protocol::{ChatMessage, ConversationKind, EntityKind, Request};
+use chatty_protocol::{ChatMessage, Conversation, ConversationKind, EntityKind, Request};
+
+/// The broker accepts at most 32 characters per conversation.
 use iced::Task;
 use iced::widget::text_editor;
 use std::time::{Duration, Instant};
@@ -97,7 +99,7 @@ impl ChattyApp {
                 Task::none()
             }
             Message::OpenNewChat => {
-                self.new_chat_open = true;
+                self.open_chat_dialog(Vec::new());
                 Task::none()
             }
             Message::OpenCharactersDialog => {
@@ -257,6 +259,9 @@ impl ChattyApp {
     }
 
     pub(super) fn open_conversation(&mut self, id: &str) {
+        if self.selected_conversation.as_deref() != Some(id) {
+            self.next_speaker = None;
+        }
         self.auto_select_conversation = true;
         self.selected_conversation = Some(id.into());
         self.send(Request::GetConversation {
@@ -267,10 +272,17 @@ impl ChattyApp {
 
     pub(super) fn submit_message(&mut self) {
         let Some(cid) = self.selected_conversation.clone() else {
-            self.new_chat_open = true;
+            self.open_chat_dialog(Vec::new());
             return;
         };
         let speaker = self.selected_speaker().map(str::to_owned);
+        // Outside manual mode, picking a group speaker applies to one reply.
+        if self
+            .selected_conversation_entry()
+            .is_some_and(|c| c.kind != ConversationKind::GroupManual)
+        {
+            self.next_speaker = None;
+        }
         if self.input.trim().is_empty() {
             self.send(Request::Generate {
                 session_token: self.token.clone(),
@@ -310,11 +322,52 @@ impl ChattyApp {
         }
     }
 
+    pub(super) fn selected_conversation_entry(&self) -> Option<&Conversation> {
+        let id = self.selected_conversation.as_deref()?;
+        self.conversations.iter().find(|c| c.id == id)
+    }
+
+    /// The character that replies next, or `None` to let the broker choose.
+    ///
+    /// A direct chat always uses its character. A group uses the speaker the
+    /// user picked; manual mode falls back to the first character because the
+    /// broker requires an explicit speaker there.
     pub(super) fn selected_speaker(&self) -> Option<&str> {
-        self.selected_conversation
+        let conversation = self.selected_conversation_entry()?;
+        let participants = &conversation.participant_ids;
+        if participants.len() < 2 {
+            return participants.first().map(String::as_str);
+        }
+        self.next_speaker
             .as_deref()
-            .and_then(|id| self.conversations.iter().find(|c| c.id == id))
-            .and_then(|c| c.participant_ids.first().map(String::as_str))
+            .filter(|id| participants.iter().any(|p| p == id))
+            .or_else(|| {
+                (conversation.kind == ConversationKind::GroupManual)
+                    .then(|| participants.first().map(String::as_str))
+                    .flatten()
+            })
+    }
+
+    /// The character whose memories a manual extraction updates: the chosen
+    /// speaker, else the latest character to reply in the open chat.
+    pub(super) fn memory_character(&self) -> Option<&str> {
+        self.selected_speaker().or_else(|| {
+            self.messages
+                .iter()
+                .rev()
+                .find(|m| m.author_type == "character")
+                .and_then(|m| m.author_id.as_deref())
+        })
+    }
+
+    /// Open the chat dialog to create a conversation with `characters`.
+    pub(super) fn open_chat_dialog(&mut self, characters: Vec<String>) {
+        self.selected_characters = characters;
+        self.new_chat_kind = ConversationKind::GroupAutomatic;
+        self.editing_conversation = None;
+        self.new_conversation_title.clear();
+        self.new_chat_search.clear();
+        self.new_chat_open = true;
     }
 
     pub(super) fn open_memory_manager(
@@ -446,7 +499,7 @@ impl ChattyApp {
             }
             MemoryAction::ExtractFromChat => {
                 let cid = self.selected_conversation.clone();
-                let char_id = self.selected_speaker().map(str::to_owned);
+                let char_id = self.memory_character().map(str::to_owned);
                 if let Some(cid) = cid {
                     self.send(Request::ExtractMemory {
                         session_token: self.token.clone(),
@@ -640,35 +693,75 @@ impl ChattyApp {
                 });
             }
             ConversationMessage::OpenNewChatDialog => {
-                self.new_chat_open = true;
+                self.open_chat_dialog(Vec::new());
+            }
+            ConversationMessage::EditConversation => {
+                if let Some(conversation) = self.selected_conversation_entry().cloned() {
+                    self.selected_characters = conversation.participant_ids;
+                    self.new_chat_kind = match conversation.kind {
+                        ConversationKind::Direct => ConversationKind::GroupAutomatic,
+                        kind => kind,
+                    };
+                    self.new_conversation_title = conversation.title;
+                    self.editing_conversation = Some(conversation.id);
+                    self.new_chat_search.clear();
+                    self.new_chat_open = true;
+                }
             }
             ConversationMessage::CloseNewChatDialog => {
                 self.new_chat_open = false;
+                self.editing_conversation = None;
+            }
+            ConversationMessage::NewChatSearchChanged(query) => {
+                self.new_chat_search = query;
             }
             ConversationMessage::NewChatTitleChanged(title) => {
                 self.new_conversation_title = title;
             }
-            ConversationMessage::SelectNewChatCharacter(id) => {
-                self.selected_characters.clear();
-                self.selected_characters.insert(id);
+            ConversationMessage::ToggleNewChatCharacter(id) => {
+                if let Some(index) = self.selected_characters.iter().position(|c| *c == id) {
+                    self.selected_characters.remove(index);
+                } else if self.selected_characters.len() < conversation::MAX_CHAT_CHARACTERS {
+                    self.selected_characters.push(id);
+                }
+            }
+            ConversationMessage::NewChatModeChanged(kind) => {
+                self.new_chat_kind = kind;
             }
             ConversationMessage::CreateNewChat => {
-                let participant_ids: Vec<String> =
-                    self.selected_characters.iter().cloned().collect();
-                let title = if self.new_conversation_title.trim().is_empty() {
-                    "New Conversation".to_string()
-                } else {
-                    self.new_conversation_title.trim().to_string()
+                if self.selected_characters.is_empty() {
+                    return Task::none();
+                }
+                let participant_ids = std::mem::take(&mut self.selected_characters);
+                let kind =
+                    conversation::kind_for_selection(participant_ids.len(), self.new_chat_kind);
+                let title = match self.new_conversation_title.trim() {
+                    "" if participant_ids.len() > 1 => "Group chat".to_string(),
+                    "" => "New Conversation".to_string(),
+                    title => title.to_string(),
                 };
-                self.send(Request::CreateConversation {
-                    session_token: self.token.clone(),
-                    title,
-                    kind: ConversationKind::Direct,
-                    participant_ids,
-                });
+                let request = match self.editing_conversation.take() {
+                    Some(conversation_id) => Request::UpdateConversation {
+                        session_token: self.token.clone(),
+                        conversation_id,
+                        title,
+                        kind,
+                        participant_ids,
+                    },
+                    None => Request::CreateConversation {
+                        session_token: self.token.clone(),
+                        title,
+                        kind,
+                        participant_ids,
+                    },
+                };
+                self.send(request);
                 self.new_chat_open = false;
                 self.compact_sidebar_open = false;
                 self.new_conversation_title.clear();
+            }
+            ConversationMessage::SelectNextSpeaker(id) => {
+                self.next_speaker = id;
             }
             ConversationMessage::ToggleSidebar => {
                 self.sidebar_visible = !self.sidebar_visible;

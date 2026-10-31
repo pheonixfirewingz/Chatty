@@ -751,6 +751,7 @@ async fn cross_tenant_character_update_is_forbidden() {
             session_token: first_token.clone(),
             conversation_id: cascade_id.clone(),
             title: "renamed cascade".into(),
+            kind: ConversationKind::Direct,
             participant_ids: vec![character_id.clone()],
         },
     )

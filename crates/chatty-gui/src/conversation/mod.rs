@@ -1,14 +1,16 @@
 //! Chat transcript, composer, and new-chat dialog.
 
 mod context_usage;
+mod new_chat;
 #[cfg(test)]
 mod tests;
 mod view;
 
+pub use new_chat::*;
 pub use view::*;
 
 use crate::characters::ImageGeneration;
-use chatty_protocol::conversation::ChatMessage;
+use chatty_protocol::conversation::{ChatMessage, ConversationKind};
 use chatty_protocol::response::GenerationStatus;
 use chatty_protocol::{Character, GenerationContext};
 use std::collections::HashMap;
@@ -49,14 +51,22 @@ pub enum ConversationMessage {
     },
     /// Open the new-chat dialog.
     OpenNewChatDialog,
+    /// Open the chat dialog to edit the open conversation's title, characters, and mode.
+    EditConversation,
     /// Close the new-chat dialog.
     CloseNewChatDialog,
+    /// The new-chat gallery search query changed.
+    NewChatSearchChanged(String),
     /// New conversation title changed.
     NewChatTitleChanged(String),
-    /// Selected character for a new conversation.
-    SelectNewChatCharacter(String),
-    /// Create the new chat conversation.
+    /// Add or remove a character; selection order is the group's speaking order.
+    ToggleNewChatCharacter(String),
+    /// Choose how a group picks its next speaker.
+    NewChatModeChanged(ConversationKind),
+    /// Create the new chat, or save the conversation being edited.
     CreateNewChat,
+    /// Choose who replies next in a group; `None` lets the broker decide.
+    SelectNextSpeaker(Option<String>),
     /// Toggle sidebar visibility.
     ToggleSidebar,
     /// Clicked a link in markdown.
@@ -97,6 +107,9 @@ pub struct ConversationViewState<'a> {
     pub markdown: &'a ConversationMarkdown,
     pub selected_conversation: Option<&'a str>,
     pub selected_speaker: Option<&'a str>,
+    /// Ordered characters of the open conversation.
+    pub participant_ids: &'a [String],
+    pub conversation_kind: ConversationKind,
     pub input: &'a str,
     pub active_request: Option<u64>,
     pub stream_text: &'a str,
@@ -121,9 +134,48 @@ pub struct ConversationViewState<'a> {
 pub struct NewChatViewState<'a> {
     pub is_open: bool,
     pub characters: &'a [Character],
-    pub selected_character_id: Option<&'a str>,
+    /// Selected characters in speaking order.
+    pub selected_character_ids: &'a [String],
+    /// Speaker mode used when two or more characters are selected.
+    pub kind: ConversationKind,
+    /// The dialog edits an existing conversation instead of creating one.
+    pub editing: bool,
     pub title: &'a str,
+    /// Fuzzy filter for the character gallery.
+    pub search: &'a str,
     pub glass_mode: bool,
+}
+
+/// Most characters one chat may hold.
+pub const MAX_CHAT_CHARACTERS: usize = 32;
+
+/// Group speaker modes in the order the dialog offers them.
+pub const GROUP_MODES: [(ConversationKind, &str, &str); 3] = [
+    (
+        ConversationKind::GroupAutomatic,
+        "Automatic",
+        "A character named in the last message replies; otherwise the AI picks who fits.",
+    ),
+    (
+        ConversationKind::GroupRoundRobin,
+        "Take turns",
+        "Characters reply in the order they were added.",
+    ),
+    (
+        ConversationKind::GroupManual,
+        "Manual",
+        "You pick who replies each time.",
+    ),
+];
+
+/// The conversation kind for a selection: one character is a direct chat.
+#[must_use]
+pub fn kind_for_selection(count: usize, group_kind: ConversationKind) -> ConversationKind {
+    match (count, group_kind) {
+        (0 | 1, _) => ConversationKind::Direct,
+        (_, ConversationKind::Direct) => ConversationKind::GroupAutomatic,
+        (_, kind) => kind,
+    }
 }
 
 /// Returns the effective content to display for a message (selected variant or default).

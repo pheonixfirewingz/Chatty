@@ -67,9 +67,7 @@ impl ChattyApp {
             }
             CharacterMessage::Chat(id) => {
                 self.draft_character_open = false;
-                self.selected_characters.clear();
-                self.selected_characters.insert(id);
-                self.new_chat_open = true;
+                self.open_chat_dialog(vec![id]);
             }
             CharacterMessage::OpenMemories(id) => {
                 self.draft_character_open = false;

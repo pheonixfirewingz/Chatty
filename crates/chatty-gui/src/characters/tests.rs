@@ -505,3 +505,50 @@ fn test_image_handle_helpers_and_cache() {
     cache.clear();
     assert_eq!(cache.handles.len(), 0);
 }
+
+#[test]
+fn fuzzy_search_ranks_word_starts_and_matches_profile_text() {
+    let character =
+        |id: &str, name: &str, tags: &[&str], personality: &str| chatty_protocol::Character {
+            id: id.into(),
+            name: name.into(),
+            tags: tags.iter().map(|t| (*t).into()).collect(),
+            description: String::new(),
+            personality: personality.into(),
+            scenario: String::new(),
+            system_prompt: String::new(),
+            example_dialogue: String::new(),
+            appearance: String::new(),
+            age: String::new(),
+            gender: String::new(),
+            race: String::new(),
+            misc: String::new(),
+            avatar: None,
+            images: Vec::new(),
+            default_image_id: None,
+            is_public: false,
+            owned_by_user: true,
+            revision: 1,
+        };
+    let roster = [
+        character("n", "Natalie", &[], ""),
+        character("a", "Alice", &["fantasy", "mage"], ""),
+        character("k", "Kael", &["Knight"], "Gruff but loyal"),
+    ];
+    let ids = |query| -> Vec<&str> {
+        search_characters(&roster, query)
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect()
+    };
+    assert_eq!(ids("  "), ["n", "a", "k"]);
+    // Word starts and contiguous runs outrank scattered letters.
+    assert_eq!(ids("ali"), ["a", "n"]);
+    // Typos that keep letter order still match, case-insensitively.
+    assert_eq!(ids("ALCE"), ["a"]);
+    assert_eq!(ids("fntsy"), ["a"]);
+    // Every term must match; long fields need a contiguous hit.
+    assert_eq!(ids("knight LOYAL"), ["k"]);
+    assert!(ids("mage loyal").is_empty());
+    assert!(ids("gby").is_empty());
+}

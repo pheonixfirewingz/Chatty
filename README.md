@@ -17,7 +17,7 @@ Chatty is currently a working `0.1.0` pre-release. It is suitable for developmen
 - Broker selection, connection testing, registration, login, saved sessions, and logout
 - User/admin roles with broker-side authorization and tenant isolation
 - Character creation and editing, public sharing, and SillyTavern JSON/PNG import
-- Private direct conversations, streamed generation, cancellation, regeneration, deletion, and automatic titles
+- Private direct and group conversations, streamed generation, cancellation, regeneration, deletion, and automatic titles
 - Reconnect/resume and live deltas across a user's connected clients
 - Dark glass appearance with a visible desktop and readable content plates
 - Layout follows compositor-assigned space: compact navigation, stacked character fields, and scrollable dialogs
@@ -27,9 +27,9 @@ Chatty is currently a working `0.1.0` pre-release. It is suitable for developmen
 - Admin monitoring, user management, broker policy, inference settings, and Ollama model controls
 - Sandboxed WASM adapter plugins for OpenAI-compatible servers, remote [FreeToken](docs/OPERATIONS.md#freetoken-on-a-remote-machine), Ollama, and Hugging Face model discovery
 - Optional [ComfyUI image generation](docs/OPERATIONS.md#image-generation-with-comfyui): **Generate portrait** and **Generate emotions** (12 labelled expressions with one shared seed; the broker's [emotion classifier](docs/OPERATIONS.md#emotion-classifier) picks one for each reply) in the character editor, and **Image** in the chat composer to illustrate the scene. Text in the composer becomes the image prompt; an empty composer asks the text model to describe the scene
-- Broker/protocol support for group modes, variants, lore, memories, conversation state, and summaries
+- Broker/protocol support for variants, lore, memories, conversation state, and summaries
 
-The GUI focuses on direct conversations. World lore has a native editor with character links, common knowledge, and scene-triggered facts. Broker/protocol support does not imply a complete GUI workflow for every feature.
+World lore has a native editor with character links, common knowledge, and scene-triggered facts. Broker/protocol support does not imply a complete GUI workflow for every feature.
 
 ## Quick start
 
@@ -145,6 +145,22 @@ release evidence.
 - [Operations](docs/OPERATIONS.md): configuration, trust, backups, and upgrades
 - [Release](docs/RELEASE.md): acceptance checks and Flatpak packaging
 - [Architecture](docs/architecture/ARCHITECTURE.md): boundaries, wire contract, and decisions
+
+## Group chats
+
+In **New chat**, select two or more characters to make a group; the order you select
+them is their speaking order. Choose who replies:
+
+- **Automatic**: a character named in the latest message replies. Otherwise the text
+  model picks who fits, falling back to taking turns. A character never answers its own line.
+- **Take turns**: characters reply in order.
+- **Manual**: you pick who replies each time.
+
+Above the message input, the pencil opens the chat to rename it, add or remove
+characters, or change the mode; adding a character to a direct chat makes it a group.
+In a group, **Next reply** chips choose who answers. Outside manual mode a pick applies
+to one reply. Send an empty message (**Continue**) to let the characters talk among
+themselves. Automatic memory extraction saves facts for the character who replied last.
 
 ## Context usage
 

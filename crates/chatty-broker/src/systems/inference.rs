@@ -1298,16 +1298,60 @@ pub(super) async fn probe_backend(app: &App) -> Result<Vec<String>> {
 
 /// Recent root messages for reply prompts, newest first. Image messages are
 /// excluded: their prompt is only a caption for the user and would spend context.
-const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.seq DESC LIMIT 23";
+const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(c.name,'') AS author_name,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.seq DESC LIMIT 23";
 
 /// Map a stored message to a chat role.
-fn history_message(author_type: &str, content: String) -> (String, String) {
-    let role = match author_type {
-        "user" => "user",
-        "system" => "system",
-        _ => "assistant",
-    };
-    (role.to_owned(), content)
+///
+/// In a group (`speaker` is set), only the speaker's own lines are assistant
+/// turns. Other characters' lines become user turns prefixed with their name,
+/// so the model can tell who said what and does not continue their lines.
+fn history_message(row: &sqlx::sqlite::SqliteRow, speaker: Option<&str>) -> (String, String) {
+    let content: String = row.get("content");
+    let author_type: &str = row.get("author_type");
+    match author_type {
+        "user" => ("user".to_owned(), content),
+        "system" => ("system".to_owned(), content),
+        _ => match speaker {
+            Some(speaker) if row.get::<Option<&str>, _>("author_id") != Some(speaker) => {
+                let name: &str = row.get("author_name");
+                let name = if name.is_empty() {
+                    "Another character"
+                } else {
+                    name
+                };
+                ("user".to_owned(), format!("{name}: {content}"))
+            }
+            _ => ("assistant".to_owned(), content),
+        },
+    }
+}
+
+/// Describe the other characters present and keep the reply to one speaker.
+fn group_prompt(
+    participants: &[sqlx::sqlite::SqliteRow],
+    speaker_id: &str,
+    speaker_name: &str,
+) -> String {
+    if participants.len() < 2 {
+        return String::new();
+    }
+    let others = participants
+        .iter()
+        .filter(|r| r.get::<&str, _>("id") != speaker_id)
+        .map(|r| {
+            format!(
+                "- {}: {}; personality: {}; appearance: {}",
+                r.get::<&str, _>("name"),
+                clip(r.get::<&str, _>("description"), 512),
+                clip(r.get::<&str, _>("personality"), 512),
+                clip(r.get::<&str, _>("appearance"), 512),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "This is a group roleplay. Other characters present:\n{others}\nLines from other characters appear as \"Name: text\". Write only {speaker_name}'s next reply. Never write dialogue, actions, or decisions for the other characters or the user, and do not prefix the reply with a name.\n"
+    )
 }
 
 pub(super) async fn selected_model(app: &App) -> Result<String> {
@@ -1398,7 +1442,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             .fetch_one(&app.db)
             .await?;
     let system = format!(
-        "{}\nYou are {}.\nDescription: {}\nPersonality: {}\nAppearance: {}\nAge: {}\nGender: {}\nRace: {}\nMisc: {}\nScenario: {}\nExample dialogue:\n{}\nGroup participants:\n{}\nWorld state:\n{}\nStory summary:\n{}\nLore:\n{}",
+        "{}\nYou are {}.\nDescription: {}\nPersonality: {}\nAppearance: {}\nAge: {}\nGender: {}\nRace: {}\nMisc: {}\nScenario: {}\nExample dialogue:\n{}\n{}World state:\n{}\nStory summary:\n{}\nLore:\n{}",
         clip(&character.get::<String, _>("system_prompt"), 16_384),
         character.get::<String, _>("name"),
         clip(&character.get::<String, _>("description"), 16_384),
@@ -1410,29 +1454,14 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         clip(&character.get::<String, _>("misc"), 2_048),
         clip(&character.get::<String, _>("scenario"), 16_384),
         clip(&character.get::<String, _>("example_dialogue"), 16_384),
-        participants
-            .iter()
-            .map(|r| format!(
-                "{} — description: {}; personality: {}; appearance: {}; scenario: {}",
-                r.get::<String, _>("name"),
-                clip(&r.get::<String, _>("description"), 512),
-                clip(&r.get::<String, _>("personality"), 512),
-                clip(&r.get::<String, _>("appearance"), 512),
-                clip(&r.get::<String, _>("scenario"), 512)
-            ))
-            .collect::<Vec<_>>()
-            .join(", "),
+        group_prompt(&participants, &sid, character.get::<&str, _>("name")),
         clip(&context.get::<String, _>("state"), 32_768),
         clip(&context.get::<String, _>("summary"), 32_768),
         world_context
     );
     let prioritized_memory = format!("Long-term memory:\n{}", memory_prompt(&memories));
-    let history = recent.iter().map(|r| {
-        history_message(
-            &r.get::<String, _>("author_type"),
-            r.get::<String, _>("content"),
-        )
-    });
+    let group_speaker = (participants.len() > 1).then_some(sid.as_str());
+    let history = recent.iter().map(|r| history_message(r, group_speaker));
     let messages = budget_chat_messages(
         &system,
         &prioritized_memory,
@@ -1929,10 +1958,7 @@ mod prompt_budget_tests {
             .fetch_all(&db)
             .await
             .unwrap();
-        let history: Vec<_> = rows
-            .iter()
-            .map(|row| history_message(&row.get::<String, _>("author_type"), row.get("content")))
-            .collect();
+        let history: Vec<_> = rows.iter().map(|row| history_message(row, None)).collect();
         assert_eq!(
             history,
             [
@@ -2071,6 +2097,38 @@ pub(super) mod auxiliary_completion_tests {
     }
 }
 
+/// Byte offset of the first whole-word, case-insensitive mention of `name`.
+fn name_mention(text: &str, name: &str) -> Option<usize> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let text = text.to_lowercase();
+    let name = name.to_lowercase();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    text.match_indices(&name).map(|(at, _)| at).find(|&at| {
+        !word(text[..at].chars().next_back()) && !word(text[at + name.len()..].chars().next())
+    })
+}
+
+/// The participant named earliest in `text`, other than `exclude`.
+fn mentioned_speaker(
+    participants: &[sqlx::sqlite::SqliteRow],
+    text: &str,
+    exclude: Option<&str>,
+) -> Option<String> {
+    participants
+        .iter()
+        .filter(|r| Some(r.get::<&str, _>("id")) != exclude)
+        .filter_map(|r| Some((name_mention(text, r.get("name"))?, r.get::<String, _>("id"))))
+        .min_by_key(|(at, _)| *at)
+        .map(|(_, id)| id)
+}
+
+/// Choose the next speaker. An explicit speaker always wins. Round-robin
+/// follows participant order. Automatic mode first answers a character named
+/// in the latest message, then asks the model, then falls back to round-robin;
+/// the author of the latest message never answers itself.
 pub(super) async fn select_speaker(
     app: &App,
     user_id: &str,
@@ -2090,32 +2148,36 @@ pub(super) async fn select_speaker(
         .await?;
     let kind: i32 = row.get("kind");
     let turn: i64 = row.get("turn_index");
-    let fallback = participants[turn as usize % participants.len()].get::<String, _>("id");
     if kind == ConversationKind::GroupManual as i32 {
         bail!("manual group mode requires an explicit speaker")
     }
+    if participants.len() == 1 {
+        return Ok(participants[0].get("id"));
+    }
+    let recent = if kind == ConversationKind::GroupAutomatic as i32 {
+        sqlx::query("SELECT m.author_type,m.author_id,COALESCE(c.name,'') AS author_name,substr(COALESCE(v.content,m.content),1,4096) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.seq DESC LIMIT 12").bind(cid).fetch_all(&app.db).await?
+    } else {
+        Vec::new()
+    };
+    let last_author = recent
+        .first()
+        .and_then(|r| r.get::<Option<String>, _>("author_id"));
+    let last_author = last_author.as_deref();
+    let start = turn.rem_euclid(participants.len() as i64) as usize;
+    let fallback = (0..participants.len())
+        .map(|offset| participants[(start + offset) % participants.len()].get::<String, _>("id"))
+        .find(|id| Some(id.as_str()) != last_author)
+        .unwrap_or_else(|| participants[start].get("id"));
     let selected = if kind == ConversationKind::GroupAutomatic as i32 {
-        let names = participants
-            .iter()
-            .map(|r| r.get::<String, _>("name"))
-            .collect::<Vec<_>>();
-        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL AND author_type<>'image' ORDER BY seq DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
-        let choice = async {
-            let model = selected_model(app).await.ok()?;
-            let messages = vec![
-                AdapterMessage::new("system","Choose exactly one next speaker name from the supplied list based on the recent roleplay. Output only the name."),
-                AdapterMessage::new("user",format!("Speakers: {}\nRecent roleplay:\n{}",names.join(", "),recent.into_iter().rev().collect::<Vec<_>>().join("\n"))),
-            ];
-            debug_messages("select_speaker", &messages, None);
-            let response=complete(app,&model,messages,GenerationOptions {
-                max_tokens:Some(16),..Default::default()
-            },Duration::from_secs(15)).await.ok()?;
-            record_token_usage(app, user_id, adapter_token_usage(response.usage)).await.ok()?;
-            let answer = response.content.as_deref()?.trim();
-            debug_response("select_speaker", answer);
-            participants.iter().find(|r|r.get::<String,_>("name").eq_ignore_ascii_case(answer)).map(|r|r.get("id"))
-        }.await;
-        choice.unwrap_or(fallback)
+        let mentioned = recent
+            .first()
+            .and_then(|r| mentioned_speaker(participants, r.get("content"), last_author));
+        match mentioned {
+            Some(id) => id,
+            None => choose_speaker_with_model(app, user_id, participants, &recent, last_author)
+                .await
+                .unwrap_or(fallback),
+        }
     } else {
         fallback
     };
@@ -2124,6 +2186,171 @@ pub(super) async fn select_speaker(
         .execute(&app.db)
         .await?;
     Ok(selected)
+}
+
+/// Ask the model which other participant should speak next.
+async fn choose_speaker_with_model(
+    app: &App,
+    user_id: &str,
+    participants: &[sqlx::sqlite::SqliteRow],
+    recent: &[sqlx::sqlite::SqliteRow],
+    exclude: Option<&str>,
+) -> Option<String> {
+    let candidates = participants
+        .iter()
+        .filter(|r| Some(r.get::<&str, _>("id")) != exclude)
+        .collect::<Vec<_>>();
+    let names = candidates
+        .iter()
+        .map(|r| r.get::<&str, _>("name"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let transcript = recent
+        .iter()
+        .rev()
+        .map(|r| {
+            let name = match r.get::<&str, _>("author_type") {
+                "user" => "User",
+                "system" => "Narrator",
+                _ => r.get::<&str, _>("author_name"),
+            };
+            format!("{name}: {}", r.get::<&str, _>("content"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let model = selected_model(app).await.ok()?;
+    let messages = vec![
+        AdapterMessage::new(
+            "system",
+            "Choose exactly one next speaker name from the supplied list based on the recent roleplay. Output only the name.",
+        ),
+        AdapterMessage::new(
+            "user",
+            format!("Speakers: {names}\nRecent roleplay:\n{transcript}"),
+        ),
+    ];
+    debug_messages("select_speaker", &messages, None);
+    let response = complete(
+        app,
+        &model,
+        messages,
+        GenerationOptions {
+            max_tokens: Some(16),
+            ..Default::default()
+        },
+        Duration::from_secs(15),
+    )
+    .await
+    .ok()?;
+    record_token_usage(app, user_id, adapter_token_usage(response.usage))
+        .await
+        .ok()?;
+    let answer = response.content.as_deref()?.trim();
+    debug_response("select_speaker", answer);
+    candidates
+        .iter()
+        .find(|r| r.get::<&str, _>("name").eq_ignore_ascii_case(answer))
+        .copied()
+        .or_else(|| {
+            candidates
+                .iter()
+                .filter_map(|r| Some((name_mention(answer, r.get("name"))?, *r)))
+                .min_by_key(|(at, _)| *at)
+                .map(|(_, r)| r)
+        })
+        .map(|r| r.get("id"))
+}
+
+#[cfg(test)]
+mod speaker_tests {
+    use super::auxiliary_completion_tests::test_app;
+    use super::*;
+
+    const PARTICIPANTS: &str = "SELECT c.id,c.name FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id='chat' ORDER BY p.position";
+
+    /// The shared test chat as an automatic group of Ann then Bob. The adapter
+    /// URL refuses connections, so any model-based choice falls back.
+    async fn group_app() -> App {
+        let app = test_app("http://127.0.0.2:9/v1").await;
+        sqlx::query("INSERT INTO characters(id,owner_id,name,personality,scenario,system_prompt,example_dialogue,appearance,tags,revision) VALUES('ann','owner','Ann','','','','','',X'',1),('bob','owner','Bob','','','','','',X'',1)")
+            .execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO participants(conversation_id,character_id,position) VALUES('chat','ann',0),('chat','bob',1)")
+            .execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE conversations SET kind=? WHERE id='chat'")
+            .bind(ConversationKind::GroupAutomatic as i32)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        app
+    }
+
+    async fn speaker(app: &App) -> String {
+        let participants = sqlx::query(PARTICIPANTS).fetch_all(&app.db).await.unwrap();
+        select_speaker(app, "owner", "chat", None, &participants)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn automatic_groups_answer_mentions_and_never_self_reply() {
+        let app = group_app().await;
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,revision) VALUES('u1','chat','user','What do you see, bob?',2)")
+            .execute(&app.db).await.unwrap();
+        assert_eq!(speaker(&app).await, "bob");
+        // Bob naming himself does not make him answer his own line.
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,author_id,content,revision) VALUES('b1','chat','character','bob','Bob squints at the sky.',3)")
+            .execute(&app.db).await.unwrap();
+        assert_eq!(speaker(&app).await, "ann");
+        // With no usable mention, round-robin still skips the latest author.
+        sqlx::query("UPDATE conversations SET turn_index=1 WHERE id='chat'")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(speaker(&app).await, "ann");
+    }
+
+    #[tokio::test]
+    async fn group_history_names_other_speakers() {
+        let app = group_app().await;
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,author_id,content,revision) VALUES('u1','chat','user',NULL,'Hello',2),('a1','chat','character','ann','Hi there',3),('b1','chat','character','bob','Evening',4)")
+            .execute(&app.db).await.unwrap();
+        let rows = sqlx::query(PROMPT_HISTORY)
+            .bind("chat")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        let history: Vec<_> = rows
+            .iter()
+            .map(|r| history_message(r, Some("bob")))
+            .collect();
+        assert_eq!(
+            history,
+            [
+                ("assistant".to_owned(), "Evening".to_owned()),
+                ("user".to_owned(), "Ann: Hi there".to_owned()),
+                ("user".to_owned(), "Hello".to_owned()),
+            ]
+        );
+        let participants = sqlx::query(
+            "SELECT c.id,c.name,c.description,c.personality,c.appearance FROM participants p JOIN characters c ON c.id=p.character_id WHERE p.conversation_id='chat' ORDER BY p.position",
+        )
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        let prompt = group_prompt(&participants, "bob", "Bob");
+        assert!(prompt.contains("- Ann:") && !prompt.contains("- Bob:"));
+        assert!(prompt.contains("Write only Bob's next reply"));
+        assert!(group_prompt(&participants[..1], "ann", "Ann").is_empty());
+    }
+
+    #[test]
+    fn matches_whole_names_only() {
+        assert_eq!(name_mention("What do you think, mira?", "Mira"), Some(19));
+        assert_eq!(name_mention("Admiral Ann", "Ann"), Some(8));
+        assert_eq!(name_mention("Miranda waves", "Mira"), None);
+        assert_eq!(name_mention("Hannah", "Ann"), None);
+        assert_eq!(name_mention("anything", " "), None);
+    }
 }
 
 #[cfg(test)]

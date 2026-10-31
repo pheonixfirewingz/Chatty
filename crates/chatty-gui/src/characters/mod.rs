@@ -6,12 +6,14 @@
 
 mod card;
 mod images;
+mod search;
 #[cfg(test)]
 mod tests;
 mod view;
 
 pub use card::*;
 pub use images::*;
+pub use search::*;
 pub use view::*;
 
 use chatty_protocol::{Character, CharacterImage, CharacterInput};

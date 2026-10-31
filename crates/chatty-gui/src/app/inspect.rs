@@ -106,7 +106,8 @@ impl ChattyApp {
             }
             ["settings", ..] => self.screen = Screen::Settings,
             ["connect", ..] => return self.update_message(Message::TryConnect),
-            ["new_chat", ..] => self.new_chat_open = true,
+            ["new_chat", ..] => self.open_chat_dialog(Vec::new()),
+            ["group", ..] => self.make_inspection_group(),
             ["worlds", ..] => self.worlds_open = true,
             ["characters", ..] => self.draft_character_open = true,
             ["memories", ..] => self.memory_dialog_open = true,
@@ -151,17 +152,33 @@ impl ChattyApp {
         Task::none()
     }
 
+    /// Turn the demo chat into an automatic group with a second character.
+    fn make_inspection_group(&mut self) {
+        if self.characters.len() < 2
+            && let Some(first) = self.characters.first()
+        {
+            let mut second = first.clone();
+            second.id = "navigator".into();
+            second.name = "Navigator Ren".into();
+            second.images.clear();
+            second.default_image_id = None;
+            self.characters.push(second);
+        }
+        if let Some(conversation) = self.conversations.first_mut() {
+            conversation.participant_ids = self.characters.iter().map(|c| c.id.clone()).collect();
+            conversation.kind = ConversationKind::GroupAutomatic;
+        }
+    }
+
     pub(super) fn load_inspection_demo(&mut self) {
         self.role = Some(Role::Admin);
         self.token = "demo-session".into();
         let pixels = image::RgbaImage::from_fn(128, 128, |x, y| {
-            let dx = (x as f32) - 64.0;
-            let dy = (y as f32) - 64.0;
-            if dx * dx + dy * dy <= 54.0 * 54.0 {
-                image::Rgba([79, 70, 229, 255])
-            } else {
-                image::Rgba([0, 0, 0, 0])
-            }
+            // Antialias the rim over about one pixel so scaled portraits stay smooth.
+            let dx = (x as f32) + 0.5 - 64.0;
+            let dy = (y as f32) + 0.5 - 64.0;
+            let coverage = (54.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            image::Rgba([79, 70, 229, (coverage * 255.0).round() as u8])
         });
         let mut encoded = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(pixels)

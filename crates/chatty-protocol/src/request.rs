@@ -118,10 +118,12 @@ pub enum Request {
         kind: ConversationKind,
         participant_ids: Vec<String>,
     },
+    /// Rename a conversation and replace its ordered participants and speaker mode.
     UpdateConversation {
         session_token: String,
         conversation_id: String,
         title: String,
+        kind: ConversationKind,
         participant_ids: Vec<String>,
     },
     UpdateConversationState {

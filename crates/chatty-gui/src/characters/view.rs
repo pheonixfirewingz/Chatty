@@ -122,30 +122,13 @@ pub fn character_list_view<'a>(
         .style(crate::ui::input_style)
         .width(Length::Fill);
 
-    let query = search_query.trim().to_lowercase();
     let mut items = column![].spacing(4).width(Length::Fill);
 
-    for c in characters {
-        if !query.is_empty()
-            && !c.name.to_lowercase().contains(&query)
-            && !c.tags.iter().any(|t| t.to_lowercase().contains(&query))
-            && !c.description.to_lowercase().contains(&query)
-        {
-            continue;
-        }
-
+    for c in search_characters(characters, search_query) {
         let is_selected = selected_id == Some(c.id.as_str());
 
         let avatar: Element<'a, CharacterMessage> = {
-            let img_data = c
-                .images
-                .iter()
-                .find(|img| c.default_image_id.as_deref() == Some(&img.id))
-                .map(|img| &img.data)
-                .or_else(|| c.images.first().map(|img| &img.data))
-                .or(c.avatar.as_ref());
-
-            if let Some(bytes) = img_data
+            if let Some(bytes) = portrait_bytes(c)
                 && let Some(handle) = image_handle(bytes)
             {
                 image(handle).width(36).height(36).into()

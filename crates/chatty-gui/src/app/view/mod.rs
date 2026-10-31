@@ -17,6 +17,7 @@ use crate::conversation::{
 use crate::memories::{MemoryViewState, memory_dialog_view};
 use crate::ui;
 use crate::worlds::{WorldViewState, world_dialog_view};
+use chatty_protocol::ConversationKind;
 use iced::widget::{Space, container, responsive, row, scrollable};
 use iced::{Background, Color, Element, Length, Size};
 use iced_dialog::dialog;
@@ -124,7 +125,7 @@ impl ChattyApp {
             )
         } else if self.memory_dialog_open {
             let can_extract =
-                self.selected_conversation.is_some() && self.selected_speaker().is_some();
+                self.selected_conversation.is_some() && self.memory_character().is_some();
             let state = MemoryViewState::new(
                 &self.memories,
                 &self.characters,
@@ -170,14 +171,17 @@ impl ChattyApp {
             let state = NewChatViewState {
                 is_open: true,
                 characters: &self.characters,
-                selected_character_id: self.selected_characters.iter().next().map(String::as_str),
+                selected_character_ids: &self.selected_characters,
+                kind: self.new_chat_kind,
+                editing: self.editing_conversation.is_some(),
                 title: &self.new_conversation_title,
+                search: &self.new_chat_search,
                 glass_mode: self.glass_mode,
             };
             modal(
                 new_chat_dialog_view(&state, Message::Conversation)?,
-                460.0,
-                editor_height(580.0),
+                940.0,
+                editor_height(740.0),
                 Message::Conversation(ConversationMessage::CloseNewChatDialog),
             )
         } else if self.screen == Screen::Admin {
@@ -221,6 +225,12 @@ impl ChattyApp {
             markdown: &self.markdown,
             selected_conversation: self.selected_conversation.as_deref(),
             selected_speaker: self.selected_speaker(),
+            participant_ids: self
+                .selected_conversation_entry()
+                .map_or(&[], |c| c.participant_ids.as_slice()),
+            conversation_kind: self
+                .selected_conversation_entry()
+                .map_or(ConversationKind::Direct, |c| c.kind),
             input: &self.input,
             active_request: self.active_request,
             stream_text: &self.stream_text,

@@ -1590,6 +1590,7 @@ async fn dispatch(
             session_token,
             conversation_id,
             title,
+            kind,
             participant_ids,
         } => {
             let uid = auth(&app.db, &session_token).await?;
@@ -1607,12 +1608,11 @@ async fn dispatch(
                 bail!("one or more participants are missing or forbidden")
             }
             let current = sqlx::query(
-                "SELECT kind,CAST(state AS TEXT) AS state,summary FROM conversations WHERE id=?",
+                "SELECT CAST(state AS TEXT) AS state,summary FROM conversations WHERE id=?",
             )
             .bind(&conversation_id)
             .fetch_one(&app.db)
             .await?;
-            let kind = ConversationKind::try_from(current.get::<i32, _>("kind"))?;
             let state: String = current.get("state");
             let summary: String = current.get("summary");
             let changed = encode(&DeltaPayload::Conversation {
@@ -1632,8 +1632,9 @@ async fn dispatch(
                 &changed,
             )
             .await?;
-            sqlx::query("UPDATE conversations SET title=?,revision=? WHERE id=?")
+            sqlx::query("UPDATE conversations SET title=?,kind=?,revision=? WHERE id=?")
                 .bind(title)
+                .bind(kind as i32)
                 .bind(rev)
                 .bind(&conversation_id)
                 .execute(&mut *transaction)
