@@ -11,6 +11,8 @@ use crate::worlds::WorldMessage;
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
     Network(Event),
+    /// Fetch message images again after temporary failures.
+    RetryMessageImages,
     Tts(TtsEvent),
     Admin(AdminMessage),
     Character(CharacterMessage),

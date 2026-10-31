@@ -76,6 +76,12 @@ pub struct ChattyApp {
     message_image_requests: HashSet<String>,
     /// Request IDs of in-flight message image fetches, so their errors stay quiet.
     message_image_request_ids: HashMap<u64, String>,
+    /// Temporary fetch failures per image, for backoff and a retry limit.
+    message_image_failures: HashMap<String, u8>,
+    /// A temporary image failure needs a delayed retry scheduled.
+    message_image_retry_due: bool,
+    /// A delayed image retry is already scheduled.
+    message_image_retry_scheduled: bool,
     state: HashMap<(String, String), DeltaPayload>,
     characters: Vec<Character>,
     character_image_requests: HashSet<(String, String)>,
@@ -98,6 +104,10 @@ pub struct ChattyApp {
     hovered_message_id: Option<String>,
     /// The transcript is scrolled to the bottom and follows new content.
     chat_at_bottom: bool,
+    /// The conversation whose transcript is shown, to detect switches.
+    shown_conversation: Option<String>,
+    /// A network event switched the shown conversation; jump to its bottom.
+    chat_follow_due: bool,
     hovered_conversation_id: Option<String>,
     stream_text: String,
     typing_character: Option<String>,
@@ -197,6 +207,9 @@ impl ChattyApp {
             message_images: HashMap::new(),
             message_image_requests: HashSet::new(),
             message_image_request_ids: HashMap::new(),
+            message_image_failures: HashMap::new(),
+            message_image_retry_due: false,
+            message_image_retry_scheduled: false,
             state: HashMap::new(),
             characters: Vec::new(),
             character_image_requests: HashSet::new(),
@@ -218,6 +231,8 @@ impl ChattyApp {
             editing_message_content: iced::widget::text_editor::Content::new(),
             hovered_message_id: None,
             chat_at_bottom: true,
+            shown_conversation: None,
+            chat_follow_due: false,
             hovered_conversation_id: None,
             stream_text: String::new(),
             typing_character: None,

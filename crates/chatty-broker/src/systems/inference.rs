@@ -542,29 +542,58 @@ async fn extract_memories(
     after_revision: Option<i64>,
     character_id: Option<&str>,
 ) -> Result<MemoryExtraction> {
+    const ROWS: usize = 40;
+    const SELECT_ROWS: &str = "SELECT m.id,COALESCE(m.seq,0) AS seq,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image'";
     own_conversation(&app.db, owner_id, conversation_id).await?;
-    let config = load_broker_config(&app.db).await?;
-    let (model, num_ctx) = memory_model(app, &config).await?;
-    // At most 40 rows in priority order: rows changed since the checkpoint
-    // (most recently changed first), then the newest unchanged rows as context.
-    // Edits raise a message's revision without moving it in the timeline, so an
-    // edited old message is pending even when it is not among the newest rows.
+    // Rows changed since the checkpoint, oldest change first, so a run that
+    // cannot fit them all leaves the newer rest pending for the next run. Edits
+    // raise a message's revision without moving it in the timeline, so an edited
+    // old message is pending even when it is not among the newest rows. One extra
+    // row marks where the 40-row limit cut the pending set.
+    let mut pending = match after_revision {
+        Some(previous) => {
+            sqlx::query(&format!(
+                "{SELECT_ROWS} AND m.revision>? ORDER BY m.revision,m.seq LIMIT {}",
+                ROWS + 1
+            ))
+            .bind(conversation_id)
+            .bind(previous)
+            .fetch_all(&app.db)
+            .await?
+        }
+        None => Vec::new(),
+    };
+    let automatic = after_revision.is_some();
+    if automatic && pending.is_empty() {
+        // Nothing changed since the checkpoint, so the model has nothing to judge.
+        return Ok(MemoryExtraction {
+            contents: Vec::new(),
+            source_message_ids: Vec::new(),
+            latest_revision: after_revision.unwrap_or_default(),
+        });
+    }
+    let mut cut_revision = None;
+    if pending.len() > ROWS {
+        cut_revision = pending.pop().map(|row| row.get::<i64, _>("revision"));
+    }
+    // Fill the remaining slots with the newest unchanged rows as context.
     // Manual extraction has no checkpoint and takes the newest rows.
-    let recent = sqlx::query(
-        "WITH picked AS (SELECT id,seq,revision>?1 AS pending FROM messages WHERE conversation_id=?2 AND parent_id IS NULL AND author_type<>'image' ORDER BY revision>?1 DESC,CASE WHEN revision>?1 THEN revision END DESC,seq DESC LIMIT 40) \
-         SELECT m.id,m.seq,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM picked p JOIN messages m ON m.id=p.id LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id ORDER BY p.pending DESC,CASE WHEN p.pending THEN m.revision END DESC,m.seq DESC",
-    )
-    .bind(after_revision.unwrap_or(i64::MAX))
+    let context = sqlx::query(&format!(
+        "{SELECT_ROWS} AND m.revision<=? ORDER BY m.seq DESC LIMIT {}",
+        ROWS - pending.len()
+    ))
     .bind(conversation_id)
+    .bind(after_revision.unwrap_or(i64::MAX))
     .fetch_all(&app.db)
     .await?;
-    // The newest revision can belong to any loaded row.
-    let latest_revision = recent
-        .iter()
-        .map(|row| row.get::<i64, _>("revision"))
-        .max()
-        .context("conversation has no history to extract")?;
-    let automatic = after_revision.is_some();
+    let pending_rows = pending.len();
+    let mut recent = pending;
+    recent.extend(context);
+    if recent.is_empty() {
+        bail!("conversation has no history to extract");
+    }
+    let config = load_broker_config(&app.db).await?;
+    let (model, num_ctx) = memory_model(app, &config).await?;
     let instructions = if automatic {
         AUTOMATIC_MEMORY_INSTRUCTIONS
     } else {
@@ -603,8 +632,11 @@ async fn extract_memories(
             "SELECT content FROM memories WHERE owner_id=? AND status=0 AND (character_id IS NULL OR character_id=?) AND (conversation_id IS NULL OR conversation_id=?) ORDER BY updated_at DESC LIMIT 32",
         )
         .bind(owner_id).bind(character_id).bind(conversation_id).fetch_all(&app.db).await?;
-        let context = recent
-            .iter()
+        // Lore keywords match the six newest loaded messages in the timeline.
+        let mut newest = recent.iter().collect::<Vec<_>>();
+        newest.sort_unstable_by_key(|row| std::cmp::Reverse(row.get::<i64, _>("seq")));
+        let context = newest
+            .into_iter()
             .take(6)
             .map(|row| row.get::<String, _>("content"))
             .collect::<Vec<_>>()
@@ -637,13 +669,12 @@ async fn extract_memories(
     // them in timeline order.
     let mut transcript = Vec::new();
     let mut source_message_ids = Vec::new();
-    let mut has_new = false;
-    for row in &recent {
+    let mut included_pending = 0;
+    for (index, row) in recent.iter().enumerate() {
         if remaining <= MESSAGE_OVERHEAD_TOKENS {
             break;
         }
-        let revision: i64 = row.get("revision");
-        let new = !after_revision.is_some_and(|previous| revision <= previous);
+        let new = !automatic || index < pending_rows;
         let label = if new { "new" } else { "earlier context" };
         let content = format!(
             "[{}] {}: {}",
@@ -656,19 +687,31 @@ async fn extract_memories(
             break;
         }
         remaining = remaining.saturating_sub(estimated_message_tokens(&content));
-        has_new |= new;
+        if index < pending_rows {
+            included_pending += 1;
+        }
         source_message_ids.push(row.get::<String, _>("id"));
         transcript.push((row.get::<i64, _>("seq"), content));
     }
-    if automatic && !has_new {
-        // Nothing new reached the transcript, so the model has nothing to judge.
-        // The checkpoint still advances past the loaded rows.
-        return Ok(MemoryExtraction {
-            contents: Vec::new(),
-            source_message_ids: Vec::new(),
-            latest_revision,
-        });
+    if automatic && included_pending == 0 {
+        // Keep the checkpoint: advancing it would mark unread rows as extracted.
+        bail!("memory model context leaves no room for new messages");
     }
+    if included_pending < pending_rows {
+        cut_revision = Some(recent[included_pending].get::<i64, _>("revision"));
+    }
+    // Advance only past rows the model read. Read rows that share the first
+    // unread revision are read again next run, unless all of them share it.
+    let revisions = recent[..included_pending]
+        .iter()
+        .map(|row| row.get::<i64, _>("revision"));
+    let latest_revision = match cut_revision {
+        Some(cut) => revisions
+            .filter(|revision| *revision < cut)
+            .max()
+            .unwrap_or(cut),
+        None => revisions.max().unwrap_or_default(),
+    };
     transcript.sort_unstable_by_key(|(seq, _)| *seq);
     let transcript = transcript
         .into_iter()
@@ -2567,11 +2610,26 @@ mod automatic_memory_tests {
         // 45 newer messages push the first one out of the newest 40.
         sqlx::query("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<44) INSERT INTO messages(id,conversation_id,author_type,content,revision) SELECT printf('filler-%02d',i),'chat','user',printf('Filler %d.',i),i+2 FROM n")
             .execute(&app.db).await.unwrap();
+        // 46 pending rows exceed the 40-row limit: the oldest changes are read
+        // first and the checkpoint stops before the rest.
         server.responses.send((200, "[]".into())).await.unwrap();
         maybe_extract_automatic_memory(&app, "owner", "chat", "character")
             .await
             .unwrap();
-        server.requests.recv().await.unwrap();
+        let request = server.requests.recv().await.unwrap();
+        let transcript = request["messages"][1]["content"].as_str().unwrap();
+        assert_eq!(transcript.matches("[new]").count(), 40);
+        assert_eq!(checkpoint(&app).await, 40);
+        // The next run reads the remaining six, with newer rows as context.
+        server.responses.send((200, "[]".into())).await.unwrap();
+        maybe_extract_automatic_memory(&app, "owner", "chat", "character")
+            .await
+            .unwrap();
+        let request = server.requests.recv().await.unwrap();
+        let transcript = request["messages"][1]["content"].as_str().unwrap();
+        assert_eq!(transcript.matches("[new]").count(), 6);
+        assert!(transcript.contains("[new] user: Filler 44."));
+        assert!(!transcript.contains("[new] user: Filler 38."));
         assert_eq!(checkpoint(&app).await, 46);
 
         sqlx::query("UPDATE messages SET content='My favorite drink is now oolong.',revision=47 WHERE id='user-message'")
@@ -2755,6 +2813,44 @@ mod automatic_memory_tests {
                 .any(|memory| memory.content == "The user enjoys tea at dawn.")
         );
         assert_eq!(checkpoint(&app).await, 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_memory_checkpoint_stops_at_the_last_row_read() {
+        let mut server = server().await;
+        let app = app(&server.url).await;
+        sqlx::query("UPDATE broker_settings SET num_ctx=1024")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("WITH RECURSIVE n(i) AS (SELECT 2 UNION ALL SELECT i+1 FROM n WHERE i<6) INSERT INTO messages(id,conversation_id,author_type,content,revision) SELECT printf('long-%d',i),'chat','user','x',i FROM n")
+            .execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE messages SET content=?")
+            .bind("Long tea story. ".repeat(2_000))
+            .execute(&app.db)
+            .await
+            .unwrap();
+        // Each run reads only the rows that fit, and the next run resumes after them.
+        let mut read = 0;
+        let mut runs = 0;
+        for _ in 0..6 {
+            runs += 1;
+            server.responses.send((200, "[]".into())).await.unwrap();
+            maybe_extract_automatic_memory(&app, "owner", "chat", "character")
+                .await
+                .unwrap();
+            let request = server.requests.recv().await.unwrap();
+            let transcript = request["messages"][1]["content"].as_str().unwrap();
+            let new = transcript.matches("[new]").count();
+            assert!(new > 0);
+            read += new;
+            assert_eq!(checkpoint(&app).await, read as i64);
+            if read == 6 {
+                break;
+            }
+        }
+        assert_eq!(read, 6);
+        assert!(runs > 1, "the budget must cut at least one run");
     }
 
     #[tokio::test]

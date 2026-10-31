@@ -100,6 +100,22 @@ impl Harness {
         });
     }
 
+    /// Deliver a frame through `update`, as the network subscription does, and
+    /// report how many units of work the returned task holds.
+    pub(super) fn frame_units(
+        &mut self,
+        message_type: MessageType,
+        request_id: u64,
+        payload: &impl Serialize,
+    ) -> usize {
+        self.update_units(Message::Network(crate::network::Event::Frame(Frame {
+            compressed: false,
+            message_type,
+            request_id,
+            payload: encode(payload).unwrap(),
+        })))
+    }
+
     pub(super) fn respond(&mut self, request_id: u64, response: &Response) {
         self.frame(MessageType::Response, request_id, response);
     }

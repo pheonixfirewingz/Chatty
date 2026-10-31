@@ -220,6 +220,10 @@ impl ChattyApp {
             }
             Message::Network(event) => {
                 self.handle_event(event);
+                self.network_tasks()
+            }
+            Message::RetryMessageImages => {
+                self.retry_message_images();
                 Task::none()
             }
         }
@@ -235,6 +239,7 @@ impl ChattyApp {
     /// Leave the open conversation, dropping its transcript.
     pub(super) fn close_conversation(&mut self) {
         self.selected_conversation = None;
+        self.shown_conversation = None;
         self.messages.clear();
         self.stream_text.clear();
         self.end_generation();
@@ -514,6 +519,31 @@ impl ChattyApp {
         conversation::scroll_chat_to_bottom()
     }
 
+    /// Tasks that network events requested: a chat switch or an image retry.
+    fn network_tasks(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        if std::mem::take(&mut self.chat_follow_due) {
+            tasks.push(self.follow_chat_bottom());
+        }
+        if std::mem::take(&mut self.message_image_retry_due) {
+            self.message_image_retry_scheduled = true;
+            // 2, 4, then 8 seconds as failures repeat.
+            let failures = self
+                .message_image_failures
+                .values()
+                .copied()
+                .max()
+                .unwrap_or(1);
+            let delay = std::time::Duration::from_secs(1 << failures.min(3));
+            // Create the timer when the executor polls it, inside its runtime.
+            tasks.push(Task::perform(
+                async move { tokio::time::sleep(delay).await },
+                |()| Message::RetryMessageImages,
+            ));
+        }
+        Task::batch(tasks)
+    }
+
     pub(super) fn update_conversation(&mut self, msg: ConversationMessage) -> Task<Message> {
         match msg {
             ConversationMessage::InputChanged(val) => {
@@ -531,7 +561,9 @@ impl ChattyApp {
                 if at_bottom != self.chat_at_bottom {
                     self.chat_at_bottom = at_bottom;
                     // The anchor flips with this flag: keep the same position
-                    // measured from the new anchor.
+                    // measured from the new anchor. iced runs widget operations
+                    // from `update` after rebuilding the view and before drawing,
+                    // so no frame shows the old offset under the new anchor.
                     return conversation::scroll_chat_to(if at_bottom {
                         from_bottom
                     } else {

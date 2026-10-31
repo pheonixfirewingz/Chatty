@@ -2,7 +2,7 @@ use super::{Harness, png};
 use crate::network::Command;
 use chatty_protocol::{
     CharacterImage, ChatMessage, DeltaOperation, DeltaPayload, ErrorCode, GenerationContext,
-    GenerationStatus, MessageType, Request, Response, StateDelta, StreamChunk, encode,
+    GenerationStatus, MessageType, Request, Response, StateDelta, StreamChunk, WireError, encode,
 };
 
 fn add_happy_image(app: &mut Harness) {
@@ -179,18 +179,28 @@ fn missing_message_image_is_marked_unavailable_quietly() {
     assert!(app.requests().is_empty());
 }
 
+fn busy() -> WireError {
+    WireError {
+        code: ErrorCode::BackendUnavailable,
+        message: "backend busy".into(),
+        retryable: true,
+    }
+}
+
 #[test]
-fn temporary_message_image_error_is_retried_on_the_next_trigger() {
+fn temporary_message_image_error_is_retried_after_a_delay() {
     let mut app = Harness::demo();
     start_image_fetch(&mut app);
     app.active_request = Some(7);
-    app.fail(41, "backend busy");
+    // The failure schedules one delayed retry task.
+    assert_eq!(app.frame_units(MessageType::Error, 41, &busy()), 1);
     assert!(app.error.is_none());
     assert_eq!(app.active_request, Some(7));
     assert!(!app.message_images.contains_key("img"));
-    // Nothing retries by itself; the next view rebuild or delta does.
-    assert!(app.requests().is_empty());
+    // Deltas do not refetch it before the retry is due.
     app.request_message_images();
+    assert!(app.requests().is_empty());
+    app.update(crate::app::Message::RetryMessageImages);
     assert!(matches!(
         app.requests().as_slice(),
         [Request::GetMessageImage { message_id, .. }] if message_id == "img"
@@ -198,7 +208,30 @@ fn temporary_message_image_error_is_retried_on_the_next_trigger() {
 }
 
 #[test]
-fn unauthorized_message_image_error_is_shown() {
+fn repeated_temporary_message_image_errors_give_up() {
+    let mut app = Harness::demo();
+    start_image_fetch(&mut app);
+    for attempt in 1..=4u64 {
+        let request_id = 40 + attempt;
+        if attempt > 1 {
+            app.update(crate::app::Message::RetryMessageImages);
+            assert_eq!(app.requests().len(), 1);
+            app.event(crate::network::Event::MessageImageRequestStarted {
+                request_id,
+                message_id: "img".into(),
+            });
+        }
+        let tasks = app.frame_units(MessageType::Error, request_id, &busy());
+        assert_eq!(tasks, usize::from(attempt < 4));
+    }
+    // The last attempt marks the image unavailable; nothing fetches it again.
+    assert_eq!(app.message_images.get("img").map(Vec::len), Some(0));
+    app.update(crate::app::Message::RetryMessageImages);
+    assert!(app.requests().is_empty());
+}
+
+#[test]
+fn unauthorized_message_image_errors_are_shown_once() {
     let mut app = Harness::demo();
     start_image_fetch(&mut app);
     app.fail_with(41, ErrorCode::Unauthorized, "unauthorized");
@@ -207,6 +240,46 @@ fn unauthorized_message_image_error_is_shown() {
         Some("unauthorized")
     );
     assert!(!app.message_images.contains_key("img"));
+    // After the session expired, later failures keep the expiry notice.
+    app.event(crate::network::Event::SessionExpired);
+    let expired = app.error.clone().map(|notice| notice.message);
+    app.messages.clear();
+    start_image_fetch(&mut app);
+    app.fail_with(41, ErrorCode::Unauthorized, "unauthorized");
+    assert_eq!(app.error.clone().map(|notice| notice.message), expired);
+}
+
+#[test]
+fn switching_conversations_by_any_path_opens_at_the_bottom() {
+    let mut app = Harness::demo();
+    let conversation = app.conversations[0].clone();
+    let view = |messages: Vec<ChatMessage>| {
+        Response::ConversationView(chatty_protocol::ConversationView {
+            conversation: conversation.clone(),
+            messages,
+        })
+    };
+    let messages = app.messages.clone();
+    // A chat that was not shown opens at its newest message.
+    assert_eq!(
+        app.frame_units(MessageType::Response, 5, &view(messages.clone())),
+        1
+    );
+    app.update(scrolled(200.0, 950.0));
+    assert!(!app.chat_at_bottom);
+    // Refreshing the same chat keeps the reading position.
+    assert_eq!(
+        app.frame_units(MessageType::Response, 6, &view(messages.clone())),
+        0
+    );
+    assert!(!app.chat_at_bottom);
+    // Closing it, as deletion does, makes the next view a switch.
+    app.close_conversation();
+    assert_eq!(
+        app.frame_units(MessageType::Response, 7, &view(messages)),
+        1
+    );
+    assert!(app.chat_at_bottom);
 }
 
 #[test]

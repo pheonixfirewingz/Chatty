@@ -1,6 +1,9 @@
 //! Network events, broker frames, and state deltas.
 
 use crate::app::{ChattyApp, ImageJob, MAX_LOADED_MESSAGE_IMAGES};
+
+/// Fetch attempts for one message image before it is shown as unavailable.
+const MAX_MESSAGE_IMAGE_ATTEMPTS: u8 = 4;
 use crate::characters::DraftCharacter;
 use crate::memories::MemoryDialogState;
 use crate::network::{Command, Event};
@@ -182,6 +185,7 @@ impl ChattyApp {
         self.char_import_started = None;
         self.end_generation();
         self.token.clear();
+        self.shown_conversation = None;
         self.role = None;
         self.context_usage.clear();
         self.character_image_requests.clear();
@@ -381,6 +385,12 @@ impl ChattyApp {
                             }
                         }
                         Response::ConversationView(v) => {
+                            // A different chat opens at its newest message, whatever
+                            // opened it: selection, auto-selection, or creation.
+                            if self.shown_conversation.as_ref() != Some(&v.conversation.id) {
+                                self.shown_conversation = Some(v.conversation.id.clone());
+                                self.chat_follow_due = true;
+                            }
                             self.selected_conversation = Some(v.conversation.id);
                             self.messages = v.messages;
                             self.stream_text.clear();
@@ -472,6 +482,7 @@ impl ChattyApp {
                         Response::MessageImage { message_id, data } => {
                             self.message_image_request_ids.remove(&frame.request_id);
                             if self.message_image_requests.remove(&message_id) {
+                                self.message_image_failures.remove(&message_id);
                                 self.message_images.insert(message_id, data);
                             }
                         }
@@ -581,15 +592,42 @@ impl ChattyApp {
                 };
                 let in_flight = self.message_image_requests.remove(&message_id);
                 match decode::<WireError>(&frame.payload) {
-                    // The network task handles expired sessions; show the reason.
+                    // The network task handles expired sessions. Show the reason
+                    // once, and not over the expiry notice or after sign-out.
                     // The cleared marker lets the image load after signing in again.
                     Ok(WireError {
                         code: ErrorCode::Unauthorized,
                         message,
                         ..
-                    }) => self.set_error(message),
-                    // Temporary failure: with the in-flight marker cleared, the
-                    // next view rebuild, delta, or reconnect requests it again.
+                    }) => {
+                        if !self.token.is_empty()
+                            && self
+                                .error
+                                .as_ref()
+                                .is_none_or(|notice| notice.message != message)
+                        {
+                            self.set_error(message);
+                        }
+                    }
+                    // Temporary failure: keep the marker so deltas do not refetch
+                    // it at once, and retry after a backoff. Give up after a few
+                    // attempts so a broken image cannot cause endless traffic.
+                    Ok(WireError {
+                        retryable: true, ..
+                    }) if in_flight => {
+                        let failures = self
+                            .message_image_failures
+                            .entry(message_id.clone())
+                            .or_default();
+                        *failures += 1;
+                        if *failures >= MAX_MESSAGE_IMAGE_ATTEMPTS {
+                            self.message_image_failures.remove(&message_id);
+                            self.message_images.insert(message_id, Vec::new());
+                        } else {
+                            self.message_image_requests.insert(message_id);
+                            self.message_image_retry_due |= !self.message_image_retry_scheduled;
+                        }
+                    }
                     Ok(WireError {
                         retryable: true, ..
                     }) => {}
@@ -646,6 +684,16 @@ impl ChattyApp {
         self.message_images.clear();
         self.message_image_requests.clear();
         self.message_image_request_ids.clear();
+        self.message_image_failures.clear();
+    }
+
+    /// Fetch again every image that is waiting after a temporary failure.
+    pub(super) fn retry_message_images(&mut self) {
+        self.message_image_retry_scheduled = false;
+        for id in self.message_image_failures.keys() {
+            self.message_image_requests.remove(id);
+        }
+        self.request_message_images();
     }
 
     /// Keep bytes only for the newest image messages in the open chat.
@@ -660,6 +708,8 @@ impl ChattyApp {
             .collect();
         self.message_images.retain(|id, _| wanted.contains(id));
         self.message_image_requests.retain(|id| wanted.contains(id));
+        self.message_image_failures
+            .retain(|id, _| wanted.contains(id));
         for id in wanted {
             if !self.message_images.contains_key(&id)
                 && self.message_image_requests.insert(id.clone())
