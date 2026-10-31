@@ -233,6 +233,7 @@ impl ChattyApp {
             editing_message_id: self.editing_message_id.as_deref(),
             editing_message_content: &self.editing_message_content,
             hovered_message_id: self.hovered_message_id.as_deref(),
+            chat_at_bottom: self.chat_at_bottom,
             sidebar_visible,
             available_size: Size::new(
                 size.width - if sidebar_visible { 272.0 } else { 0.0 },

@@ -432,6 +432,7 @@ where
         &state.editor,
         "e.g. The user is afraid of deep water.",
         Some(move |action| Message::from(MemoryMessage::Edit(action))),
+        None::<fn(_) -> _>,
         None,
         editor_scroll_id(),
         EDITOR_MAX_HEIGHT,

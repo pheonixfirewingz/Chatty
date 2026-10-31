@@ -2198,3 +2198,6 @@ mod tests;
 
 #[cfg(test)]
 mod download_tests;
+
+#[cfg(test)]
+mod test_net;

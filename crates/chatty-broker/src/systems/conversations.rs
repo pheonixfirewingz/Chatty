@@ -177,7 +177,8 @@ pub(super) async fn load_conversation_from_row(
 ) -> Result<ConversationView> {
     let id: String = row.get("id");
     let conversation = conversation_from_row(db, row).await?;
-    let rows = sqlx::query("SELECT id,author_type,author_id,content,parent_id,selected_variant_id,character_image_id,created_at,revision FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY created_at,rowid LIMIT 2000")
+    // The newest 2000 root messages, oldest first. `seq` is the stable timeline key.
+    let rows = sqlx::query("SELECT * FROM (SELECT id,author_type,author_id,content,parent_id,selected_variant_id,character_image_id,created_at,revision,seq FROM messages WHERE conversation_id=? AND parent_id IS NULL ORDER BY seq DESC LIMIT 2000) ORDER BY seq")
         .bind(&id).fetch_all(db).await?;
     // Fetch variants for exactly the bounded timeline, rather than issuing one
     // SQLite round trip per message. Stream rows to avoid a second full row set.
@@ -537,10 +538,10 @@ mod loading_tests {
         sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,parent_id,revision) VALUES('child','chat','assistant','branch','m0000',0),('foreign','other-chat','assistant','private',NULL,0)")
             .execute(&db).await.unwrap();
         for (id, message, time) in [
-            ("z", "m0000", "2026-01-01"),
-            ("b", "m0000", "2026-01-02"),
-            ("a", "m0000", "2026-01-02"),
-            ("outside", "m2000", "2026-01-01"),
+            ("z", "m2000", "2026-01-01"),
+            ("b", "m2000", "2026-01-02"),
+            ("a", "m2000", "2026-01-02"),
+            ("outside", "m0000", "2026-01-01"),
             ("branch", "child", "2026-01-01"),
             ("private", "foreign", "2026-01-01"),
         ] {
@@ -555,7 +556,7 @@ mod loading_tests {
             .await
             .unwrap();
         }
-        sqlx::query("UPDATE messages SET selected_variant_id='a' WHERE id='m0000'")
+        sqlx::query("UPDATE messages SET selected_variant_id='a' WHERE id='m2000'")
             .execute(&db)
             .await
             .unwrap();
@@ -570,19 +571,25 @@ mod loading_tests {
             .await
             .unwrap()
             .unwrap();
+        // 2001 messages share one created_at second: the limit keeps the
+        // newest 2000 and returns them oldest first.
         assert_eq!(view.messages.len(), 2000);
-        assert_eq!(view.messages[0].id, "m0000");
-        assert_eq!(view.messages[1999].id, "m1999");
-        assert_eq!(view.messages[0].selected_variant_id.as_deref(), Some("a"));
+        assert_eq!(view.messages[0].id, "m0001");
+        assert_eq!(view.messages[1999].id, "m2000");
+        assert!(view.messages.windows(2).all(|w| w[0].id < w[1].id));
         assert_eq!(
-            view.messages[0]
+            view.messages[1999].selected_variant_id.as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            view.messages[1999]
                 .variants
                 .iter()
                 .map(|v| v.id.as_str())
                 .collect::<Vec<_>>(),
             ["z", "a", "b"]
         );
-        assert!(view.messages[1..].iter().all(|m| m.variants.is_empty()));
+        assert!(view.messages[..1999].iter().all(|m| m.variants.is_empty()));
         sqlx::query("DELETE FROM conversations WHERE id='chat'")
             .execute(&db)
             .await
@@ -625,5 +632,46 @@ mod loading_tests {
             .unwrap();
         let order: Vec<&str> = view.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(order, ["u1", "c1", "u2"]);
+    }
+
+    #[tokio::test]
+    async fn sequence_migration_backfills_timeline_order() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let all = sqlx::migrate!();
+        let before = sqlx::migrate::Migrator {
+            migrations: all
+                .migrations
+                .iter()
+                .filter(|m| m.version < 19)
+                .cloned()
+                .collect(),
+            ..sqlx::migrate!()
+        };
+        before.run(&db).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username,password_hash) VALUES('owner','owner','hash')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('chat','owner','Chat',0,1),('other','owner','Other',0,2)")
+            .execute(&db).await.unwrap();
+        // Insertion order differs from creation time; same-second rows keep insertion order.
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,created_at,revision) VALUES('b','chat','user','b','2026-01-01 10:00:01',3),('a','chat','user','a','2026-01-01 10:00:00',9),('x','other','user','x','2026-01-01 09:00:00',4),('c','chat','user','c','2026-01-01 10:00:01',5)")
+            .execute(&db).await.unwrap();
+        all.run(&db).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,revision) VALUES('d','chat','user','d',6)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let seq: Vec<(String, i64)> =
+            sqlx::query_as("SELECT id,seq FROM messages ORDER BY conversation_id,seq")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        let seq: Vec<(&str, i64)> = seq.iter().map(|(id, n)| (id.as_str(), *n)).collect();
+        assert_eq!(seq, [("a", 1), ("b", 2), ("c", 3), ("d", 4), ("x", 1)]);
     }
 }

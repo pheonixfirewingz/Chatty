@@ -26,6 +26,9 @@ pub enum ConversationMessage {
     StartEditMessage { id: String, content: String },
     /// Cursor, selection, or edit in the message editor.
     EditAction(iced::widget::text_editor::Action),
+    /// The transcript scrolled or its content resized. Distances are in
+    /// pixels from the top and bottom of the scrollable content.
+    ChatScrolled { from_top: f32, from_bottom: f32 },
     /// Save the edited message.
     SaveMessageEdit,
     /// Cancel the message edit.
@@ -103,6 +106,8 @@ pub struct ConversationViewState<'a> {
     pub editing_message_id: Option<&'a str>,
     pub editing_message_content: &'a iced::widget::text_editor::Content,
     pub hovered_message_id: Option<&'a str>,
+    /// The transcript follows new content only while scrolled to the bottom.
+    pub chat_at_bottom: bool,
     pub sidebar_visible: bool,
     pub available_size: iced::Size,
     pub glass_mode: bool,

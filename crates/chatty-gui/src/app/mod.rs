@@ -96,6 +96,8 @@ pub struct ChattyApp {
     editing_message_id: Option<String>,
     editing_message_content: iced::widget::text_editor::Content,
     hovered_message_id: Option<String>,
+    /// The transcript is scrolled to the bottom and follows new content.
+    chat_at_bottom: bool,
     hovered_conversation_id: Option<String>,
     stream_text: String,
     typing_character: Option<String>,
@@ -215,6 +217,7 @@ impl ChattyApp {
             editing_message_id: None,
             editing_message_content: iced::widget::text_editor::Content::new(),
             hovered_message_id: None,
+            chat_at_bottom: true,
             hovered_conversation_id: None,
             stream_text: String::new(),
             typing_character: None,

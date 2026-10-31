@@ -477,7 +477,7 @@ async fn external_wasm_plugin_loads_and_calls_a_remote_server() {
             .inference_plugin_ids()
             .contains(&"hugging-face".into())
     );
-    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = crate::test_net::mock_listener().await;
     let url = format!("http://{}/v1", server.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let (socket, _) = server.accept().await.unwrap();
@@ -533,7 +533,7 @@ fn external_manifests_reject_path_traversal_and_duplicate_builtin_ids() {
 async fn stream_survives_cancelled_reads_and_drop_closes_upstream() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     for id in ["openai-compatible", "freetoken"] {
-        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = crate::test_net::mock_listener().await;
         let url = format!("http://{}/v1", server.local_addr().unwrap());
         let (resume, wait) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -591,7 +591,7 @@ async fn redirects_and_non_streaming_mime_types_are_rejected() {
             "does not support streaming",
         ),
     ] {
-        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = crate::test_net::mock_listener().await;
         let url = format!("http://{}/v1", server.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let (socket, _) = server.accept().await.unwrap();
@@ -918,7 +918,7 @@ fn image_plugins_are_separate_from_inference_plugins() {
 #[tokio::test]
 async fn dropped_image_job_is_cancelled_upstream() {
     use tokio::io::AsyncWriteExt;
-    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = crate::test_net::mock_listener().await;
     let url = format!("http://{}", server.local_addr().unwrap());
     let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {

@@ -95,6 +95,12 @@ pub fn emotion_portrait_card<'a, Message: 'a>(
 /// Tallest the in-chat message editor grows before it scrolls.
 const EDIT_MAX_HEIGHT: f32 = 320.0;
 
+/// Save shortcut hint; `Modifiers::command` is Cmd on macOS and Ctrl elsewhere.
+#[cfg(target_os = "macos")]
+const EDIT_SHORTCUT_HINT: &str = "Cmd+Enter to save · Esc to cancel";
+#[cfg(not(target_os = "macos"))]
+const EDIT_SHORTCUT_HINT: &str = "Ctrl+Enter to save · Esc to cancel";
+
 /// Renders an individual chat message bubble (user or assistant).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
@@ -115,7 +121,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
             editing_content,
             "Edit message content…",
             Some(move |action| on_msg(ConversationMessage::EditAction(action))),
-            Some(Box::new(move |key: text_editor::KeyPress| {
+            Some(move |key: text_editor::KeyPress| {
                 use iced::keyboard::{Key, key::Named};
                 let focused = matches!(key.status, text_editor::Status::Focused { .. });
                 match key.key {
@@ -127,7 +133,8 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
                     ),
                     _ => text_editor::Binding::from_key_press(key),
                 }
-            })),
+            }),
+            Some(edit_editor_id()),
             edit_scroll_id(),
             EDIT_MAX_HEIGHT,
         );
@@ -142,7 +149,7 @@ pub fn render_message_bubble<'a, Message: Clone + 'a>(
             .on_press(on_msg(ConversationMessage::CancelMessageEdit))
             .style(crate::ui::secondary_button_style());
 
-        let hint = text("Ctrl+Enter to save · Esc to cancel")
+        let hint = text(EDIT_SHORTCUT_HINT)
             .size(12)
             .color(crate::ui::SECONDARY_TEXT);
         let actions = row![save_btn, cancel_btn, hint]
@@ -462,16 +469,30 @@ pub fn edit_scroll_id() -> Id {
     Id::new("chat-message-edit")
 }
 
-/// Task that shows the newest message.
-pub fn scroll_chat_to_bottom<Message: Send + 'static>() -> iced::Task<Message> {
-    // With a bottom anchor, offset zero is the end of the transcript.
+/// The in-chat message editor itself, for focusing it.
+pub fn edit_editor_id() -> Id {
+    Id::new("chat-message-editor")
+}
+
+/// Distance from the end of the transcript, in pixels, that still counts as
+/// being at the bottom.
+pub const CHAT_BOTTOM_TOLERANCE: f32 = 4.0;
+
+/// Task that sets the transcript offset, measured from its current anchor:
+/// the bottom while following new content, otherwise the top.
+pub fn scroll_chat_to<Message: Send + 'static>(y: f32) -> iced::Task<Message> {
     iced::widget::operation::scroll_to(
         chat_scroll_id(),
         iced::widget::scrollable::AbsoluteOffset {
             x: None,
-            y: Some(0.0),
+            y: Some(y),
         },
     )
+}
+
+/// Task that shows the newest message. Pair it with a bottom anchor.
+pub fn scroll_chat_to_bottom<Message: Send + 'static>() -> iced::Task<Message> {
+    scroll_chat_to(0.0)
 }
 
 /// Primary conversation view combining chat history, streaming responses, and composer.
@@ -605,6 +626,7 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
         );
     }
 
+    let at_bottom = view.chat_at_bottom;
     let scrollable_messages = scrollable(
         container(message_list)
             .padding(if view.available_size.width < 500.0 {
@@ -615,9 +637,28 @@ pub fn conversation_view<'a, Message: Clone + 'a>(
             .width(Length::Fill),
     )
     .id(chat_scroll_id())
-    // Offsets count from the bottom: the newest message stays in view as
-    // replies stream in, and a rebuilt widget tree starts at the latest message.
-    .anchor_bottom()
+    // At the bottom, offsets count from the bottom: the newest message stays in
+    // view as replies stream in, and a rebuilt widget tree starts at the latest
+    // message. Scrolled up, offsets count from the top, so new content below
+    // does not move what the user is reading.
+    .anchor_y(if at_bottom {
+        scrollable::Anchor::End
+    } else {
+        scrollable::Anchor::Start
+    })
+    .on_scroll(move |viewport| {
+        let y = viewport.absolute_offset().y;
+        let end = (viewport.content_bounds().height - viewport.bounds().height).max(0.0);
+        let (from_top, from_bottom) = if at_bottom {
+            (end - y, y)
+        } else {
+            (y, end - y)
+        };
+        on_msg(ConversationMessage::ChatScrolled {
+            from_top,
+            from_bottom,
+        })
+    })
     .height(Length::Fill)
     .width(Length::Fill);
 

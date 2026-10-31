@@ -574,12 +574,40 @@ impl ChattyApp {
                     .message_image_request_ids
                     .contains_key(&frame.request_id) =>
             {
-                // The image was deleted, possibly by a request that raced this
-                // fetch. Empty bytes mark it unavailable so it is not refetched.
-                if let Some(message_id) = self.message_image_request_ids.remove(&frame.request_id)
-                    && self.message_image_requests.remove(&message_id)
-                {
-                    self.message_images.insert(message_id, Vec::new());
+                // Image fetch errors never interrupt the chat or a generation.
+                let Some(message_id) = self.message_image_request_ids.remove(&frame.request_id)
+                else {
+                    return;
+                };
+                let in_flight = self.message_image_requests.remove(&message_id);
+                match decode::<WireError>(&frame.payload) {
+                    // The network task handles expired sessions; show the reason.
+                    // The cleared marker lets the image load after signing in again.
+                    Ok(WireError {
+                        code: ErrorCode::Unauthorized,
+                        message,
+                        ..
+                    }) => self.set_error(message),
+                    // Temporary failure: with the in-flight marker cleared, the
+                    // next view rebuild, delta, or reconnect requests it again.
+                    Ok(WireError {
+                        retryable: true, ..
+                    }) => {}
+                    // Permanent failure, including a deletion that raced this fetch.
+                    // Empty bytes mark the image unavailable so it is not refetched.
+                    other => {
+                        if let Ok(WireError {
+                            code: ErrorCode::Forbidden,
+                            message,
+                            ..
+                        }) = other
+                        {
+                            self.set_error(message);
+                        }
+                        if in_flight {
+                            self.message_images.insert(message_id, Vec::new());
+                        }
+                    }
                 }
             }
             MessageType::Error => {

@@ -241,7 +241,7 @@ fn freetoken_errors_and_health_are_normalized() {
 #[tokio::test]
 async fn freetoken_compiled_plugin_uses_remote_http_for_discovery_completion_and_state() {
     use tokio::io::AsyncWriteExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = crate::test_net::mock_listener().await;
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         for (path, response) in [
@@ -298,8 +298,8 @@ async fn freetoken_credentials_are_host_owned_origin_pinned_and_redirect_safe() 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     // Synthetic test credential, never a real server key.
     let token = "synthetic-test-credential";
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = crate::test_net::mock_listener().await;
+    let other = crate::test_net::mock_listener().await;
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let other_origin = format!("http://{}", other.local_addr().unwrap());
     let adapter = registry()
@@ -404,7 +404,7 @@ async fn freetoken_credentials_are_host_owned_origin_pinned_and_redirect_safe() 
 #[tokio::test]
 async fn freetoken_authenticated_streams_handle_fragmentation_and_redact_errors() {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = crate::test_net::mock_listener().await;
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let token = "synthetic-stream-credential";
     let task = tokio::spawn(async move {

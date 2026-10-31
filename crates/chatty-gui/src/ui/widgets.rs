@@ -425,14 +425,6 @@ pub fn chat_action_button_style(
     ghost_button_style(on_accent)
 }
 
-/// Custom key handling for a [`capped_editor`].
-pub type EditorKeyBinding<'a, Message> = Box<
-    dyn Fn(
-            iced::widget::text_editor::KeyPress,
-        ) -> Option<iced::widget::text_editor::Binding<Message>>
-        + 'a,
->;
-
 /// Multi-line input that grows with its text up to `max_height`, then scrolls
 /// with a visible scrollbar. Read-only when `on_action` is `None`.
 ///
@@ -440,11 +432,18 @@ pub type EditorKeyBinding<'a, Message> = Box<
 /// inside a capped `scrollable`; the input plate is drawn by the container so it
 /// does not scroll away. Pair it with [`perform_editor_action`] using the same
 /// `id`. `key_binding` replaces the default key handling when given.
+/// `editor_id` names the editor itself, so a focus operation can target it.
 pub fn capped_editor<'a, Message: Clone + 'a>(
     content: &'a iced::widget::text_editor::Content,
     placeholder: &'a str,
     on_action: Option<impl Fn(iced::widget::text_editor::Action) -> Message + 'a>,
-    key_binding: Option<EditorKeyBinding<'a, Message>>,
+    key_binding: Option<
+        impl Fn(
+            iced::widget::text_editor::KeyPress,
+        ) -> Option<iced::widget::text_editor::Binding<Message>>
+        + 'a,
+    >,
+    editor_id: Option<iced::widget::Id>,
     id: iced::widget::Id,
     max_height: f32,
 ) -> Element<'a, Message> {
@@ -465,6 +464,9 @@ pub fn capped_editor<'a, Message: Clone + 'a>(
     }
     if let Some(key_binding) = key_binding {
         editor = editor.key_binding(key_binding);
+    }
+    if let Some(editor_id) = editor_id {
+        editor = editor.id(editor_id);
     }
     container(
         scrollable(editor)

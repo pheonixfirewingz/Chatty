@@ -247,6 +247,7 @@ fn long_input<'a>(
         editors.content(field),
         placeholder,
         can_edit.then_some(move |action| CharacterMessage::Edit(field, action)),
+        None::<fn(_) -> _>,
         None,
         field.scroll_id(),
         field.max_height(),

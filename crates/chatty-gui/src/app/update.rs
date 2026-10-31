@@ -82,7 +82,7 @@ impl ChattyApp {
             Message::SelectConversation(id) => {
                 self.compact_sidebar_open = false;
                 self.open_conversation(&id);
-                conversation::scroll_chat_to_bottom()
+                self.follow_chat_bottom()
             }
             Message::DeleteConversation(id) => {
                 self.send(Request::DeleteEntity {
@@ -508,6 +508,12 @@ impl ChattyApp {
         }
     }
 
+    /// Show the newest message and follow new content from now on.
+    fn follow_chat_bottom(&mut self) -> Task<Message> {
+        self.chat_at_bottom = true;
+        conversation::scroll_chat_to_bottom()
+    }
+
     pub(super) fn update_conversation(&mut self, msg: ConversationMessage) -> Task<Message> {
         match msg {
             ConversationMessage::InputChanged(val) => {
@@ -515,7 +521,23 @@ impl ChattyApp {
             }
             ConversationMessage::SubmitMessage => {
                 self.submit_message();
-                return conversation::scroll_chat_to_bottom();
+                return self.follow_chat_bottom();
+            }
+            ConversationMessage::ChatScrolled {
+                from_top,
+                from_bottom,
+            } => {
+                let at_bottom = from_bottom <= conversation::CHAT_BOTTOM_TOLERANCE;
+                if at_bottom != self.chat_at_bottom {
+                    self.chat_at_bottom = at_bottom;
+                    // The anchor flips with this flag: keep the same position
+                    // measured from the new anchor.
+                    return conversation::scroll_chat_to(if at_bottom {
+                        from_bottom
+                    } else {
+                        from_top
+                    });
+                }
             }
             ConversationMessage::CancelRequest(id) => {
                 let _ = self.commands.send(Command::Cancel(id));
@@ -523,6 +545,8 @@ impl ChattyApp {
             ConversationMessage::StartEditMessage { id, content } => {
                 self.editing_message_id = Some(id);
                 self.editing_message_content = text_editor::Content::with_text(&content);
+                // Focus at once so typing, Ctrl+Enter, and Esc reach the editor.
+                return iced::widget::operation::focus(conversation::edit_editor_id());
             }
             ConversationMessage::EditAction(action) => {
                 // Only edits change the message; the text is read when saving.

@@ -1,8 +1,8 @@
 use super::{Harness, png};
 use crate::network::Command;
 use chatty_protocol::{
-    CharacterImage, ChatMessage, DeltaOperation, DeltaPayload, GenerationContext, GenerationStatus,
-    MessageType, Request, Response, StateDelta, StreamChunk, encode,
+    CharacterImage, ChatMessage, DeltaOperation, DeltaPayload, ErrorCode, GenerationContext,
+    GenerationStatus, MessageType, Request, Response, StateDelta, StreamChunk, encode,
 };
 
 fn add_happy_image(app: &mut Harness) {
@@ -141,9 +141,8 @@ fn thinking_status_shows_until_reply_text_streams() {
     assert_eq!(app.stream_text, "Hello");
 }
 
-#[test]
-fn failed_message_image_fetch_marks_the_image_unavailable_quietly() {
-    let mut app = Harness::demo();
+/// Push an image message and start its fetch as request 41.
+fn start_image_fetch(app: &mut Harness) {
     app.messages.push(ChatMessage {
         id: "img".into(),
         author_type: "image".into(),
@@ -165,8 +164,14 @@ fn failed_message_image_fetch_marks_the_image_unavailable_quietly() {
         request_id: 41,
         message_id: "img".into(),
     });
+}
+
+#[test]
+fn missing_message_image_is_marked_unavailable_quietly() {
+    let mut app = Harness::demo();
+    start_image_fetch(&mut app);
     app.active_request = Some(7);
-    app.fail(41, "message image not found");
+    app.fail_with(41, ErrorCode::NotFound, "message image not found");
     assert!(app.error.is_none());
     assert_eq!(app.active_request, Some(7));
     assert_eq!(app.message_images.get("img").map(Vec::len), Some(0));
@@ -175,17 +180,114 @@ fn failed_message_image_fetch_marks_the_image_unavailable_quietly() {
 }
 
 #[test]
+fn temporary_message_image_error_is_retried_on_the_next_trigger() {
+    let mut app = Harness::demo();
+    start_image_fetch(&mut app);
+    app.active_request = Some(7);
+    app.fail(41, "backend busy");
+    assert!(app.error.is_none());
+    assert_eq!(app.active_request, Some(7));
+    assert!(!app.message_images.contains_key("img"));
+    // Nothing retries by itself; the next view rebuild or delta does.
+    assert!(app.requests().is_empty());
+    app.request_message_images();
+    assert!(matches!(
+        app.requests().as_slice(),
+        [Request::GetMessageImage { message_id, .. }] if message_id == "img"
+    ));
+}
+
+#[test]
+fn unauthorized_message_image_error_is_shown() {
+    let mut app = Harness::demo();
+    start_image_fetch(&mut app);
+    app.fail_with(41, ErrorCode::Unauthorized, "unauthorized");
+    assert_eq!(
+        app.error.as_ref().map(|notice| notice.message.as_str()),
+        Some("unauthorized")
+    );
+    assert!(!app.message_images.contains_key("img"));
+}
+
+#[test]
+fn permanent_message_image_error_is_not_refetched() {
+    let mut app = Harness::demo();
+    start_image_fetch(&mut app);
+    app.fail_with(41, ErrorCode::Internal, "decryption failed");
+    assert!(app.error.is_none());
+    assert_eq!(app.message_images.get("img").map(Vec::len), Some(0));
+    app.request_message_images();
+    assert!(app.requests().is_empty());
+}
+
+#[test]
+fn forbidden_message_image_error_is_shown_once() {
+    let mut app = Harness::demo();
+    start_image_fetch(&mut app);
+    app.fail_with(41, ErrorCode::Forbidden, "forbidden");
+    assert_eq!(
+        app.error.as_ref().map(|notice| notice.message.as_str()),
+        Some("forbidden")
+    );
+    assert_eq!(app.message_images.get("img").map(Vec::len), Some(0));
+    app.request_message_images();
+    assert!(app.requests().is_empty());
+}
+
+fn scrolled(from_top: f32, from_bottom: f32) -> crate::app::Message {
+    crate::app::Message::Conversation(crate::conversation::ConversationMessage::ChatScrolled {
+        from_top,
+        from_bottom,
+    })
+}
+
+#[test]
+fn chat_follows_new_content_only_while_at_the_bottom() {
+    let mut app = Harness::demo();
+    assert!(app.chat_at_bottom);
+    // Content growth while following: no task, still following.
+    assert_eq!(app.update_units(scrolled(900.0, 0.0)), 0);
+    assert!(app.chat_at_bottom);
+    // The user scrolls up: stop following and keep the position under the
+    // top anchor.
+    assert_eq!(app.update_units(scrolled(500.0, 400.0)), 1);
+    assert!(!app.chat_at_bottom);
+    // Tokens stream and images load below: the position stays put.
+    assert_eq!(app.update_units(scrolled(500.0, 650.0)), 0);
+    assert!(!app.chat_at_bottom);
+    // Back at the bottom, within the tolerance: follow again.
+    assert_eq!(app.update_units(scrolled(1147.0, 3.0)), 1);
+    assert!(app.chat_at_bottom);
+    assert_eq!(app.update_units(scrolled(1150.0, 0.0)), 0);
+    // Sending jumps to the bottom even when scrolled up.
+    app.update(scrolled(200.0, 950.0));
+    assert!(!app.chat_at_bottom);
+    app.input = "Hello".into();
+    assert_eq!(
+        app.update_units(crate::app::Message::Conversation(
+            crate::conversation::ConversationMessage::SubmitMessage
+        )),
+        1
+    );
+    assert!(app.chat_at_bottom);
+}
+
+#[test]
 fn message_edits_use_a_multi_line_editor() {
     use crate::conversation::ConversationMessage;
     use iced::widget::text_editor::{Action, Edit};
     let mut app = Harness::demo();
     let id = app.messages[0].id.clone();
-    app.update(crate::app::Message::Conversation(
-        ConversationMessage::StartEditMessage {
-            id: id.clone(),
-            content: "Hi".into(),
-        },
-    ));
+    // Starting an edit returns the task that focuses the new editor.
+    assert_eq!(
+        app.update_units(crate::app::Message::Conversation(
+            ConversationMessage::StartEditMessage {
+                id: id.clone(),
+                content: "Hi".into(),
+            },
+        )),
+        1
+    );
     for action in [
         Action::Move(iced::widget::text_editor::Motion::DocumentEnd),
         Action::Edit(Edit::Enter),

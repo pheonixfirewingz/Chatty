@@ -1339,7 +1339,7 @@ fn character_images_are_authenticated_and_encrypted_at_rest() {
 #[tokio::test]
 async fn model_pull_is_sent_to_the_configured_inference_server() {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = crate::test_net::mock_listener().await;
     let address = server.local_addr().unwrap();
     let receiver = tokio::spawn(async move {
         let (socket, _) = server.accept().await.unwrap();
@@ -1420,7 +1420,7 @@ async fn mock_comfyui_with_ollama(
     ollama_unloads: bool,
 ) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = crate::test_net::mock_listener().await;
     let url = format!("http://{}", server.local_addr().unwrap());
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = seen.clone();

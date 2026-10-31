@@ -22,7 +22,7 @@ impl Drop for Inference {
 }
 impl Inference {
     async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = crate::test_net::mock_listener().await;
         let address = format!("http://{}", listener.local_addr().unwrap());
         let (pull_tx, pulls) = mpsc::channel(8);
         let (delete_tx, deleted) = mpsc::channel(8);

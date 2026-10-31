@@ -64,6 +64,12 @@ impl Harness {
         let _ = self.app.update(message.into());
     }
 
+    /// Update and report how many units of work the returned task holds.
+    /// iced does not expose a task's operations, only whether it does work.
+    pub(super) fn update_units(&mut self, message: impl Into<Message>) -> usize {
+        self.app.update(message.into()).units()
+    }
+
     /// Drain every command sent so far.
     pub(super) fn commands(&mut self) -> Vec<Command> {
         std::iter::from_fn(|| self.sent.try_recv().ok()).collect()
@@ -99,10 +105,19 @@ impl Harness {
     }
 
     pub(super) fn fail(&mut self, request_id: u64, message: &str) {
+        self.fail_with(request_id, ErrorCode::BackendUnavailable, message);
+    }
+
+    pub(super) fn fail_with(&mut self, request_id: u64, code: ErrorCode, message: &str) {
+        // Match the broker: only backend and missing-model failures are retryable.
+        let retryable = matches!(
+            code,
+            ErrorCode::BackendUnavailable | ErrorCode::ModelMissing
+        );
         let error = WireError {
-            code: ErrorCode::BackendUnavailable,
+            code,
             message: message.into(),
-            retryable: false,
+            retryable,
         };
         self.frame(MessageType::Error, request_id, &error);
     }

@@ -170,7 +170,7 @@ pub(super) async fn describe_scene(
             format!("{}: {}", row.get::<String, _>("name"), clip(&detail, 1024))
         })
         .collect::<Vec<_>>();
-    let mut recent = sqlx::query("SELECT COALESCE(c.name,m.author_type) AS author,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 6")
+    let mut recent = sqlx::query("SELECT COALESCE(c.name,m.author_type) AS author,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.seq DESC LIMIT 6")
         .bind(conversation_id)
         .fetch_all(&app.db)
         .await?

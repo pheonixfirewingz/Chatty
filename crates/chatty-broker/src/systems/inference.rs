@@ -545,14 +545,20 @@ async fn extract_memories(
     own_conversation(&app.db, owner_id, conversation_id).await?;
     let config = load_broker_config(&app.db).await?;
     let (model, num_ctx) = memory_model(app, &config).await?;
+    // At most 40 rows in priority order: rows changed since the checkpoint
+    // (most recently changed first), then the newest unchanged rows as context.
+    // Edits raise a message's revision without moving it in the timeline, so an
+    // edited old message is pending even when it is not among the newest rows.
+    // Manual extraction has no checkpoint and takes the newest rows.
     let recent = sqlx::query(
-        "SELECT m.id,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 40",
+        "WITH picked AS (SELECT id,seq,revision>?1 AS pending FROM messages WHERE conversation_id=?2 AND parent_id IS NULL AND author_type<>'image' ORDER BY revision>?1 DESC,CASE WHEN revision>?1 THEN revision END DESC,seq DESC LIMIT 40) \
+         SELECT m.id,m.seq,m.revision,COALESCE(c.name,m.author_type) AS author_type,substr(COALESCE(v.content,m.content),1,32768) AS content FROM picked p JOIN messages m ON m.id=p.id LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id LEFT JOIN characters c ON c.id=m.author_id ORDER BY p.pending DESC,CASE WHEN p.pending THEN m.revision END DESC,m.seq DESC",
     )
+    .bind(after_revision.unwrap_or(i64::MAX))
     .bind(conversation_id)
     .fetch_all(&app.db)
     .await?;
-    // Edits raise a message's revision without moving it, so the newest
-    // revision can belong to any loaded row.
+    // The newest revision can belong to any loaded row.
     let latest_revision = recent
         .iter()
         .map(|row| row.get::<i64, _>("revision"))
@@ -627,18 +633,18 @@ async fn extract_memories(
     let system = clip_to_token_budget(&system, input_tokens * 3 / 4);
     let mut remaining =
         input_tokens.saturating_sub(estimated_message_tokens(&system) + MESSAGE_OVERHEAD_TOKENS);
+    // Budget rows in priority order so new rows are kept first, then show
+    // them in timeline order.
     let mut transcript = Vec::new();
     let mut source_message_ids = Vec::new();
+    let mut has_new = false;
     for row in &recent {
         if remaining <= MESSAGE_OVERHEAD_TOKENS {
             break;
         }
         let revision: i64 = row.get("revision");
-        let label = if after_revision.is_some_and(|previous| revision <= previous) {
-            "earlier context"
-        } else {
-            "new"
-        };
+        let new = !after_revision.is_some_and(|previous| revision <= previous);
+        let label = if new { "new" } else { "earlier context" };
         let content = format!(
             "[{}] {}: {}",
             label,
@@ -650,10 +656,24 @@ async fn extract_memories(
             break;
         }
         remaining = remaining.saturating_sub(estimated_message_tokens(&content));
+        has_new |= new;
         source_message_ids.push(row.get::<String, _>("id"));
-        transcript.push(content);
+        transcript.push((row.get::<i64, _>("seq"), content));
     }
-    transcript.reverse();
+    if automatic && !has_new {
+        // Nothing new reached the transcript, so the model has nothing to judge.
+        // The checkpoint still advances past the loaded rows.
+        return Ok(MemoryExtraction {
+            contents: Vec::new(),
+            source_message_ids: Vec::new(),
+            latest_revision,
+        });
+    }
+    transcript.sort_unstable_by_key(|(seq, _)| *seq);
+    let transcript = transcript
+        .into_iter()
+        .map(|(_, content)| content)
+        .collect::<Vec<_>>();
     let messages = vec![
         AdapterMessage::new("system", system),
         AdapterMessage::new("user", transcript.join("\n")),
@@ -753,7 +773,7 @@ async fn maybe_extract_automatic_memory(
         "SELECT COALESCE((SELECT last_message_revision FROM memory_extraction_state WHERE owner_id=? AND conversation_id=?),0)",
     ).bind(owner_id).bind(conversation_id).fetch_one(&app.db).await?;
     let pending: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=? AND parent_id IS NULL AND revision>?)",
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=? AND parent_id IS NULL AND author_type<>'image' AND revision>?)",
     ).bind(conversation_id).bind(previous_revision).fetch_one(&app.db).await?;
     if !pending {
         return Ok(());
@@ -1235,7 +1255,7 @@ pub(super) async fn probe_backend(app: &App) -> Result<Vec<String>> {
 
 /// Recent root messages for reply prompts, newest first. Image messages are
 /// excluded: their prompt is only a caption for the user and would spend context.
-const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 23";
+const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(v.content,m.content) AS content FROM messages m LEFT JOIN variants v ON v.id=m.selected_variant_id AND v.message_id=m.id WHERE m.conversation_id=? AND m.parent_id IS NULL AND m.author_type<>'image' ORDER BY m.seq DESC LIMIT 23";
 
 /// Map a stored message to a chat role.
 fn history_message(author_type: &str, content: String) -> (String, String) {
@@ -1950,7 +1970,7 @@ pub(super) mod auxiliary_completion_tests {
 
     #[tokio::test]
     async fn auxiliary_completions_use_the_selected_native_plugin() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = crate::test_net::mock_listener().await;
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -2036,7 +2056,7 @@ pub(super) async fn select_speaker(
             .iter()
             .map(|r| r.get::<String, _>("name"))
             .collect::<Vec<_>>();
-        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL AND author_type<>'image' ORDER BY created_at DESC,rowid DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
+        let recent:Vec<String>=sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND parent_id IS NULL AND author_type<>'image' ORDER BY seq DESC LIMIT 12").bind(cid).fetch_all(&app.db).await.unwrap_or_default();
         let choice = async {
             let model = selected_model(app).await.ok()?;
             let messages = vec![
@@ -2123,7 +2143,7 @@ mod automatic_memory_tests {
     }
 
     async fn server_with_stream_pause(report_usage: bool, pause_stream: bool) -> MemoryServer {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = crate::test_net::mock_listener().await;
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let (requests_tx, requests) = mpsc::channel(16);
         let (responses, mut responses_rx) = mpsc::channel::<(u16, String)>(16);
@@ -2538,6 +2558,51 @@ mod automatic_memory_tests {
             2
         );
         assert!(server.requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn automatic_memory_sees_edited_old_messages_and_skips_calls_without_new_rows() {
+        let mut server = server().await;
+        let app = app(&server.url).await;
+        // 45 newer messages push the first one out of the newest 40.
+        sqlx::query("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<44) INSERT INTO messages(id,conversation_id,author_type,content,revision) SELECT printf('filler-%02d',i),'chat','user',printf('Filler %d.',i),i+2 FROM n")
+            .execute(&app.db).await.unwrap();
+        server.responses.send((200, "[]".into())).await.unwrap();
+        maybe_extract_automatic_memory(&app, "owner", "chat", "character")
+            .await
+            .unwrap();
+        server.requests.recv().await.unwrap();
+        assert_eq!(checkpoint(&app).await, 46);
+
+        sqlx::query("UPDATE messages SET content='My favorite drink is now oolong.',revision=47 WHERE id='user-message'")
+            .execute(&app.db).await.unwrap();
+        server.responses.send((200, "[]".into())).await.unwrap();
+        maybe_extract_automatic_memory(&app, "owner", "chat", "character")
+            .await
+            .unwrap();
+        let request = server.requests.recv().await.unwrap();
+        let transcript = request["messages"][1]["content"].as_str().unwrap();
+        let lines = transcript.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 40);
+        // Timeline order: the edited message is the oldest line, then context.
+        assert_eq!(lines[0], "[new] user: My favorite drink is now oolong.");
+        assert_eq!(lines[39], "[earlier context] user: Filler 44.");
+        assert_eq!(transcript.matches("[new]").count(), 1);
+        assert_eq!(checkpoint(&app).await, 47);
+
+        // A new image message is not extracted, so no model call runs.
+        sqlx::query("INSERT INTO messages(id,conversation_id,author_type,content,revision) VALUES('image','chat','image','a lake',48)")
+            .execute(&app.db).await.unwrap();
+        maybe_extract_automatic_memory(&app, "owner", "chat", "character")
+            .await
+            .unwrap();
+        // Rows exist but none is newer than the checkpoint: no model call.
+        let extracted = extract_memories(&app, "owner", "chat", Some(47), Some("character"))
+            .await
+            .unwrap();
+        assert!(extracted.contents.is_empty());
+        assert!(server.requests.try_recv().is_err());
+        assert_eq!(checkpoint(&app).await, 47);
     }
 
     #[test]
