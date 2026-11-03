@@ -1,0 +1,15 @@
+[package]
+name = "chatty-metal-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bincode.workspace = true
+serde.workspace = true
+tokio = { workspace = true, optional = true }
+zstd.workspace = true
+
+[features]
+default = []
+net = ["dep:tokio"]

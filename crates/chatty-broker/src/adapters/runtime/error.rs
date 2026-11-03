@@ -23,6 +23,7 @@ conversion!(
     serde_json::Error,
     reqwest::Error,
     wasmi::Error,
-    std::str::Utf8Error
+    std::str::Utf8Error,
+    chatty_metal_protocol::ProtocolError
 );
 pub type Result<T> = std::result::Result<T, Error>;

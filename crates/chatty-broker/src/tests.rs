@@ -215,7 +215,7 @@ async fn runtime_adapter_selection_is_authorized_validated_and_persisted() {
     };
     assert_eq!(
         adapter_plugins,
-        ["freetoken", "ollama", "openai-compatible"]
+        ["chatty-metal", "freetoken", "ollama", "openai-compatible"]
     );
     assert!(adapter_override.is_none());
     assert!(

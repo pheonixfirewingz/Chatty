@@ -847,6 +847,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chacha20poly1305",
+ "chatty-metal-protocol",
  "chatty-protocol",
  "futures-util",
  "getrandom 0.3.4",
@@ -887,6 +888,29 @@ dependencies = [
  "tokio-rustls",
  "webpki-roots",
  "zip",
+]
+
+[[package]]
+name = "chatty-metal"
+version = "0.1.0"
+dependencies = [
+ "chatty-metal-protocol",
+ "fancy-regex 0.16.2",
+ "rayon",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "chatty-metal-protocol"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+ "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -1627,6 +1651,17 @@ name = "fancy-regex"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -2886,7 +2921,7 @@ checksum = "4daa563b33b6e7d9bb377f2f0cf43d90f8aa2737b622388730ba12f8386235b9"
 dependencies = [
  "anyhow",
  "espeak-ng",
- "fancy-regex",
+ "fancy-regex 0.14.0",
  "hf-hub",
  "hound",
  "once_cell",

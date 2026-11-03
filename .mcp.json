@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "chatty-metal": {
+      "command": "cargo",
+      "args": ["run", "--quiet", "--release", "--offline", "-p", "chatty-metal", "--bin", "chatty-metal-mcp"]
+    }
+  }
+}

@@ -1,0 +1,28 @@
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
+@@ -2719,10 +2719,22 @@
+ 		  "CPU update of VM recommended only for large BAR system\n");
+ 
+ 	if (vm->use_cpu_for_update) {
+-		/* Sync with last SDMA update/clear before switching to CPU */
+-		r = amdgpu_bo_sync_wait(vm->root.bo,
+-					AMDGPU_FENCE_OWNER_UNDEFINED, true);
++		long timeout;
++
++		/*
++		 * Sync with last SDMA update/clear before switching to CPU.
++		 * amdgpu_vm_sdma_commit() records page-table fences with
++		 * DMA_RESV_USAGE_BOOKKEEP, which amdgpu_bo_sync_wait() skips.
++		 */
++		timeout = dma_resv_wait_timeout(vm->root.bo->tbo.base.resv,
++						DMA_RESV_USAGE_BOOKKEEP, true,
++						MAX_SCHEDULE_TIMEOUT);
++		if (timeout <= 0) {
++			r = timeout ? timeout : -ETIMEDOUT;
++			goto unreserve_bo;
++		}
++		r = dma_fence_wait(vm->last_unlocked, true);
+ 		if (r)
+ 			goto unreserve_bo;
+ 
+ 		vm->update_funcs = &amdgpu_vm_cpu_funcs;

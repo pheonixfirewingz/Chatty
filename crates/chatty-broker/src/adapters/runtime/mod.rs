@@ -30,12 +30,15 @@ const MAX_IMAGES: usize = 4;
 enum PluginSource {
     Bundled(&'static [u8]),
     File(PathBuf),
+    /// Built into the broker; no WASM module and no HTTP plan.
+    Native,
 }
 impl PluginSource {
     fn load(&self) -> Result<Plugin> {
         match self {
             Self::Bundled(bytes) => Plugin::load(bytes),
             Self::File(path) => Plugin::load(&bounded_file(path, wasm::MAX_WASM_BYTES)?),
+            Self::Native => Err(Error::new("native adapters have no WASM module")),
         }
     }
 }
@@ -71,53 +74,68 @@ impl Registry {
     pub fn load(directory: Option<&Path>) -> Result<Self> {
         let mut plugins = HashMap::new();
         for (id, kind, bytes) in [
+            ("chatty-metal", PluginKind::Inference, None),
             (
                 "openai-compatible",
                 PluginKind::Inference,
-                include_bytes!(concat!(
-                    env!("OUT_DIR"),
-                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_openai_compatible.wasm"
-                ))
-                .as_slice(),
+                Some(
+                    include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/wasm/wasm32-unknown-unknown/release/chatty_adapter_openai_compatible.wasm"
+                    ))
+                    .as_slice(),
+                ),
             ),
             (
                 "freetoken",
                 PluginKind::Inference,
-                include_bytes!(concat!(
-                    env!("OUT_DIR"),
-                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_freetoken.wasm"
-                ))
-                .as_slice(),
+                Some(
+                    include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/wasm/wasm32-unknown-unknown/release/chatty_adapter_freetoken.wasm"
+                    ))
+                    .as_slice(),
+                ),
             ),
             (
                 "ollama",
                 PluginKind::Inference,
-                include_bytes!(concat!(
-                    env!("OUT_DIR"),
-                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_ollama.wasm"
-                ))
-                .as_slice(),
+                Some(
+                    include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/wasm/wasm32-unknown-unknown/release/chatty_adapter_ollama.wasm"
+                    ))
+                    .as_slice(),
+                ),
             ),
             (
                 "hugging-face",
                 PluginKind::Catalogue,
-                include_bytes!(concat!(
-                    env!("OUT_DIR"),
-                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_hugging_face.wasm"
-                ))
-                .as_slice(),
+                Some(
+                    include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/wasm/wasm32-unknown-unknown/release/chatty_adapter_hugging_face.wasm"
+                    ))
+                    .as_slice(),
+                ),
             ),
             (
                 "comfyui",
                 PluginKind::Image,
-                include_bytes!(concat!(
-                    env!("OUT_DIR"),
-                    "/wasm/wasm32-unknown-unknown/release/chatty_adapter_comfyui.wasm"
-                ))
-                .as_slice(),
+                Some(
+                    include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/wasm/wasm32-unknown-unknown/release/chatty_adapter_comfyui.wasm"
+                    ))
+                    .as_slice(),
+                ),
             ),
         ] {
-            plugins.insert(id.into(), (PluginSource::Bundled(bytes), kind));
+            let source = match bytes {
+                Some(bytes) => PluginSource::Bundled(bytes),
+                None => PluginSource::Native,
+            };
+            plugins.insert(id.into(), (source, kind));
         }
         if let Some(directory) = directory {
             let mut entries = std::fs::read_dir(directory)?
@@ -223,11 +241,14 @@ impl Registry {
     }
 
     fn make_adapter(&self, id: &str, base_url: &str, retain: bool) -> Result<Adapter> {
+        let id = canonical_plugin_id(id);
+        if id == "chatty-metal" {
+            return Adapter::metal(base_url);
+        }
         let base = reqwest::Url::parse(base_url).map_err(Error::new)?;
         if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
             return Err(Error::new("adapter URL must use HTTP or HTTPS"));
         }
-        let id = canonical_plugin_id(id);
         // Catalogue code stays transient even if a caller selects its ID directly.
         let retain = retain && id != "hugging-face";
         let plugin = if retain {
@@ -249,10 +270,12 @@ impl Registry {
             self.load_plugin(id)?
         };
         Ok(Adapter {
-            plugin,
-            client: self.client.clone(),
-            base,
-            credential: None,
+            inner: AdapterKind::Wasm(Box::new(WasmAdapter {
+                plugin,
+                client: self.client.clone(),
+                base,
+                credential: None,
+            })),
         })
     }
     fn plugin_ids(&self, kind: PluginKind) -> Vec<String> {
@@ -314,17 +337,17 @@ fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
 }
 
 #[derive(Clone)]
-pub struct Adapter {
-    plugin: Plugin,
-    client: reqwest::Client,
-    base: reqwest::Url,
-    credential: Option<BearerCredential>,
+pub struct WasmAdapter {
+    pub plugin: Plugin,
+    pub client: reqwest::Client,
+    pub base: reqwest::Url,
+    pub credential: Option<BearerCredential>,
 }
 
 #[derive(Clone)]
-struct BearerCredential {
-    origin: reqwest::Url,
-    header: reqwest::header::HeaderValue,
+pub struct BearerCredential {
+    pub origin: reqwest::Url,
+    pub header: reqwest::header::HeaderValue,
 }
 fn redact_error(error: Error, credential: Option<&BearerCredential>) -> Error {
     let Some(credential) = credential else {
@@ -369,7 +392,7 @@ fn bearer_credential(base: &reqwest::Url, origin: &str, token: &str) -> Result<B
     Ok(BearerCredential { origin, header })
 }
 
-impl Adapter {
+impl WasmAdapter {
     /// Attach a host-owned key pinned to an explicit operator-configured origin.
     /// Neither the key nor its header is passed into guest memory.
     pub fn with_bearer_token(mut self, origin: &str, token: &str) -> Result<Self> {
@@ -720,13 +743,13 @@ impl Adapter {
         }
         read_bounded(response, MAX_IMAGE_BYTES).await
     }
-    pub async fn stream(&self, request: ChatRequest) -> Result<AdapterStream> {
+    pub async fn stream(&self, request: ChatRequest) -> Result<HttpStream> {
         self.start_stream(AdapterRequest::Stream(request)).await
     }
-    pub async fn pull(&self, model: String) -> Result<AdapterStream> {
+    pub async fn pull(&self, model: String) -> Result<HttpStream> {
         self.start_stream(AdapterRequest::Pull { model }).await
     }
-    async fn start_stream(&self, request: AdapterRequest) -> Result<AdapterStream> {
+    async fn start_stream(&self, request: AdapterRequest) -> Result<HttpStream> {
         let mut session = self.plugin.session()?;
         let plan = self.prepare(&mut session, request)?;
         if !plan.stream || plan.requests.len() != 1 {
@@ -751,7 +774,7 @@ impl Adapter {
                 "backend does not support streaming (content-type: {content_type})"
             )));
         }
-        Ok(AdapterStream {
+        Ok(HttpStream {
             body: Box::pin(response.bytes_stream()),
             decoder: Decoder {
                 session,
@@ -766,7 +789,7 @@ impl Adapter {
 /// Cancels an unfinished job on drop. The cancel request runs detached, bounded
 /// by its 10-second plan timeout, because Drop cannot await.
 struct PendingImage {
-    adapter: Adapter,
+    adapter: WasmAdapter,
     job: Option<String>,
 }
 impl Drop for PendingImage {
@@ -862,13 +885,13 @@ impl Decoder {
     }
 }
 
-pub struct AdapterStream {
+pub struct HttpStream {
     body: Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>,
     decoder: Decoder,
     ended: bool,
     credential: Option<BearerCredential>,
 }
-impl AdapterStream {
+impl HttpStream {
     /// Dropping this stream cancels its upstream HTTP response. No worker or queue survives it.
     pub async fn next(&mut self) -> Result<Option<StreamUpdate>> {
         self.read_next()
@@ -891,6 +914,182 @@ impl AdapterStream {
                 self.ended = true;
                 return Ok(None);
             }
+        }
+    }
+}
+
+/// An adapter is either a WASM HTTP translator or the native appliance client.
+/// Callers keep one type, so inference code does not branch on the backend.
+#[derive(Clone)]
+pub struct Adapter {
+    inner: AdapterKind,
+}
+
+#[derive(Clone)]
+enum AdapterKind {
+    Wasm(Box<WasmAdapter>),
+    Metal(crate::adapters::metal::MetalClient),
+}
+
+impl Adapter {
+    fn metal(url: &str) -> Result<Self> {
+        Ok(Self {
+            inner: AdapterKind::Metal(crate::adapters::metal::MetalClient::new(url)?),
+        })
+    }
+
+    pub fn with_bearer_token(self, origin: &str, token: &str) -> Result<Self> {
+        match self.inner {
+            AdapterKind::Wasm(adapter) => Ok(Self {
+                inner: AdapterKind::Wasm(Box::new(adapter.with_bearer_token(origin, token)?)),
+            }),
+            AdapterKind::Metal(_) => {
+                Err(Error::new("chatty-metal does not use bearer credentials"))
+            }
+        }
+    }
+
+    pub fn validate_bearer_token(origin: &str, token: &str) -> Result<()> {
+        WasmAdapter::validate_bearer_token(origin, token)
+    }
+
+    pub async fn models(&self, timeout: Duration) -> Result<Vec<String>> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter.models(timeout).await,
+            AdapterKind::Metal(adapter) => adapter.models(timeout).await,
+        }
+    }
+
+    pub async fn complete(&self, request: ChatRequest) -> Result<Completion> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter.complete(request).await,
+            AdapterKind::Metal(adapter) => adapter.complete(request).await,
+        }
+    }
+
+    pub async fn model_state(&self) -> Result<ModelState> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter.model_state().await,
+            AdapterKind::Metal(adapter) => {
+                let status = adapter.status().await?;
+                let ready = status.state == chatty_metal_protocol::ServerState::Ready;
+                Ok(ModelState {
+                    version: format!("chatty-metal/{}", chatty_metal_protocol::PROTOCOL_VERSION),
+                    models: if status.model.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![InstalledModel {
+                            name: status.model.clone(),
+                            size: 0,
+                            modified_at: String::new(),
+                            family: "DeepSeek".into(),
+                            parameter_size: String::new(),
+                            quantization_level: "FP8/FP4".into(),
+                        }]
+                    },
+                    running_models: if ready {
+                        vec![RunningModel {
+                            name: status.model,
+                            size: 0,
+                            size_vram: 0,
+                            expires_at: String::new(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                })
+            }
+        }
+    }
+
+    pub async fn model_action(&self, action: ModelAction) -> Result<()> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter.model_action(action).await,
+            AdapterKind::Metal(_) => Err(Error::new(
+                "chatty-metal owns its single model and has no lifecycle actions",
+            )),
+        }
+    }
+
+    pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter.search(query).await,
+            AdapterKind::Metal(_) => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn generate_image(&self, request: ImageRequest) -> Result<Vec<Vec<u8>>> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter.generate_image(request).await,
+            AdapterKind::Metal(_) => Err(Error::new("chatty-metal is a text model")),
+        }
+    }
+
+    pub async fn unload_image_models(&self) -> Result<()> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter.unload_image_models().await,
+            AdapterKind::Metal(_) => Ok(()),
+        }
+    }
+
+    pub async fn stream(&self, request: ChatRequest) -> Result<AdapterStream> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => Ok(AdapterStream {
+                inner: StreamKind::Http(Box::new(adapter.stream(request).await?)),
+            }),
+            AdapterKind::Metal(adapter) => Ok(AdapterStream {
+                inner: StreamKind::Metal(adapter.stream(request).await?),
+            }),
+        }
+    }
+
+    pub async fn pull(&self, model: String) -> Result<AdapterStream> {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => Ok(AdapterStream {
+                inner: StreamKind::Http(Box::new(adapter.pull(model).await?)),
+            }),
+            AdapterKind::Metal(_) => Err(Error::new("chatty-metal has no model catalogue")),
+        }
+    }
+}
+
+pub struct AdapterStream {
+    inner: StreamKind,
+}
+
+enum StreamKind {
+    Http(Box<HttpStream>),
+    Metal(crate::adapters::metal::MetalStream),
+}
+
+impl AdapterStream {
+    /// Dropping this stream closes the upstream connection. For the appliance,
+    /// that also cancels the running generation.
+    pub async fn next(&mut self) -> Result<Option<StreamUpdate>> {
+        match &mut self.inner {
+            StreamKind::Http(stream) => stream.next().await,
+            StreamKind::Metal(stream) => stream.next().await,
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for Adapter {
+    type Target = WasmAdapter;
+    fn deref(&self) -> &Self::Target {
+        match &self.inner {
+            AdapterKind::Wasm(adapter) => adapter,
+            AdapterKind::Metal(_) => panic!("expected wasm adapter in test"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for Adapter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.inner {
+            AdapterKind::Wasm(adapter) => adapter,
+            AdapterKind::Metal(_) => panic!("expected wasm adapter in test"),
         }
     }
 }

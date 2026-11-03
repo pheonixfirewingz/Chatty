@@ -1,0 +1,17 @@
+# Files the kernel needs at boot, relative to /lib/firmware. Compressed sources are
+# decompressed by build-image.sh. VCN and JPEG firmware is left out on purpose, and so
+# are the _kicker variants, which do not apply to device 744c revision c8.
+amdgpu/gc_11_0_0_pfp.bin
+amdgpu/gc_11_0_0_me.bin
+amdgpu/gc_11_0_0_mec.bin
+amdgpu/gc_11_0_0_rlc.bin
+amdgpu/gc_11_0_0_rlc_1.bin
+amdgpu/gc_11_0_0_imu.bin
+amdgpu/gc_11_0_0_mes.bin
+amdgpu/gc_11_0_0_mes1.bin
+amdgpu/gc_11_0_0_mes_2.bin
+amdgpu/sdma_6_0_0.bin
+amdgpu/psp_13_0_0_sos.bin
+amdgpu/psp_13_0_0_ta.bin
+amdgpu/smu_13_0_0.bin
+amdgpu/dcn_3_2_0_dmcub.bin

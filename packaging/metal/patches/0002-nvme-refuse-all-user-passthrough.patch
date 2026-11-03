@@ -1,0 +1,16 @@
+--- a/drivers/nvme/host/ioctl.c	2026-11-02 17:39:38.488377205 +0000
++++ b/drivers/nvme/host/ioctl.c	2026-11-02 17:39:38.506014282 +0000
+@@ -98,6 +98,13 @@
+ 			     bool open_for_write)
+ {
+ 	/*
++	 * chatty-metal: the model drive must never be written. Passthrough skips the
++	 * block layer's read-only check and the appliance has no use for it, so every
++	 * ioctl and io_uring path that passes through here is refused, even for root.
++	 */
++	return false;
++
++	/*
+ 	 * Do not allow unprivileged passthrough on partitions, as that
+ 	 * allows an escape from the containment of the partition.
+ 	 */

@@ -1,0 +1,122 @@
+# Applied on top of `make allnoconfig`. Every line is checked after configuration,
+# so a symbol the kernel silently rejects fails the build.
+
+# CPU: i9-9900K, 8 cores and 16 threads, one process, no untrusted code.
+CONFIG_64BIT=y
+CONFIG_SMP=y
+CONFIG_NR_CPUS=16
+CONFIG_SCHED_SMT=y
+CONFIG_SCHED_MC=y
+CONFIG_PROCESSOR_SELECT=y
+CONFIG_CPU_SUP_INTEL=y
+# CONFIG_CPU_SUP_AMD is not set
+# CONFIG_CPU_SUP_CENTAUR is not set
+# CONFIG_CPU_SUP_ZHAOXIN is not set
+# CONFIG_CPU_SUP_HYGON is not set
+# CONFIG_CPU_MITIGATIONS is not set
+CONFIG_MICROCODE=y
+CONFIG_X86_MCE=y
+CONFIG_X86_MCE_INTEL=y
+CONFIG_MTRR=y
+CONFIG_X86_PAT=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_HZ_100=y
+CONFIG_PREEMPT_NONE=y
+CONFIG_CPU_FREQ=y
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
+CONFIG_X86_INTEL_PSTATE=y
+CONFIG_CPU_IDLE=y
+CONFIG_INTEL_IDLE=y
+
+# Firmware and buses.
+CONFIG_ACPI=y
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_DMI=y
+CONFIG_PCI=y
+CONFIG_PCI_MSI=y
+# amdgpu warns without this, because PCIe extended config space needs ECAM.
+CONFIG_PCI_MMCONFIG=y
+CONFIG_PCIEPORTBUS=y
+CONFIG_EXPERT=y
+CONFIG_PCI_QUIRKS=y
+
+# Userspace is one static binary. MULTIUSER is what makes capability checks real, so
+# dropping CAP_SYS_ADMIN in debug jobs actually protects the drive.
+CONFIG_MULTIUSER=y
+CONFIG_BINFMT_ELF=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_ZSTD=y
+CONFIG_INITRAMFS_COMPRESSION_ZSTD=y
+CONFIG_PRINTK=y
+CONFIG_BUG=y
+CONFIG_KALLSYMS=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_EVENTFD=y
+CONFIG_TIMERFD=y
+CONFIG_SIGNALFD=y
+CONFIG_SHMEM=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_ADVISE_SYSCALLS=y
+CONFIG_IO_URING=y
+CONFIG_MEMBARRIER=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_TMPFS=y
+CONFIG_HUGETLBFS=y
+CONFIG_TRANSPARENT_HUGEPAGE=y
+
+# Model drive: Samsung 970 EVO Plus, GPT, btrfs. No other filesystem exists, so the
+# ext4 and vfat boot partitions cannot be mounted at all.
+CONFIG_BLOCK=y
+CONFIG_PARTITION_ADVANCED=y
+CONFIG_EFI_PARTITION=y
+CONFIG_BLK_DEV_NVME=y
+CONFIG_BTRFS_FS=y
+
+# Network: I219-V. Netconsole carries the kernel log, because there is no display.
+CONFIG_NET=y
+# Rust's Command needs AF_UNIX to start debug jobs.
+CONFIG_UNIX=y
+CONFIG_INET=y
+CONFIG_IP_PNP=y
+CONFIG_NETDEVICES=y
+CONFIG_NET_CORE=y
+CONFIG_NETCONSOLE=y
+CONFIG_ETHERNET=y
+CONFIG_NET_VENDOR_INTEL=y
+CONFIG_E1000E=y
+
+# GPU: Navi 31. KFD gives user-mode queues, so each dispatch costs no system call. The
+# display engine drives the load monitor; it draws through KMS, with no console.
+CONFIG_DRM=y
+CONFIG_DRM_AMDGPU=y
+CONFIG_HSA_AMD=y
+CONFIG_DRM_AMD_DC=y
+# CONFIG_DRM_AMDGPU_SI is not set
+# CONFIG_DRM_AMDGPU_CIK is not set
+# CONFIG_DRM_FBDEV_EMULATION is not set
+
+# Cut on purpose. These are the host's other devices and unused kernel features.
+# CONFIG_MODULES is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_ATA is not set
+# CONFIG_SOUND is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_IPV6 is not set
+# CONFIG_INTEL_IOMMU is not set
+# CONFIG_IOMMU_SUPPORT is not set
+# CONFIG_SWAP is not set
+# CONFIG_COREDUMP is not set
+# CONFIG_HIBERNATION is not set
+# CONFIG_SUSPEND is not set
+# CONFIG_EXT4_FS is not set
+# CONFIG_VFAT_FS is not set
+# CONFIG_IA32_EMULATION is not set
+# CONFIG_CGROUPS is not set
+# CONFIG_NAMESPACES is not set
+# CONFIG_AUDIT is not set
+# CONFIG_SECURITY is not set

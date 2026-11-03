@@ -736,7 +736,11 @@ async fn dispatch(
             config.image.negative_prompt = config.image.negative_prompt.trim().to_owned();
             config.emotion_model = config.emotion_model.trim().to_owned();
             config.memory_model = config.memory_model.trim().to_owned();
-            if !config.adapter_url.starts_with("http://")
+            if config.adapter_plugin_id() == "chatty-metal" {
+                if !config.adapter_url.starts_with("metal://") {
+                    bail!("chatty-metal adapter URL must use metal://")
+                }
+            } else if !config.adapter_url.starts_with("http://")
                 && !config.adapter_url.starts_with("https://")
             {
                 bail!("adapter URL must use http or https")
