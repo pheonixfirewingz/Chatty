@@ -36,6 +36,7 @@ const BOS: &str = "<\u{ff5c}begin\u{2581}of\u{2581}sentence\u{ff5c}>";
 const USER: &str = "<\u{ff5c}User\u{ff5c}>";
 const ASSISTANT: &str = "<\u{ff5c}Assistant\u{ff5c}>";
 const EOS: &str = "<\u{ff5c}end\u{2581}of\u{2581}sentence\u{ff5c}>";
+const THOUGHT_END: &str = "</think>";
 
 /// A single-model worker. One generation runs at a time; connections queue.
 struct StatusBoard {
@@ -497,6 +498,12 @@ fn generate(model: &mut GpuModel, tokenizer: &Tokenizer, board: &StatusBoard, jo
             return;
         }
     };
+    let think_end = tokenizer.special(THOUGHT_END).ok();
+    let mut in_thinking = !request
+        .prompt
+        .iter()
+        .any(|p| matches!(p, wire::Piece::Marker(wire::Marker::ThoughtEnd)));
+    let mut thinking_reported = false;
     let started = Instant::now();
     let mut rng = request.sampling.seed | 1;
     let mut pending = Vec::new();
@@ -514,22 +521,48 @@ fn generate(model: &mut GpuModel, tokenizer: &Tokenizer, board: &StatusBoard, jo
             finish = wire::FinishReason::EndOfSentence;
             break;
         }
-        pending.extend(tokenizer.token_bytes(next));
-        let valid = match std::str::from_utf8(&pending) {
-            Ok(_) => pending.len(),
-            Err(error) => error.valid_up_to(),
-        };
-        if valid > 0 {
-            let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
-            pending.drain(..valid);
-            if job
-                .replies
-                .send(Event::Chunk(wire::Chunk { sequence, text }))
-                .is_err()
-            {
-                return;
+        if in_thinking {
+            if !thinking_reported {
+                if job
+                    .replies
+                    .send(Event::Chunk(wire::Chunk {
+                        sequence,
+                        text: String::new(),
+                        reasoning: true,
+                    }))
+                    .is_err()
+                {
+                    return;
+                }
+                sequence = sequence.wrapping_add(1);
+                thinking_reported = true;
             }
-            sequence = sequence.wrapping_add(1);
+            if Some(next) == think_end {
+                in_thinking = false;
+            }
+            pending.clear();
+        } else {
+            pending.extend(tokenizer.token_bytes(next));
+            let valid = match std::str::from_utf8(&pending) {
+                Ok(_) => pending.len(),
+                Err(error) => error.valid_up_to(),
+            };
+            if valid > 0 {
+                let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
+                pending.drain(..valid);
+                if job
+                    .replies
+                    .send(Event::Chunk(wire::Chunk {
+                        sequence,
+                        text,
+                        reasoning: false,
+                    }))
+                    .is_err()
+                {
+                    return;
+                }
+                sequence = sequence.wrapping_add(1);
+            }
         }
         if completion >= request.max_tokens {
             finish = wire::FinishReason::Length;
@@ -578,6 +611,7 @@ fn prompt_ids(tokenizer: &Tokenizer, pieces: &[wire::Piece]) -> Result<Vec<u32>>
                     wire::Marker::User => USER,
                     wire::Marker::Assistant => ASSISTANT,
                     wire::Marker::EndOfSentence => EOS,
+                    wire::Marker::ThoughtEnd => THOUGHT_END,
                 };
                 ids.push(tokenizer.special(name)?);
             }

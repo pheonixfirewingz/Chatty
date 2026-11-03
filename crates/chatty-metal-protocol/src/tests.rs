@@ -50,6 +50,7 @@ fn every_message_round_trips() {
                 Piece::Marker(Marker::User),
                 Piece::Text("hello".into()),
                 Piece::Marker(Marker::Assistant),
+                Piece::Marker(Marker::ThoughtEnd),
             ],
             sampling: Sampling::default(),
             max_tokens: 32,
@@ -60,6 +61,15 @@ fn every_message_round_trips() {
         &Chunk {
             sequence: 3,
             text: "hello".into(),
+            reasoning: false,
+        },
+    );
+    round_trip(
+        MessageType::Chunk,
+        &Chunk {
+            sequence: 4,
+            text: String::new(),
+            reasoning: true,
         },
     );
     round_trip(
@@ -116,6 +126,7 @@ fn large_payloads_are_compressed_and_restored() {
         &Chunk {
             sequence: 0,
             text: text.clone(),
+            reasoning: false,
         },
     )
     .unwrap();

@@ -13,7 +13,7 @@ const DEFAULT_PORT: u16 = 11434;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
-const DEFAULT_MAX_TOKENS: u32 = 512;
+const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 #[derive(Clone, Debug)]
 pub struct MetalClient {
@@ -28,12 +28,16 @@ pub struct MetalStream {
 }
 
 impl MetalClient {
-    /// Accept `metal://host[:port]`. The scheme is deliberate: this is not HTTP,
-    /// so an OpenAI-compatible URL cannot silently point at the appliance.
+    /// Accept `metal://host[:port]`, `http://host[:port]`, or plain `host[:port]`.
+    /// The adapter handles the scheme so the client/user doesn't need to specify `metal://`.
     pub fn new(url: &str) -> Result<Self> {
-        let rest = url
+        let trimmed = url.trim();
+        let rest = trimmed
             .strip_prefix("metal://")
-            .ok_or_else(|| Error::new("chatty-metal URL must use metal://"))?;
+            .or_else(|| trimmed.strip_prefix("http://"))
+            .or_else(|| trimmed.strip_prefix("https://"))
+            .unwrap_or(trimmed)
+            .trim_end_matches('/');
         if rest.is_empty()
             || rest.contains(['/', '?', '#', '@'])
             || rest.chars().any(char::is_whitespace)
@@ -138,7 +142,9 @@ impl MetalClient {
             match frame.message_type {
                 wire::MessageType::Chunk => {
                     let chunk: wire::Chunk = wire::decode(&frame.payload)?;
-                    text.push_str(&chunk.text);
+                    if !chunk.reasoning {
+                        text.push_str(&chunk.text);
+                    }
                 }
                 wire::MessageType::Done => {
                     let done: wire::Done = wire::decode(&frame.payload)?;
@@ -222,7 +228,8 @@ impl MetalStream {
             wire::MessageType::Chunk => {
                 let chunk: wire::Chunk = wire::decode(&frame.payload)?;
                 Ok(Some(crate::adapter_api::StreamUpdate {
-                    text: chunk.text,
+                    text: if chunk.reasoning { String::new() } else { chunk.text },
+                    reasoning: chunk.reasoning,
                     ..Default::default()
                 }))
             }
@@ -282,8 +289,8 @@ fn prompt(messages: &[ChatMessage], options: &GenerationOptions) -> Vec<wire::Pi
         }
     }
     pieces.push(wire::Piece::Marker(wire::Marker::Assistant));
-    if !options.disable_reasoning {
-        pieces.push(wire::Piece::Text("</think>".into()));
+    if options.disable_reasoning {
+        pieces.push(wire::Piece::Marker(wire::Marker::ThoughtEnd));
     }
     pieces
 }
@@ -311,7 +318,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_metal_urls_and_defaults_the_port() {
+    fn accepts_various_url_formats_and_defaults_the_port() {
         assert_eq!(
             MetalClient::new("metal://192.168.0.97").unwrap().endpoint,
             "192.168.0.97:11434"
@@ -322,13 +329,26 @@ mod tests {
                 .endpoint,
             "192.168.0.97:11435"
         );
+        assert_eq!(
+            MetalClient::new("192.168.0.97").unwrap().endpoint,
+            "192.168.0.97:11434"
+        );
+        assert_eq!(
+            MetalClient::new("http://192.168.0.97:11434").unwrap().endpoint,
+            "192.168.0.97:11434"
+        );
+        assert_eq!(
+            MetalClient::new("192.168.0.97:11434/").unwrap().endpoint,
+            "192.168.0.97:11434"
+        );
     }
 
     #[test]
-    fn refuses_http_urls_and_paths() {
-        assert!(MetalClient::new("http://192.168.0.97:11434").is_err());
+    fn refuses_paths_and_empty_urls() {
+        assert!(MetalClient::new("192.168.0.97:11434/v1").is_err());
         assert!(MetalClient::new("metal://192.168.0.97:11434/v1").is_err());
         assert!(MetalClient::new("metal://").is_err());
+        assert!(MetalClient::new("").is_err());
     }
 
     #[test]
@@ -353,7 +373,13 @@ mod tests {
         assert_eq!(pieces[7], wire::Piece::Marker(wire::Marker::User));
         assert_eq!(pieces[8], wire::Piece::Text("again".into()));
         assert_eq!(pieces[9], wire::Piece::Marker(wire::Marker::Assistant));
-        assert_eq!(pieces[10], wire::Piece::Text("</think>".into()));
+        assert_eq!(pieces.len(), 10);
+
+        let mut disabled = GenerationOptions::default();
+        disabled.disable_reasoning = true;
+        let pieces = prompt(&messages, &disabled);
+        assert_eq!(pieces.len(), 11);
+        assert_eq!(pieces[10], wire::Piece::Marker(wire::Marker::ThoughtEnd));
     }
 
     #[test]

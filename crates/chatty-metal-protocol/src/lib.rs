@@ -169,6 +169,7 @@ pub enum Marker {
     User,
     Assistant,
     EndOfSentence,
+    ThoughtEnd,
 }
 
 /// A trusted marker or plain text. Text is encoded with special tokens treated
@@ -254,6 +255,8 @@ impl Generate {
 pub struct Chunk {
     pub sequence: u32,
     pub text: String,
+    #[serde(default)]
+    pub reasoning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
