@@ -190,6 +190,23 @@ to one reply. Send an empty message (**Continue**) to let the characters talk am
 themselves. Every character in the group remembers what it witnessed: after each reply,
 the broker saves new memories for each participant it applies to.
 
+## Memories
+
+Characters learn memories from chats automatically. When a fact changes ("I moved to
+Berlin"), the character updates its memory and keeps the old version as history.
+Open them from the memory button in the sidebar footer or from a character to review them:
+
+- Each memory shows the character who holds it, its kind, whether it is **Manual** or
+  **Learned**, whether it applies to one chat or all chats, and its importance.
+- **Earlier versions** expands the versions a memory replaced. **Source messages**
+  shows the messages it was learned from while that chat is open.
+- **Retired and replaced memories** lists memories that are no longer true.
+  **Restore** makes one active again.
+- The sparkle button learns from the open chat now, for every character in it, or
+  only for the character selected in the filter.
+- Pinned memories are always sent. Learning never changes pinned or manual memories;
+  edit those yourself.
+
 ## Context usage
 
 The pie inside the message input shows context used by the latest request in that
