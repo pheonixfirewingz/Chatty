@@ -110,13 +110,14 @@ Defaults follow the XDG Base Directory Specification:
 | Per-server GUI CA | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.pem` or `~/.config/chatty/server-cas/<host>.ca.pem` |
 | First-use trust material | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.der` (or `.cert.der` for a leaf-only legacy chain) |
 
+On Windows and macOS the GUI keeps its session, preferences, and trust material in
+`%APPDATA%\Chatty\` and `~/Library/Application Support/Chatty/`, with certificates under
+`server-cas\`. Colons in IPv6 host names become `_` in Windows file names.
+
 Only distribute `ca.pem` to clients. Keep `ca.key` private and offline from client systems.
 
-The official client requests native screen-capture exclusion for its window. This is
-effective on supported Windows versions and best-effort on macOS. Current Linux X11
-and Wayland windowing APIs used by Chatty do not provide a portable equivalent, so
-the setting cannot prevent screenshots there. It also cannot prevent photography,
-modified clients, or capture outside the operating system's managed APIs.
+See [Screen capture protection](#screen-capture-protection) for what the client does
+against screenshots on each platform.
 
 Public brokers whose certificates chain to a standard public CA connect without a Chatty-specific
 certificate file. For private or LAN brokers, the GUI retrieves the public private-CA certificate

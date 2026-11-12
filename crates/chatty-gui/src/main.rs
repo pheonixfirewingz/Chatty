@@ -1,4 +1,6 @@
 //! Native Chatty desktop client.
+// Release builds on Windows open no console window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod admin;
 mod app;

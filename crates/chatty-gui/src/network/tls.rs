@@ -318,6 +318,17 @@ pub(super) fn server_trust_path(target: &ConnectionTarget, extension: &str) -> R
     {
         bail!("invalid server name for certificate lookup");
     }
+    if !cfg!(target_os = "linux") {
+        // Windows file names cannot contain the colons of an IPv6 address.
+        let stem = server_name.replace(':', "_");
+        return super::session::native_data_dir()
+            .map(|directory| {
+                directory
+                    .join("server-cas")
+                    .join(format!("{stem}.{extension}"))
+            })
+            .context("could not determine the user data directory");
+    }
     default_server_trust_dir(
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
