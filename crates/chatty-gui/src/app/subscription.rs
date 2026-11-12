@@ -69,6 +69,23 @@ impl ChattyApp {
             Subscription::none()
         };
 
-        Subscription::batch(vec![net_sub, tts_sub, admin_sub, fifo_sub])
+        let guard_sub = if self.capture_guard {
+            iced::event::listen_with(|event, _, id| match event {
+                iced::Event::Window(iced::window::Event::Opened { .. }) => {
+                    Some(Message::WindowOpened(id))
+                }
+                iced::Event::Window(iced::window::Event::Focused) => {
+                    Some(Message::WindowFocusChanged(true))
+                }
+                iced::Event::Window(iced::window::Event::Unfocused) => {
+                    Some(Message::WindowFocusChanged(false))
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch(vec![net_sub, tts_sub, admin_sub, fifo_sub, guard_sub])
     }
 }
