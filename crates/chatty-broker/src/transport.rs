@@ -14,7 +14,8 @@ pub(super) fn tls_config(cert: &str, key: &str) -> Result<ServerConfig> {
         eprintln!("chatty-broker TLS trust fingerprint (SHA-256): {fingerprint}");
     }
     Ok(
-        ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        ServerConfig::builder_with_provider(chatty_protocol::util::tls::post_quantum_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
             .with_single_cert(certs, key)?,
     )

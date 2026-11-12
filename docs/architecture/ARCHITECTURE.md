@@ -93,7 +93,7 @@ The broker reaches inference services through its selected WASM adapter. Bundled
 
 ### Client to broker
 
-Transport is TLS 1.3 over one TCP connection at port `7443` by default.
+Transport is TLS 1.3 over one TCP connection at port `7443` by default. Both ends accept only the X25519MLKEM768 hybrid post-quantum key exchange, so recorded traffic stays private unless both X25519 and ML-KEM-768 are broken; peers without it fail the handshake rather than downgrade. Certificate signatures remain classical.
 
 The broker first sends a JSON handshake:
 

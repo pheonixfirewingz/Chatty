@@ -133,9 +133,11 @@ pub(super) fn ca_client_config(path: &Path) -> Result<Arc<ClientConfig>> {
     for cert in chatty_protocol::util::pemfile::certs(&mut BufReader::new(ca_file)) {
         roots.add(cert?).context("invalid pinned CA")?;
     }
-    let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config =
+        ClientConfig::builder_with_provider(chatty_protocol::util::tls::post_quantum_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let config = Arc::new(config);
     cache
         .lock()
@@ -158,7 +160,8 @@ pub(super) fn der_ca_client_config(path: &Path) -> Result<Arc<ClientConfig>> {
         .add(CertificateDer::from(certificate))
         .context("invalid trusted CA certificate")?;
     let config = Arc::new(
-        ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        ClientConfig::builder_with_provider(chatty_protocol::util::tls::post_quantum_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_root_certificates(roots)
             .with_no_client_auth(),
     );
@@ -169,19 +172,20 @@ pub(super) fn der_ca_client_config(path: &Path) -> Result<Arc<ClientConfig>> {
     Ok(config)
 }
 
-pub(super) fn public_client_config() -> Arc<ClientConfig> {
+pub(super) fn public_client_config() -> Result<Arc<ClientConfig>> {
     static CONFIG: std::sync::OnceLock<Arc<ClientConfig>> = std::sync::OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            Arc::new(
-                ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
-            )
-        })
-        .clone()
+    if let Some(config) = CONFIG.get() {
+        return Ok(config.clone());
+    }
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = Arc::new(
+        ClientConfig::builder_with_provider(chatty_protocol::util::tls::post_quantum_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    Ok(CONFIG.get_or_init(|| config).clone())
 }
 
 pub(super) fn custom_client_config(expected: Option<Vec<u8>>) -> Result<Arc<ClientConfig>> {
@@ -190,7 +194,8 @@ pub(super) fn custom_client_config(expected: Option<Vec<u8>>) -> Result<Arc<Clie
         .context("TLS crypto provider is not installed")?;
     let verifier = Arc::new(CertificateVerifier { expected, provider });
     Ok(Arc::new(
-        ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        ClientConfig::builder_with_provider(chatty_protocol::util::tls::post_quantum_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])?
             .dangerous()
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth(),
@@ -274,7 +279,7 @@ pub(super) async fn connect(args: &Args, target: &ConnectionTarget) -> Result<Co
         .map(|stream| ConnectAttempt::Connected(Box::new(stream)));
     }
 
-    match tls_connect(public_client_config(), target).await {
+    match tls_connect(public_client_config()?, target).await {
         Ok(stream) => verify_chatty_handshake(stream)
             .await
             .map(|stream| ConnectAttempt::Connected(Box::new(stream))),

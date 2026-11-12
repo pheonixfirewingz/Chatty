@@ -166,7 +166,7 @@ Compatibility was checked against FreeToken commit `ba31db2ea708b61d7313bccb3ee4
 
 ## Certificates
 
-The broker accepts TLS 1.3 only. CA-based and public-PKI connections verify the requested server
+The broker accepts TLS 1.3 with the X25519MLKEM768 hybrid post-quantum key exchange only; check it with `openssl s_client -connect <host>:7443 -groups X25519MLKEM768` (OpenSSL 3.5 or later). CA-based and public-PKI connections verify the requested server
 name. First-use private certificate pins bind the exact confirmed certificate to the entered server.
 
 The GUI uses this trust order:

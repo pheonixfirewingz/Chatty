@@ -5,6 +5,7 @@ pub mod base64;
 mod errors;
 pub mod ids;
 pub mod pemfile;
+pub mod tls;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
