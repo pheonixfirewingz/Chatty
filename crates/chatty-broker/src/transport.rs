@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn tls_config(cert: &str, key: &str) -> Result<ServerConfig> {
+pub(crate) fn tls_config(cert: &str, key: &str) -> Result<ServerConfig> {
     let certs: Vec<CertificateDer<'static>> =
         pemfile::certs(&mut BufReader::new(File::open(cert)?))
             .collect::<std::result::Result<_, _>>()?;
@@ -23,7 +23,7 @@ pub(super) fn tls_config(cert: &str, key: &str) -> Result<ServerConfig> {
 
 /// SHA-256 of a DER certificate as colon-separated uppercase hex, matching
 /// the fingerprint the GUI shows for trust confirmation.
-pub(super) fn certificate_fingerprint(certificate: &[u8]) -> String {
+pub(crate) fn certificate_fingerprint(certificate: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(certificate)
         .iter()
@@ -32,7 +32,7 @@ pub(super) fn certificate_fingerprint(certificate: &[u8]) -> String {
         .join(":")
 }
 
-pub(super) async fn serve(
+pub(crate) async fn serve(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     app: App,
 ) -> Result<()> {
@@ -207,7 +207,7 @@ pub(super) async fn serve(
     Ok(())
 }
 
-pub(super) async fn cancel_connection(registry: &CancellationRegistry, connection_id: String) {
+pub(crate) async fn cancel_connection(registry: &CancellationRegistry, connection_id: String) {
     let mut cancellations = registry.lock().await;
     cancellations.retain(|(id, _), cancel| {
         if *id == connection_id {

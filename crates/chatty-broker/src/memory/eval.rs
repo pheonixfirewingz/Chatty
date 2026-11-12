@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct Fixture {
+pub(crate) struct Fixture {
     #[serde(skip)]
     pub name: String,
     pub description: String,
@@ -32,7 +32,7 @@ pub(super) struct Fixture {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct SavedMemory {
+pub(crate) struct SavedMemory {
     pub id: String,
     pub holder: String,
     pub content: String,
@@ -43,13 +43,13 @@ pub(super) struct SavedMemory {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct Line {
+pub(crate) struct Line {
     pub author: String,
     pub content: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-pub(super) struct Expected {
+pub(crate) struct Expected {
     /// Memories the run should add, each matched by holder and key phrases.
     #[serde(default)]
     pub active: Vec<ExpectedMemory>,
@@ -62,7 +62,7 @@ pub(super) struct Expected {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct ExpectedMemory {
+pub(crate) struct ExpectedMemory {
     pub holder: String,
     pub contains: Vec<String>,
     #[serde(default)]
@@ -72,14 +72,14 @@ pub(super) struct ExpectedMemory {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct Forbidden {
+pub(crate) struct Forbidden {
     pub holder: String,
     pub contains: String,
 }
 
 /// Outcome of one fixture.
 #[derive(Debug, Default)]
-pub(super) struct FixtureReport {
+pub(crate) struct FixtureReport {
     pub name: String,
     /// Active memories the run added.
     pub produced: usize,
@@ -103,7 +103,7 @@ impl FixtureReport {
 }
 
 /// Loads every `*.json` fixture in `directory`, sorted by file name.
-pub(super) fn load_fixtures(directory: &Path) -> Result<Vec<Fixture>> {
+pub(crate) fn load_fixtures(directory: &Path) -> Result<Vec<Fixture>> {
     let mut paths = std::fs::read_dir(directory)
         .with_context(|| format!("cannot read {}", directory.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -204,7 +204,7 @@ fn status_label(status: MemoryStatus) -> &'static str {
 }
 
 /// Runs one fixture in `app`, whose database must be empty, and scores it.
-pub(super) async fn evaluate_fixture(app: &App, fixture: &Fixture) -> FixtureReport {
+pub(crate) async fn evaluate_fixture(app: &App, fixture: &Fixture) -> FixtureReport {
     let mut report = FixtureReport {
         name: fixture.name.clone(),
         expected: fixture.expected.active.len(),
@@ -327,7 +327,7 @@ pub(super) async fn evaluate_fixture(app: &App, fixture: &Fixture) -> FixtureRep
 }
 
 /// An app with an empty in-memory database that uses `url` for inference.
-pub(super) async fn evaluation_app(adapters: AdapterHost, url: &str) -> Result<App> {
+pub(crate) async fn evaluation_app(adapters: AdapterHost, url: &str) -> Result<App> {
     let db = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -337,25 +337,11 @@ pub(super) async fn evaluation_app(adapters: AdapterHost, url: &str) -> Result<A
         .bind(url.trim_end_matches('/'))
         .execute(&db)
         .await?;
-    let (deltas, _) = broadcast::channel(64);
-    Ok(App {
-        db,
-        adapters,
-        cancellations: Arc::new(Mutex::new(HashMap::new())),
-        snapshot_gate: Arc::new(RwLock::new(())),
-        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
-        memory_access: Default::default(),
-        deltas,
-        recent_errors: Arc::new(Mutex::new(Vec::new())),
-        log_path: Arc::new(PathBuf::new()),
-        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
-        image_decrypt_gate: Arc::new(Semaphore::new(IMAGE_DECRYPT_CONCURRENCY)),
-        image_key: Arc::new([0; 32]),
-    })
+    Ok(App::new(db, adapters, PathBuf::new(), [0; 32]))
 }
 
 /// Totals across fixtures: precision, recall, and duplicate rate.
-pub(super) fn summary(reports: &[FixtureReport]) -> String {
+pub(crate) fn summary(reports: &[FixtureReport]) -> String {
     let produced = reports.iter().map(|report| report.produced).sum::<usize>();
     let matched = reports.iter().map(|report| report.matched).sum::<usize>();
     let expected = reports.iter().map(|report| report.expected).sum::<usize>();
@@ -384,7 +370,7 @@ pub(super) fn summary(reports: &[FixtureReport]) -> String {
 /// `chatty-broker --memory-eval <dir>`: runs every fixture against the
 /// inference server at `url` and prints a report. With `model`, that model
 /// serves extraction. Returns whether every fixture passed.
-pub(super) async fn run_memory_evaluation(
+pub(crate) async fn run_memory_evaluation(
     directory: &Path,
     url: &str,
     model: Option<&str>,

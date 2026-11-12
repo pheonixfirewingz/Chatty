@@ -13,7 +13,7 @@ The broker's internal `Adapter` interface handles model discovery, completion, s
 - `crates/chatty-adapters/ollama`: native chat, tags, version/running state, model pull/load/unload/delete, and NDJSON translation.
 - `crates/chatty-adapters/hugging-face`: public GGUF catalogue query and repository/file filtering.
 - `crates/chatty-adapters/comfyui`: checkpoint listing and a text-to-image workflow for ComfyUI's queue API.
-- `crates/chatty-broker/src/adapters.rs`: operator/configuration selection and mapping adapter results to existing broker/wire types.
+- `crates/chatty-broker/src/adapters/mod.rs`: operator/configuration selection and mapping adapter results to existing broker/wire types.
 
 Authentication and authorization happen before the broker calls management operations. Plugins never receive session tokens, database handles, TLS private keys, or filesystem paths. FreeToken API keys stay in the host and are attached as sensitive bearer headers only after validation against an explicit operator-pinned origin. They are never passed to guests or other adapters; redirects remain disabled.
 

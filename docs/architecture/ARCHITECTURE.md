@@ -46,21 +46,31 @@ Responsibilities:
 
 The broker is stateless only with respect to process memory: SQLite remains authoritative across restart. In-memory connection, cancellation, health, and broadcast state is reconstructible.
 
-Broker source is split along runtime boundaries:
+Broker source is split into domain directories, mirroring the GUI. Each domain keeps
+its logic in `mod.rs`, its wire-request handlers in `handlers.rs`, and its unit tests in
+`tests.rs`:
 
-- `main.rs` owns startup and request dispatch.
+- `main.rs` owns arguments, startup, and the accept loop; `app.rs` owns shared state,
+  concurrency gates, and live-delta publication.
+- `dispatch/` maps each request to a domain handler and owns the per-request context
+  (responses, delta delivery, busy and cancellation tracking) and error classification.
 - `transport.rs` owns TLS connections, framing, idle close, and delta fan-out.
-- `auth.rs` owns sessions and authorization lookups.
-- `adapters.rs` selects WASM adapters and maps neutral results to existing broker types.
-- `systems/admin.rs` owns monitoring, broker configuration, and authorized model administration.
-- `systems/conversations.rs` owns conversation persistence, snapshots, world loading, and automatic titles.
-- `systems/emotion.rs` runs the in-process emotion classifier and applies reply portraits after persistence.
-- `systems/images.rs` owns image prompt validation, scene descriptions, PNG normalization, and image message persistence.
-- `systems/inference.rs` owns prompt assembly, typed inference requests, client stream batching, persistence of generated output, and speaker selection.
-- `systems/memory.rs` owns memory persistence and retrieval; `systems/memory_extraction.rs` owns extraction scheduling, extraction, and condensation.
-- `workload.rs` serializes text and image models on a shared GPU host.
-- `utils.rs` contains validation, error classification, bounded text helpers, and usage accounting.
-- `tests.rs` contains broker unit and integration-style tests.
+- `account/` owns registration, sign-in, sessions, authorization lookups, and the login throttle.
+- `adapters/` selects WASM adapters, maps neutral results to broker types, and
+  (`adapters/workload.rs`) serializes text and image models on a shared GPU host.
+- `admin/` owns monitoring, broker configuration, user management, and authorized model administration.
+- `characters/` owns character validation, storage, and encrypted portrait handling.
+- `conversations/` owns conversation and message persistence, deletion, and automatic titles.
+- `worlds/` owns world storage and character-to-world links.
+- `sync/` owns the delta log, live-delta visibility, snapshots, and Sync/Resume replay.
+- `emotion/` runs the in-process emotion classifier and applies reply portraits after persistence.
+- `images/` owns image prompt validation, scene descriptions, PNG normalization, and image message persistence.
+- `inference/` owns prompt assembly, typed inference requests, client stream batching, persistence of generated output, and speaker selection.
+- `memory/` owns memory persistence and retrieval; `memory/extraction/` owns extraction
+  scheduling, extraction, and condensation; `memory/eval.rs` replays fixtures.
+- `crypto.rs` encrypts stored images; `logging.rs` owns the boot log and data paths;
+  `utils.rs` holds bounded text helpers and usage accounting.
+- `tests/` holds broker-level tests that drive `dispatch` end to end, split by domain.
 
 ### Broker WASM adapter runtime and shared guest API
 
@@ -118,7 +128,7 @@ Admin model search is broker-only and rechecks the administrator role. It querie
 
 Image generation uses a separately configured image adapter; see [ADR 0005](adr/0005-image-generation-adapters.md). `GenerateImage` returns an unsaved PNG for review, used for character portrait drafts. An optional seed keeps a series consistent: the editor's emotion set requests 12 labelled expressions with one seed, one at a time, saves them at 384 px so a full set fits the 32-image/5 MiB character limit, and skips labels the character already has. `GenerateSceneImage` persists a message with `author_type` `image` and the prompt as content. An empty prompt asks the text model to describe the latest six non-image messages and participant appearance. Image bytes are encrypted in `message_images` and fetched with `GetMessageImage` after an owner check; snapshots and deltas carry only the message. Text prompts exclude image messages entirely, so captions spend no model context: reply history, automatic speaker choice, scene descriptions, and memory extraction all skip them. They are also never sent as mid-history system messages, which many chat templates reject. Image messages cannot be regenerated as variants. The GUI keeps bytes for at most the 12 newest image messages in the open chat.
 
-When the inference and image URLs share a host, `workload.rs` admits text and image work one kind at a time. Each model-backed call holds a guard for its lifetime, including a reply stream. The first holder of a new kind unloads the other kind: running Ollama models for images, or the image adapter's `ImageUnload` for text. Image work starts only after the runtime confirms no chat model is running; text work frees image memory on a best-effort basis. Waiting work of the other kind blocks new arrivals of the loaded kind. Guards are dropped before follow-up calls, such as memory extraction after a reply, so no task waits on itself.
+When the inference and image URLs share a host, `adapters/workload.rs` admits text and image work one kind at a time. Each model-backed call holds a guard for its lifetime, including a reply stream. The first holder of a new kind unloads the other kind: running Ollama models for images, or the image adapter's `ImageUnload` for text. Image work starts only after the runtime confirms no chat model is running; text work frees image memory on a best-effort basis. Waiting work of the other kind blocks new arrivals of the loaded kind. Guards are dropped before follow-up calls, such as memory extraction after a reply, so no task waits on itself.
 
 Reply portraits come from an in-process llama.cpp emotion classifier, not the inference service. Replies persist with the default portrait; a bounded background task later publishes a message update. See [ADR 0006](adr/0006-in-process-emotion-classifier.md).
 

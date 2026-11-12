@@ -1,11 +1,12 @@
 //! Broker-owned adapter selection. Provider HTTP and response schemas live in WASM.
 use super::*;
 mod runtime;
+mod workload;
 use runtime::{Adapter, Registry};
 use workload::{Workload, WorkloadGate, WorkloadGuard, same_host};
 
 /// True when `url` is plain HTTP to anything but this machine.
-pub(super) fn sends_cleartext_off_host(url: &str) -> bool {
+pub(crate) fn sends_cleartext_off_host(url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(url) else {
         return false;
     };
@@ -21,7 +22,7 @@ pub(super) fn sends_cleartext_off_host(url: &str) -> bool {
 }
 
 #[derive(Clone)]
-pub(super) struct AdapterHost {
+pub(crate) struct AdapterHost {
     registry: Registry,
     selected_plugin: Option<String>,
     freetoken_credential: Option<(String, String)>,
@@ -38,7 +39,7 @@ type ModelOperationKey = (String, String, String);
 #[derive(Clone, Default)]
 struct ModelOperations(Arc<std::sync::Mutex<HashMap<ModelOperationKey, bool>>>);
 
-pub(super) struct ModelOperationGuard {
+pub(crate) struct ModelOperationGuard {
     operations: ModelOperations,
     key: ModelOperationKey,
 }
@@ -271,7 +272,7 @@ impl AdapterHost {
 }
 
 #[cfg(test)]
-pub(super) fn test_adapter_host() -> AdapterHost {
+pub(crate) fn test_adapter_host() -> AdapterHost {
     static REGISTRY: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
     AdapterHost {
         registry: REGISTRY
@@ -284,14 +285,14 @@ pub(super) fn test_adapter_host() -> AdapterHost {
     }
 }
 
-pub(super) fn adapter_token_usage(usage: crate::adapter_api::TokenUsage) -> TokenUsage {
+pub(crate) fn adapter_token_usage(usage: crate::adapter_api::TokenUsage) -> TokenUsage {
     TokenUsage {
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
     }
 }
 
-pub(super) async fn complete(
+pub(crate) async fn complete(
     app: &App,
     model: &str,
     messages: Vec<AdapterMessage>,
