@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Workload {
+pub(crate) enum Workload {
     Text,
     Image,
 }
@@ -36,7 +36,7 @@ struct GateState {
 }
 
 #[derive(Default)]
-pub(super) struct WorkloadGate {
+pub(crate) struct WorkloadGate {
     state: Mutex<GateState>,
     changed: Notify,
 }
@@ -113,7 +113,7 @@ impl WorkloadGate {
 
 /// Admission for one model-backed operation; `None` when no host is shared.
 #[must_use]
-pub(super) struct WorkloadGuard(Option<Arc<WorkloadGate>>);
+pub(crate) struct WorkloadGuard(Option<Arc<WorkloadGate>>);
 impl WorkloadGuard {
     pub fn unshared() -> Self {
         Self(None)
@@ -137,7 +137,7 @@ impl Drop for WorkloadGuard {
 }
 
 /// Compare hosts, ignoring scheme and port. Loopback names are equivalent.
-pub(super) fn same_host(a: &str, b: &str) -> bool {
+pub(crate) fn same_host(a: &str, b: &str) -> bool {
     fn host(url: &str) -> Option<String> {
         let host = reqwest::Url::parse(url)
             .ok()?

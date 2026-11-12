@@ -127,21 +127,7 @@ async fn app(url: &str) -> App {
             .await
             .unwrap();
     }
-    let (deltas, _) = broadcast::channel(32);
-    App {
-        db,
-        adapters: test_adapter_host(),
-        cancellations: Arc::new(Mutex::new(HashMap::new())),
-        snapshot_gate: Arc::new(RwLock::new(())),
-        memory_jobs: Arc::new(Mutex::new(HashMap::new())),
-        memory_access: Default::default(),
-        deltas,
-        recent_errors: Arc::new(Mutex::new(Vec::new())),
-        log_path: Arc::new(PathBuf::new()),
-        argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
-        image_decrypt_gate: Arc::new(Semaphore::new(IMAGE_DECRYPT_CONCURRENCY)),
-        image_key: Arc::new([7; 32]),
-    }
+    App::new(db, test_adapter_host(), PathBuf::new(), [7; 32])
 }
 
 async fn start(

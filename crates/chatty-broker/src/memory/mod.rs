@@ -1,4 +1,13 @@
+//! Structured character memory: storage and retrieval (ADR 0007), plus
+//! model-driven extraction and fixture evaluation.
 use super::*;
+
+mod eval;
+mod extraction;
+pub(crate) mod handlers;
+
+pub(crate) use eval::*;
+pub(crate) use extraction::*;
 
 const MAX_MEMORY_CHARS: usize = 4_096;
 const RETRIEVED_MEMORY_CHARS: usize = 6_144;
@@ -10,15 +19,15 @@ const MEMORY_USAGE_INSTRUCTIONS: &str = concat!(
 );
 
 /// Columns read by `memory_entry_from_row`.
-pub(super) const MEMORY_COLUMNS: &str = "id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision,status,superseded_by";
+pub(crate) const MEMORY_COLUMNS: &str = "id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision,status,superseded_by";
 /// `MEMORY_COLUMNS` qualified for queries that alias `memories` as `m`.
-pub(super) const MEMORY_COLUMNS_M: &str = "m.id,m.conversation_id,m.character_id,m.kind,m.content,m.importance,m.pinned,m.confidence,m.source,m.source_message_ids,m.created_at,m.updated_at,m.revision,m.status,m.superseded_by";
+pub(crate) const MEMORY_COLUMNS_M: &str = "m.id,m.conversation_id,m.character_id,m.kind,m.content,m.importance,m.pinned,m.confidence,m.source,m.source_message_ids,m.created_at,m.updated_at,m.revision,m.status,m.superseded_by";
 /// Active memories returned by one list request.
 const LISTED_ACTIVE_MEMORIES: i64 = 500;
 /// Superseded or retired memories returned by one list request.
 const LISTED_HISTORY_MEMORIES: i64 = 200;
 
-pub(super) fn memory_status_from_i64(value: i64) -> Result<MemoryStatus> {
+pub(crate) fn memory_status_from_i64(value: i64) -> Result<MemoryStatus> {
     match value {
         0 => Ok(MemoryStatus::Active),
         1 => Ok(MemoryStatus::Superseded),
@@ -27,7 +36,7 @@ pub(super) fn memory_status_from_i64(value: i64) -> Result<MemoryStatus> {
     }
 }
 
-pub(super) fn memory_status_value(value: MemoryStatus) -> i64 {
+pub(crate) fn memory_status_value(value: MemoryStatus) -> i64 {
     match value {
         MemoryStatus::Active => 0,
         MemoryStatus::Superseded => 1,
@@ -35,7 +44,7 @@ pub(super) fn memory_status_value(value: MemoryStatus) -> i64 {
     }
 }
 
-pub(super) fn memory_kind_from_i64(value: i64) -> Result<MemoryKind> {
+pub(crate) fn memory_kind_from_i64(value: i64) -> Result<MemoryKind> {
     match value {
         0 => Ok(MemoryKind::Fact),
         1 => Ok(MemoryKind::Event),
@@ -45,7 +54,7 @@ pub(super) fn memory_kind_from_i64(value: i64) -> Result<MemoryKind> {
     }
 }
 
-pub(super) fn memory_source_from_i64(value: i64) -> Result<MemorySource> {
+pub(crate) fn memory_source_from_i64(value: i64) -> Result<MemorySource> {
     match value {
         0 => Ok(MemorySource::Manual),
         1 => Ok(MemorySource::Automatic),
@@ -53,7 +62,7 @@ pub(super) fn memory_source_from_i64(value: i64) -> Result<MemorySource> {
     }
 }
 
-pub(super) fn memory_kind_value(value: MemoryKind) -> i64 {
+pub(crate) fn memory_kind_value(value: MemoryKind) -> i64 {
     match value {
         MemoryKind::Fact => 0,
         MemoryKind::Event => 1,
@@ -62,14 +71,14 @@ pub(super) fn memory_kind_value(value: MemoryKind) -> i64 {
     }
 }
 
-pub(super) fn memory_source_value(value: MemorySource) -> i64 {
+pub(crate) fn memory_source_value(value: MemorySource) -> i64 {
     match value {
         MemorySource::Manual => 0,
         MemorySource::Automatic => 1,
     }
 }
 
-pub(super) fn memory_entry_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<MemoryEntry> {
+pub(crate) fn memory_entry_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<MemoryEntry> {
     let source_message_ids = serde_json::from_str(row.get::<&str, _>("source_message_ids"))
         .context("invalid memory source message ids")?;
     Ok(MemoryEntry {
@@ -92,7 +101,7 @@ pub(super) fn memory_entry_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Mem
     })
 }
 
-pub(super) async fn validate_memory_scope(
+pub(crate) async fn validate_memory_scope(
     db: &SqlitePool,
     owner_id: &str,
     memory: &mut MemoryInput,
@@ -134,7 +143,7 @@ pub(super) async fn validate_memory_scope(
     Ok(())
 }
 
-pub(super) async fn list_memories(
+pub(crate) async fn list_memories(
     db: &SqlitePool,
     owner_id: &str,
     conversation_id: Option<&str>,
@@ -174,7 +183,7 @@ pub(super) async fn list_memories(
 
 /// Every memory scoped to one owned conversation, history included, so that
 /// deleting the conversation can promote all of them to cross-chat scope.
-pub(super) async fn chat_scoped_memories(
+pub(crate) async fn chat_scoped_memories(
     db: &SqlitePool,
     owner_id: &str,
     conversation_id: &str,
@@ -192,7 +201,7 @@ pub(super) async fn chat_scoped_memories(
     .collect()
 }
 
-pub(super) async fn persist_memory(
+pub(crate) async fn persist_memory(
     app: &App,
     owner_id: &str,
     mut memory: MemoryInput,
@@ -266,7 +275,7 @@ pub(super) async fn persist_memory(
 /// Sets `entry.revision` and returns the encoded delta payload. Callers must
 /// have validated scope and ownership; an existing row of another owner is
 /// never changed.
-pub(super) async fn write_memory_tx(
+pub(crate) async fn write_memory_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     owner_id: &str,
     entry: &mut MemoryEntry,
@@ -331,7 +340,7 @@ const STOP_WORDS: [&str; 120] = [
     "while", "who", "whom", "why", "will", "with", "would", "yes", "you", "your",
 ];
 
-pub(super) fn is_stop_word(word: &str) -> bool {
+pub(crate) fn is_stop_word(word: &str) -> bool {
     STOP_WORDS.binary_search(&word).is_ok()
 }
 
@@ -352,7 +361,7 @@ fn search_stem(word: &str) -> &str {
 /// FTS5 query for `value`: distinct non-stop words of three or more
 /// characters, in first-seen order (callers put the latest message first),
 /// at most 24, ORed as prefix terms. bm25 weights rarer terms higher.
-pub(super) fn fts_query(value: &str) -> Option<String> {
+pub(crate) fn fts_query(value: &str) -> Option<String> {
     let mut terms = Vec::<String>::new();
     for word in value.split(|character: char| !character.is_alphanumeric()) {
         let word = word.to_lowercase();
@@ -398,7 +407,7 @@ fn retrieval_score(rank: Option<usize>, importance: u8, age_days: f64, access_co
 /// Selects at most ten active memories for the speaking character within a
 /// fixed character budget: pinned memories first, then by `retrieval_score`.
 /// Reading is free of writes; callers record use with `record_memory_access`.
-pub(super) async fn relevant_memories(
+pub(crate) async fn relevant_memories(
     db: &SqlitePool,
     owner_id: &str,
     conversation_id: &str,
@@ -482,13 +491,13 @@ pub(super) async fn relevant_memories(
 }
 
 /// Retrieval counts waiting to be written, per (owner, memory).
-pub(super) type MemoryAccess = Arc<std::sync::Mutex<HashMap<(String, String), i64>>>;
+pub(crate) type MemoryAccess = Arc<std::sync::Mutex<HashMap<(String, String), i64>>>;
 /// Memories with pending counts. Further new ones are dropped until a flush;
 /// counts only influence ranking.
 const MAX_PENDING_ACCESSES: usize = 4096;
 
 /// Counts one use of each memory in memory. A reply costs no database write.
-pub(super) fn record_memory_access(
+pub(crate) fn record_memory_access(
     access: &MemoryAccess,
     owner_id: &str,
     memories: &[MemoryEntry],
@@ -508,7 +517,7 @@ pub(super) fn record_memory_access(
 
 /// Writes pending retrieval counts in one transaction. The memory job calls
 /// it after each run; counts still pending at a crash are lost.
-pub(super) async fn flush_memory_access(db: &SqlitePool, access: &MemoryAccess) -> Result<()> {
+pub(crate) async fn flush_memory_access(db: &SqlitePool, access: &MemoryAccess) -> Result<()> {
     let pending = match access.lock() {
         Ok(mut pending) => std::mem::take(&mut *pending),
         Err(_) => return Ok(()),
@@ -532,7 +541,7 @@ pub(super) async fn flush_memory_access(db: &SqlitePool, access: &MemoryAccess) 
 }
 
 /// Reply-prompt section for the speaking character's memories.
-pub(super) fn memory_prompt(holder: &str, memories: &[MemoryEntry]) -> String {
+pub(crate) fn memory_prompt(holder: &str, memories: &[MemoryEntry]) -> String {
     if memories.is_empty() {
         return "No applicable saved memories.".into();
     }
@@ -555,237 +564,4 @@ pub(super) fn memory_prompt(holder: &str, memories: &[MemoryEntry]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    #[test]
-    fn fts_queries_drop_stop_words_keep_order_and_match_word_forms() {
-        assert_eq!(
-            fts_query("Alice met Rowan at the north-gate!"),
-            Some("\"alice\"* OR \"met\"* OR \"rowan\"* OR \"north\"* OR \"gate\"*".into())
-        );
-        assert_eq!(
-            fts_query("Cats and stargazing; the CATS were stargazed."),
-            Some("\"cat\"* OR \"stargaz\"*".into())
-        );
-        assert_eq!(fts_query("a I -- the and you"), None);
-        let many = (0..40)
-            .map(|index| format!("word{index}"))
-            .collect::<Vec<_>>();
-        let query = fts_query(&many.join(" ")).unwrap();
-        assert_eq!(query.matches(" OR ").count(), 23);
-        assert!(query.starts_with("\"word0\"*"));
-    }
-
-    #[test]
-    fn stop_words_are_sorted_lowercase_and_exclude_negation() {
-        assert!(STOP_WORDS.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(
-            STOP_WORDS
-                .iter()
-                .all(|word| word.chars().all(|c| c.is_ascii_lowercase()))
-        );
-        for kept in ["not", "no", "never", "tea"] {
-            assert!(!is_stop_word(kept));
-        }
-        assert!(is_stop_word("really"));
-    }
-
-    #[test]
-    fn retrieval_score_weighs_relevance_importance_recency_and_use() {
-        let fresh = retrieval_score(Some(0), 50, 0.0, 0);
-        assert!((fresh - (0.5 + 0.15 + 0.2)).abs() < 1e-9);
-        // Recency halves every 30 days.
-        let month = retrieval_score(None, 0, 30.0, 0);
-        assert!((month - 0.1).abs() < 1e-9);
-        // Relevance dominates: a matching low-importance memory beats an
-        // unrelated important one.
-        assert!(retrieval_score(Some(0), 10, 60.0, 0) > retrieval_score(None, 100, 0.0, 0));
-        // Use helps a little and is capped.
-        assert!(retrieval_score(None, 50, 0.0, 3) > retrieval_score(None, 50, 0.0, 0));
-        assert_eq!(
-            retrieval_score(None, 50, 0.0, 1_000_000),
-            retrieval_score(None, 50, 0.0, 10_000)
-        );
-    }
-
-    #[test]
-    fn prompt_tells_the_model_to_apply_saved_memory_as_continuity() {
-        let prompt = memory_prompt(
-            "Mara",
-            &[MemoryEntry {
-                id: "memory".into(),
-                conversation_id: None,
-                character_id: Some("character".into()),
-                kind: MemoryKind::Fact,
-                content: "The user appreciates beautiful nighttime views.".into(),
-                importance: 50,
-                pinned: false,
-                confidence: 1.0,
-                source: MemorySource::Manual,
-                source_message_ids: Vec::new(),
-                created_at: "2026-09-18 00:00:00".into(),
-                updated_at: "2026-09-18 00:00:00".into(),
-                revision: 1,
-                status: MemoryStatus::Active,
-                superseded_by: None,
-            }],
-        );
-        assert!(prompt.contains("established long-term context"));
-        assert!(prompt.contains("even when the user does not repeat them"));
-        assert!(prompt.contains("The user appreciates beautiful nighttime views."));
-        assert!(!prompt.contains("No applicable saved memories"));
-    }
-
-    #[tokio::test]
-    async fn exact_relevance_outranks_unrelated_high_importance_memories() {
-        let db = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
-        sqlx::query("INSERT INTO users(id,username,password_hash) VALUES('owner','owner','x')")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO characters(id,owner_id,name,description,personality,scenario,system_prompt,example_dialogue,appearance,age,gender,race,misc,tags,avatar,images,default_image_id,revision,is_public) VALUES('character','owner','Mara','','','','','','','','','','',X'',NULL,X'4348494D0100',NULL,1,0)")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('chat','owner','Test',0,1)")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO memories(id,owner_id,conversation_id,character_id,content,revision,importance) VALUES('relevant','owner',NULL,'character','The user loves stargazing from the old hill.',2,10)")
-            .execute(&db)
-            .await
-            .unwrap();
-        for index in 0..12 {
-            sqlx::query("INSERT INTO memories(id,owner_id,conversation_id,character_id,content,revision,importance) VALUES(?, 'owner',NULL,'character',?, ?,100)")
-                .bind(format!("distractor-{index}"))
-                .bind(format!("Unrelated market errand number {index}."))
-                .bind(3 + index)
-                .execute(&db)
-                .await
-                .unwrap();
-        }
-
-        let memories = relevant_memories(
-            &db,
-            "owner",
-            "chat",
-            "character",
-            "Would you like to go stargazing tonight?",
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            memories.first().map(|memory| memory.id.as_str()),
-            Some("relevant")
-        );
-        assert!(memories.len() <= 10);
-    }
-
-    async fn memory_db() -> SqlitePool {
-        let db = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
-        for owner in ["owner", "other"] {
-            sqlx::query("INSERT INTO users(id,username,password_hash) VALUES(?,?,'x')")
-                .bind(owner)
-                .bind(owner)
-                .execute(&db)
-                .await
-                .unwrap();
-        }
-        sqlx::query("INSERT INTO characters(id,owner_id,name,description,personality,scenario,system_prompt,example_dialogue,appearance,age,gender,race,misc,tags,avatar,images,default_image_id,revision,is_public) VALUES('character','owner','Mara','','','','','','','','','','',X'',NULL,X'4348494D0100',NULL,1,0)")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO conversations(id,owner_id,title,kind,revision) VALUES('chat','owner','Test',0,1)")
-            .execute(&db)
-            .await
-            .unwrap();
-        db
-    }
-
-    #[tokio::test]
-    async fn recency_breaks_ties_and_word_forms_match() {
-        let db = memory_db().await;
-        for (id, content, updated) in [
-            ("old", "The user keeps two cats.", "2025-01-01 00:00:00"),
-            (
-                "new",
-                "The user feeds the cats at dawn.",
-                "2026-11-01 00:00:00",
-            ),
-        ] {
-            sqlx::query("INSERT INTO memories(id,owner_id,character_id,content,revision,importance,updated_at) VALUES(?,'owner','character',?,1,50,?)")
-                .bind(id)
-                .bind(content)
-                .bind(updated)
-                .execute(&db)
-                .await
-                .unwrap();
-        }
-        let memories = relevant_memories(&db, "owner", "chat", "character", "Is the cat hungry?")
-            .await
-            .unwrap();
-        let ids = memories
-            .iter()
-            .map(|memory| memory.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(ids, ["new", "old"]);
-    }
-
-    #[tokio::test]
-    async fn retrieval_defers_access_writes_to_one_owner_scoped_flush() {
-        let db = memory_db().await;
-        sqlx::query("INSERT INTO memories(id,owner_id,character_id,content,revision) VALUES('tea','owner','character','The user loves tea.',1)")
-            .execute(&db)
-            .await
-            .unwrap();
-        let access = MemoryAccess::default();
-        let counts = || async {
-            sqlx::query_as::<_, (i64, Option<String>)>(
-                "SELECT access_count,last_accessed_at FROM memories WHERE id='tea'",
-            )
-            .fetch_one(&db)
-            .await
-            .unwrap()
-        };
-        for _ in 0..3 {
-            let memories = relevant_memories(&db, "owner", "chat", "character", "tea")
-                .await
-                .unwrap();
-            assert_eq!(memories.len(), 1);
-            record_memory_access(&access, "owner", &memories);
-        }
-        // Retrieval itself writes nothing.
-        assert_eq!(counts().await, (0, None));
-        // Another owner cannot bump this owner's memory.
-        let memory = relevant_memories(&db, "owner", "chat", "character", "tea")
-            .await
-            .unwrap();
-        record_memory_access(&access, "other", &memory);
-        flush_memory_access(&db, &access).await.unwrap();
-        let (count, accessed) = counts().await;
-        assert_eq!(count, 3);
-        assert!(accessed.is_some());
-        assert!(access.lock().unwrap().is_empty());
-        // The pending map is bounded.
-        let many = (0..MAX_PENDING_ACCESSES + 10)
-            .map(|index| MemoryEntry {
-                id: format!("m{index}"),
-                ..memory[0].clone()
-            })
-            .collect::<Vec<_>>();
-        record_memory_access(&access, "owner", &many);
-        assert_eq!(access.lock().unwrap().len(), MAX_PENDING_ACCESSES);
-    }
-}
+mod tests;

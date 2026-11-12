@@ -5,21 +5,23 @@
 use super::*;
 use chatty_protocol::admin::{MAX_IMAGE_PROMPT_BYTES, MIN_IMAGE_SIDE};
 
+pub(crate) mod handlers;
+
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Leaves room for framing within the 8 MiB protocol payload bound.
-pub(super) const MAX_STORED_IMAGE_BYTES: usize = 7 * 1024 * 1024;
+pub(crate) const MAX_STORED_IMAGE_BYTES: usize = 7 * 1024 * 1024;
 const MAX_DECODED_SIDE: u32 = 4096;
 /// Bounds concurrent upstream jobs and decoded image memory across all users.
 static IMAGE_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-pub(super) fn validate_image_prompt(prompt: &str) -> Result<()> {
+pub(crate) fn validate_image_prompt(prompt: &str) -> Result<()> {
     if prompt.len() > MAX_IMAGE_PROMPT_BYTES {
         bail!("image prompt must not exceed 4096 bytes")
     }
     Ok(())
 }
 
-pub(super) async fn image_models(app: &App) -> Result<Vec<String>> {
+pub(crate) async fn image_models(app: &App) -> Result<Vec<String>> {
     let config = load_broker_config(&app.db).await?;
     Ok(app
         .adapters
@@ -30,7 +32,7 @@ pub(super) async fn image_models(app: &App) -> Result<Vec<String>> {
 
 /// Generate one PNG. `square` uses the shorter configured side for both sides.
 /// `seed` repeats a composition across a series; `None` picks a random seed.
-pub(super) async fn generate_png(
+pub(crate) async fn generate_png(
     app: &App,
     prompt: &str,
     negative_prompt: &str,
@@ -116,7 +118,7 @@ pub(super) async fn generate_png(
 }
 
 /// Decode within fixed bounds and re-encode, dropping embedded workflow metadata.
-pub(super) fn normalize_png(bytes: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn normalize_png(bytes: &[u8]) -> Result<Vec<u8>> {
     use image::{ImageEncoder, codecs::png};
     let mut reader =
         image::ImageReader::with_format(io::Cursor::new(bytes), image::ImageFormat::Png);
@@ -148,7 +150,7 @@ pub(super) fn normalize_png(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Ask the text model for a visual prompt describing the latest scene.
-pub(super) async fn describe_scene(
+pub(crate) async fn describe_scene(
     app: &App,
     user_id: &str,
     conversation_id: &str,
@@ -238,7 +240,7 @@ pub(super) async fn describe_scene(
 }
 
 /// Persist an encrypted image message and its delta in one transaction.
-pub(super) async fn save_scene_image(
+pub(crate) async fn save_scene_image(
     app: &App,
     user_id: &str,
     conversation_id: &str,
@@ -284,7 +286,7 @@ pub(super) async fn save_scene_image(
     Ok((message_id, revision, changed))
 }
 
-pub(super) async fn load_message_image(
+pub(crate) async fn load_message_image(
     app: &App,
     user_id: &str,
     message_id: &str,
@@ -299,30 +301,4 @@ pub(super) async fn load_message_image(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::inference::auxiliary_completion_tests::test_app;
-
-    #[tokio::test]
-    async fn deleted_scene_image_leaves_the_timeline() {
-        let app = test_app("http://127.0.0.1:9").await;
-        let (id, _, _) = save_scene_image(&app, "owner", "chat", "a lake", b"png")
-            .await
-            .unwrap();
-        assert_eq!(
-            load_message_image(&app, "owner", &id).await.unwrap(),
-            b"png"
-        );
-        let mut transaction = app.db.begin().await.unwrap();
-        delete_owned_entity(&mut transaction, "owner", EntityKind::Message, &id)
-            .await
-            .unwrap();
-        transaction.commit().await.unwrap();
-        let view = load_owned_conversation(&app.db, "chat", "owner")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(view.messages.is_empty());
-        assert!(load_message_image(&app, "owner", &id).await.is_err());
-    }
-}
+mod tests;
