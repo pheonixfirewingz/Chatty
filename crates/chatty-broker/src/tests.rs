@@ -2046,3 +2046,13 @@ fn certificate_fingerprint_matches_the_gui_format() {
         "BA:78:16:BF:8F:01:CF:EA:41:41:40:DE:5D:AE:22:23:B0:03:61:A3:96:17:7A:9C:B4:10:FF:61:F2:00:15:AD"
     );
 }
+
+#[test]
+fn cleartext_inference_warning_ignores_loopback_and_https() {
+    assert!(sends_cleartext_off_host("http://192.168.0.97:11434/v1"));
+    assert!(sends_cleartext_off_host("http://inference.example/v1"));
+    assert!(!sends_cleartext_off_host("https://192.168.0.97:11434/v1"));
+    assert!(!sends_cleartext_off_host("http://127.0.0.1:11434/v1"));
+    assert!(!sends_cleartext_off_host("http://localhost:11434/v1"));
+    assert!(!sends_cleartext_off_host("http://[::1]:11434/v1"));
+}
