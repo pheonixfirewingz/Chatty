@@ -184,10 +184,14 @@ fn debug_messages(label: &str, messages: &[AdapterMessage], context_tokens: Opti
         estimated_context_used_percent = ?estimated_context_used_percent,
         "AI prompt usage (estimated before sending)"
     );
+    // Prompt bodies hold private chat content; log them only on request.
+    if !debug_enabled() {
+        return;
+    }
     for (i, msg) in messages.iter().enumerate() {
         let role = msg.role.as_str();
         let content = msg.content.as_str();
-        info!(
+        debug!(
             ai_operation = label,
             prompt_message_index = i,
             prompt_message_count = messages.len(),
