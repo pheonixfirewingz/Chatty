@@ -66,6 +66,8 @@ pub struct ChattyApp {
     pending_certificate: Option<PendingCertificate>,
     connected: bool,
     connecting: bool,
+    /// The network task is parked after an idle close or drop and waits for input.
+    link_parked: bool,
     restoring_session: bool,
     token: String,
     user_id: String,
@@ -219,6 +221,7 @@ impl ChattyApp {
             pending_certificate: None,
             connected: false,
             connecting: false,
+            link_parked: false,
             restoring_session: false,
             token: String::new(),
             user_id: String::new(),

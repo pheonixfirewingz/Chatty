@@ -126,6 +126,8 @@ impl ChattyApp {
                 let idle_closed = status == "Idle · reconnects on demand";
                 if status.contains("Offline:") || status.contains("Idle · offline:") || idle_closed
                 {
+                    // The network task parks after a drop; next input reconnects.
+                    self.link_parked = true;
                     // The broker cancels image jobs and drops in-flight replies when a socket closes.
                     self.scene_image = ImageJob::default();
                     self.portrait_image = ImageJob::default();
@@ -153,11 +155,13 @@ impl ChattyApp {
                 self.set_network_status(status);
             }
             Event::Connected { resuming_session } => {
+                self.link_parked = false;
                 self.connected = true;
                 self.connecting = false;
                 self.restoring_session = resuming_session;
             }
             Event::ConnectionFailed(message) => {
+                self.link_parked = false;
                 self.memory_state.condensing = false;
                 self.interrupt_models("Connection failed. Try again after reconnecting.");
                 self.pending_certificate = None;
@@ -175,6 +179,7 @@ impl ChattyApp {
                 self.pending_certificate = Some(certificate);
             }
             Event::Disconnected => {
+                self.link_parked = false;
                 self.interrupt_models("Disconnected. Refresh models after reconnecting.");
                 self.pending_certificate = None;
                 self.connected = false;

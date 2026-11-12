@@ -27,6 +27,12 @@ impl ChattyApp {
                 }
             })
             .discard(),
+            Message::UserInput => {
+                if std::mem::take(&mut self.link_parked) {
+                    let _ = self.commands.send(Command::Wake);
+                }
+                Task::none()
+            }
             Message::WindowFocusChanged(focused) => {
                 self.window_focused = focused;
                 Task::none()

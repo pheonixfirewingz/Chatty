@@ -285,7 +285,7 @@ async fn main() -> Result<()> {
     println!("TOKEN_EXPORT={token}");
 
     // ---- idle-close probe on connection #3 ------------------------------
-    // Login then go silent; broker must close us around IDLE_CLOSE (120s).
+    // Login then go silent; broker must close us around IDLE_CLOSE (180s).
     let mut quiet = Link::connect().await?;
     match quiet
         .rpc(Request::Login {

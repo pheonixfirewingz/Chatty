@@ -192,7 +192,7 @@ Passwords are hashed with Argon2. Concurrent Argon2 operations are capped at ten
 - Protocol allocation and decompression are bounded.
 - Active generation prevents idle close while the upstream model is silent.
 - Active Ollama lifecycle requests also prevent idle close; pulls have a six-hour upstream timeout. Up to four model downloads run concurrently across the broker. Progress is direct to the requesting connection, reports the current layer, and is coalesced to at most four updates per second plus the terminal update. Downloads never hold the SQLite snapshot gate. Same-model lifecycle operations are rejected while an operation is active; unrelated deletions remain available. Cancellation is scoped by connection and request ID, including before upstream connection establishment. Disconnect or transport failure cancels outstanding pulls. Partial blobs remain managed by the inference server.
-- Otherwise a connection quiet in both directions closes after 120 seconds; the GUI reconnects on demand and resumes from its revision.
+- Otherwise a connection quiet in both directions closes after 180 seconds; the GUI reconnects on the next keyboard or mouse input and resumes from its revision.
 - Disconnect cancels generation work owned by that connection.
 - Startup inference probing is best-effort and does not prevent the broker from accepting clients.
 - Systemd templates cap broker memory at 256 MiB.
