@@ -1942,3 +1942,14 @@ async fn custom_image_workflows_are_sent_with_filled_placeholders() {
     assert_eq!(graph["3"]["inputs"]["width"], 768);
     assert_eq!(graph["3"]["inputs"]["height"], 512);
 }
+
+#[test]
+fn unknown_user_login_verifies_a_real_dummy_hash() {
+    let parsed = PasswordHash::new(dummy_password_hash().unwrap()).unwrap();
+    assert_eq!(parsed.algorithm, argon2::Algorithm::default().ident());
+    assert!(
+        Argon2::default()
+            .verify_password(b"any password", &parsed)
+            .is_err()
+    );
+}
