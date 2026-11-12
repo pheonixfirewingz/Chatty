@@ -230,7 +230,7 @@ The admin portal reports:
 - Inference-adapter status, model count, and latency
 - A bounded list of recent broker errors
 
-The provided systemd units set `MemoryMax=256M`. Investigate sustained pressure before changing the limit. Argon2 work is capped at ten concurrent computations, writer queues are bounded to 32 frames per connection, and idle connections close after 120 seconds unless traffic or generation work keeps them active.
+The provided systemd units set `MemoryMax=256M`. Investigate sustained pressure before changing the limit. Argon2 work is capped at ten concurrent computations, writer queues are bounded to 32 frames per connection, and idle connections close after 180 seconds unless traffic or generation work keeps them active.
 
 ## Failure handling
 

@@ -107,3 +107,23 @@ fn sign_out_and_expiry_clear_account_state() {
         assert!(app.admin.admin_log.content.is_empty());
     }
 }
+
+#[test]
+fn input_wakes_a_parked_link_once() {
+    use crate::network::{Command, Event};
+    let mut app = Harness::signed_in();
+    app.update(Message::UserInput);
+    assert!(app.commands().is_empty(), "a live link ignores input");
+
+    app.event(Event::Status("Idle · reconnects on demand".into()));
+    app.update(Message::UserInput);
+    app.update(Message::UserInput);
+    let sent = app.commands();
+    assert!(matches!(sent.as_slice(), [Command::Wake]), "{sent:?}");
+
+    app.event(Event::Connected {
+        resuming_session: true,
+    });
+    app.update(Message::UserInput);
+    assert!(app.commands().is_empty());
+}

@@ -86,6 +86,24 @@ impl ChattyApp {
             Subscription::none()
         };
 
-        Subscription::batch(vec![net_sub, tts_sub, admin_sub, fifo_sub, guard_sub])
+        // Listens only while parked, so a live link pays nothing per event.
+        let wake_sub = if self.link_parked {
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { .. })
+                | iced::Event::Mouse(
+                    iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
+                )
+                | iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
+                    Some(Message::UserInput)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch(vec![
+            net_sub, tts_sub, admin_sub, fifo_sub, guard_sub, wake_sub,
+        ])
     }
 }

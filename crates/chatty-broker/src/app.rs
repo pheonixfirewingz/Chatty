@@ -27,7 +27,7 @@ const DELTA_BROADCAST_CAPACITY: usize = 256;
 /// Closes connections that go quiet in both directions. Clients hold their
 /// session token and Resume on demand; generation streams and admin monitor
 /// polling keep their own connection alive through traffic.
-pub(crate) const IDLE_CLOSE: Duration = Duration::from_secs(120);
+pub(crate) const IDLE_CLOSE: Duration = Duration::from_secs(180);
 
 #[derive(Clone)]
 pub(crate) struct App {

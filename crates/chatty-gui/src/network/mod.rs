@@ -33,6 +33,8 @@ pub(crate) enum Command {
     TrustCertificate(PendingCertificate),
     RejectCertificate,
     Disconnect,
+    /// User input while parked offline; reconnects without sending a request.
+    Wake,
     Request(Box<Request>),
     SendThenGenerate {
         message: Box<Request>,
@@ -272,7 +274,7 @@ pub(crate) async fn run(
         loop {
             tokio::select! {
                 command = next_command(&mut pending, &mut commands) => match command {
-                    Some(Command::Connect(_)) => {}
+                    Some(Command::Connect(_)) | Some(Command::Wake) => {}
                     Some(Command::TrustCertificate(_)) | Some(Command::RejectCertificate) => {}
                     Some(Command::Disconnect) => {
                         target = None;
@@ -362,8 +364,8 @@ pub(crate) async fn run(
             }
         }
         if reconnect && target.is_some() {
-            // The broker closes quiet connections; go on-demand until the
-            // client acts again.
+            // The broker closes quiet connections; stay offline until user
+            // input or a request wakes the link.
             if park_for_command(&mut pending, &mut commands)
                 .await
                 .is_none()

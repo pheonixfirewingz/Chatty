@@ -24,6 +24,8 @@ pub(crate) enum Message {
     /// A window opened and needs capture protection.
     WindowOpened(iced::window::Id),
     WindowFocusChanged(bool),
+    /// Keyboard or mouse input while the broker link is parked.
+    UserInput,
     ServerAddressChanged(String),
     TryConnect,
     LoginUsernameChanged(String),
