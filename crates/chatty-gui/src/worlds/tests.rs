@@ -286,3 +286,36 @@ fn test_world_dialog_view_creation() {
 
     let _element: Element<'_, WorldMessage> = world_dialog_view(&state);
 }
+
+#[test]
+fn lorebook_picked_starts_import_or_reports_error() {
+    let mut state = WorldDialogState::default();
+    assert_eq!(
+        state.update(&[], WorldMessage::ImportLorebook),
+        WorldAction::None
+    );
+    assert_eq!(
+        state.update(&[], WorldMessage::LorebookPicked(None)),
+        WorldAction::None
+    );
+    assert!(!state.import_pending);
+
+    let action = state.update(
+        &[],
+        WorldMessage::LorebookPicked(Some(Ok(("Eldoria".into(), "{}".into())))),
+    );
+    assert_eq!(
+        action,
+        WorldAction::Import {
+            source_name: "Eldoria".into(),
+            lorebook_json: "{}".into(),
+        }
+    );
+    assert!(state.import_pending);
+
+    let err_action = state.update(
+        &[],
+        WorldMessage::LorebookPicked(Some(Err("too big".into()))),
+    );
+    assert_eq!(err_action, WorldAction::Error("too big".into()));
+}

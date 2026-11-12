@@ -49,6 +49,8 @@ pub enum WorldMessage {
     EntryContentChanged { index: usize, content: String },
     /// Open file dialog and import a SillyTavern lorebook.
     ImportLorebook,
+    /// Result of picking and reading a SillyTavern lorebook file.
+    LorebookPicked(Option<Result<(String, String), String>>),
     /// Close the world lore dialog.
     Close,
 }
@@ -194,19 +196,18 @@ impl WorldDialogState {
                 }
                 WorldAction::None
             }
-            WorldMessage::ImportLorebook => {
-                if let Some((source_name, lorebook_json)) = pick_silly_tavern_lorebook() {
-                    self.import_pending = true;
-                    self.import_started = Some(Instant::now());
-                    self.import_notice = None;
-                    WorldAction::Import {
-                        source_name,
-                        lorebook_json,
-                    }
-                } else {
-                    WorldAction::None
+            WorldMessage::ImportLorebook => WorldAction::None,
+            WorldMessage::LorebookPicked(Some(Ok((source_name, lorebook_json)))) => {
+                self.import_pending = true;
+                self.import_started = Some(Instant::now());
+                self.import_notice = None;
+                WorldAction::Import {
+                    source_name,
+                    lorebook_json,
                 }
             }
+            WorldMessage::LorebookPicked(Some(Err(err))) => WorldAction::Error(err),
+            WorldMessage::LorebookPicked(None) => WorldAction::None,
             WorldMessage::Close => WorldAction::Close,
         }
     }
@@ -224,19 +225,29 @@ pub fn parse_silly_tavern_lorebook(bytes: &[u8]) -> Result<String, String> {
     Ok(text)
 }
 
-/// Prompts user to pick a SillyTavern JSON lorebook file.
-pub fn pick_silly_tavern_lorebook() -> Option<(String, String)> {
-    let path = rfd::FileDialog::new()
+/// Prompts user to pick a SillyTavern JSON lorebook file without blocking the UI thread.
+pub async fn pick_silly_tavern_lorebook_async() -> Option<Result<(String, String), String>> {
+    let handle = rfd::AsyncFileDialog::new()
         .add_filter("SillyTavern lorebook", &["json"])
-        .pick_file()?;
-    let bytes = std::fs::read(&path).ok()?;
-    let json = parse_silly_tavern_lorebook(&bytes).ok()?;
-    let source_name = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Imported world")
-        .replace(['_', '-'], " ");
-    Some((source_name, json))
+        .pick_file()
+        .await?;
+    let path = handle.path().to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        let bytes =
+            std::fs::read(&path).map_err(|error| format!("Could not read lorebook: {error}"))?;
+        let json = parse_silly_tavern_lorebook(&bytes)?;
+        let source_name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Imported world")
+            .replace(['_', '-'], " ");
+        Ok((source_name, json))
+    })
+    .await;
+    Some(match result {
+        Ok(outcome) => outcome,
+        Err(error) => Err(format!("Could not import lorebook: {error}")),
+    })
 }
 
 /// Filters entries based on title, content, or keywords.

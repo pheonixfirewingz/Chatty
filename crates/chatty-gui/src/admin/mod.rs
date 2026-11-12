@@ -61,6 +61,7 @@ pub enum AdminMessage {
     ImageNegativeChanged(String),
     LoadImageModels,
     LoadImageWorkflow,
+    ImageWorkflowLoaded(Option<Result<String, String>>),
     ClearImageWorkflow,
     ImageTestPromptChanged(String),
     TestImageGeneration,
@@ -650,8 +651,9 @@ impl AdminState {
                     session_token: session_token.to_string(),
                 }]
             }
-            AdminMessage::LoadImageWorkflow => {
-                match pick_image_workflow() {
+            AdminMessage::LoadImageWorkflow => vec![],
+            AdminMessage::ImageWorkflowLoaded(result) => {
+                match result {
                     Some(Ok(workflow)) => {
                         self.image_workflow_summary = workflow_summary(&workflow);
                         self.broker_config.image.workflow = workflow;
@@ -984,17 +986,24 @@ pub fn check_image_workflow(workflow: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Ask for an API-format workflow file. `None` means the dialog was cancelled.
-fn pick_image_workflow() -> Option<Result<String, String>> {
-    let path = rfd::FileDialog::new()
+/// Ask for an API-format workflow file without blocking the UI thread.
+pub async fn pick_image_workflow_async() -> Option<Result<String, String>> {
+    let handle = rfd::AsyncFileDialog::new()
         .add_filter("ComfyUI API workflow", &["json"])
-        .pick_file()?;
-    Some((|| {
+        .pick_file()
+        .await?;
+    let path = handle.path().to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
         let bytes =
             std::fs::read(&path).map_err(|error| format!("Could not read the file: {error}"))?;
         let workflow = String::from_utf8(bytes)
             .map_err(|_| "The workflow file is not UTF-8 text.".to_owned())?;
         check_image_workflow(&workflow)?;
         Ok(workflow)
-    })())
+    })
+    .await;
+    Some(match result {
+        Ok(outcome) => outcome,
+        Err(error) => Err(format!("Could not load workflow file: {error}")),
+    })
 }

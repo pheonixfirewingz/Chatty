@@ -319,6 +319,15 @@ impl DraftEditors {
     }
 }
 
+/// Result of reading and normalizing a batch of character image files off the UI thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedImageBatch {
+    pub images: Vec<CharacterImage>,
+    pub default_image_id: Option<String>,
+    pub errors: Vec<String>,
+    pub truncated: bool,
+}
+
 /// User actions within the character dialog, roster, and character editor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CharacterMessage {
@@ -338,8 +347,11 @@ pub enum CharacterMessage {
     Save,
     Delete,
     Export,
+    ExportFinished(Option<String>),
     Import,
+    ImportLoaded(Option<Result<Box<DraftCharacter>, String>>),
     AiImport,
+    AiImportLoaded(Option<Result<(String, String), String>>),
     CloseDialog,
 
     // Image gallery actions
@@ -351,6 +363,10 @@ pub enum CharacterMessage {
     /// Stop a running portrait or emotion generation.
     CancelImageGeneration,
     AddImageFolder,
+    ImagesLoaded {
+        epoch: u64,
+        batch: Option<Result<ImportedImageBatch, String>>,
+    },
     SetDefaultImage(String),
     DeleteImage(String),
     ImageLabelChanged {

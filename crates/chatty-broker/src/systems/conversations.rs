@@ -248,12 +248,13 @@ pub(super) async fn send_snapshot(
         let entity_id: String = row.get("id");
         let owner_id: String = row.get("owner_id");
         let owned_by_user = owner_id == user_id;
-        let mut images = decrypt_character_images(
-            &app.image_key,
-            &owner_id,
-            &entity_id,
-            row.get::<&[u8], _>("images"),
-        )?;
+        let stored = row.get::<&[u8], _>("images");
+        let mut images = if stored.is_empty() {
+            Vec::new()
+        } else {
+            let _permit = image_decrypt_permit(app).await?;
+            decrypt_character_images(&app.image_key, &owner_id, &entity_id, stored)?
+        };
         for image in &mut images {
             image.data.clear();
         }
@@ -545,7 +546,10 @@ pub(super) async fn check_conversation_characters(
     if kind == ConversationKind::Direct {
         bail!("a chat with several characters needs a group reply mode")
     }
-    let ids = participant_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let ids = participant_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     if check_world && !chatty_protocol::world::share_world(&load_worlds(db, uid).await?, &ids) {
         bail!("group characters must all belong to the same world; link them to one world first")
     }

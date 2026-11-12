@@ -108,12 +108,17 @@ struct App {
     recent_errors: Arc<Mutex<Vec<String>>>,
     log_path: Arc<PathBuf>,
     argon_gate: Arc<Semaphore>,
+    image_decrypt_gate: Arc<Semaphore>,
     image_key: Arc<[u8; 32]>,
 }
 
 /// Caps concurrent Argon2 computations so login/register bursts hold a fixed
 /// memory ceiling (10 x ~19 MiB) instead of one hash per in-flight attempt.
 const ARGON2_CONCURRENCY: usize = 10;
+
+/// Caps concurrent character-image blob queries and decryptions so burst fetches
+/// cannot stack ~15 MiB per request past the broker's memory ceiling.
+const IMAGE_DECRYPT_CONCURRENCY: usize = 2;
 
 /// Closes connections that go quiet in both directions. Clients hold their
 /// session token and Resume on demand; generation streams and admin monitor
@@ -142,6 +147,14 @@ async fn argon_permit(app: &App) -> Result<OwnedSemaphorePermit> {
         .acquire_owned()
         .await
         .map_err(|error| format_err!("argon gate unavailable: {error}"))
+}
+
+async fn image_decrypt_permit(app: &App) -> Result<OwnedSemaphorePermit> {
+    app.image_decrypt_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| format_err!("image decrypt gate unavailable: {error}"))
 }
 type Out = (MessageType, u64, Bytes);
 type CancellationRegistry = Arc<Mutex<HashMap<(String, u64), watch::Sender<bool>>>>;
@@ -328,6 +341,7 @@ async fn main() -> Result<()> {
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         log_path: Arc::new(args.log),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_decrypt_gate: Arc::new(Semaphore::new(IMAGE_DECRYPT_CONCURRENCY)),
         image_key,
     };
     app.adapters
@@ -960,50 +974,48 @@ async fn dispatch(
         }
         Request::ListCharacters { session_token } => {
             let uid = auth(&app.db, &session_token).await?;
-            let rows = sqlx::query(
+            let mut rows = sqlx::query(
                 "SELECT * FROM characters WHERE owner_id=? OR is_public=1 ORDER BY name LIMIT 500",
             )
             .bind(&uid)
-            .fetch_all(&app.db)
-            .await?;
-            let cs = rows
-                .into_iter()
-                .map(|r| -> Result<Character> {
-                    let id: String = r.get("id");
-                    let owner_id: String = r.get("owner_id");
-                    let owned_by_user = owner_id == uid;
-                    let mut images = decrypt_character_images(
-                        &app.image_key,
-                        &owner_id,
-                        &id,
-                        r.get::<&[u8], _>("images"),
-                    )?;
-                    for image in &mut images {
-                        image.data.clear();
-                    }
-                    Ok(Character {
-                        id,
-                        name: r.get("name"),
-                        description: r.get("description"),
-                        personality: r.get("personality"),
-                        scenario: r.get("scenario"),
-                        system_prompt: r.get("system_prompt"),
-                        example_dialogue: r.get("example_dialogue"),
-                        appearance: r.get("appearance"),
-                        age: r.get("age"),
-                        gender: r.get("gender"),
-                        race: r.get("race"),
-                        misc: r.get("misc"),
-                        tags: decode(r.get::<&[u8], _>("tags")).unwrap_or_default(),
-                        avatar: r.get("avatar"),
-                        default_image_id: r.get("default_image_id"),
-                        images,
-                        is_public: r.get("is_public"),
-                        owned_by_user,
-                        revision: r.get("revision"),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
+            .fetch(&app.db);
+            let mut cs = Vec::new();
+            while let Some(r) = rows.try_next().await? {
+                let id: String = r.get("id");
+                let owner_id: String = r.get("owner_id");
+                let owned_by_user = owner_id == uid;
+                let stored = r.get::<&[u8], _>("images");
+                let mut images = if stored.is_empty() {
+                    Vec::new()
+                } else {
+                    let _permit = image_decrypt_permit(&app).await?;
+                    decrypt_character_images(&app.image_key, &owner_id, &id, stored)?
+                };
+                for image in &mut images {
+                    image.data.clear();
+                }
+                cs.push(Character {
+                    id,
+                    name: r.get("name"),
+                    description: r.get("description"),
+                    personality: r.get("personality"),
+                    scenario: r.get("scenario"),
+                    system_prompt: r.get("system_prompt"),
+                    example_dialogue: r.get("example_dialogue"),
+                    appearance: r.get("appearance"),
+                    age: r.get("age"),
+                    gender: r.get("gender"),
+                    race: r.get("race"),
+                    misc: r.get("misc"),
+                    tags: decode(r.get::<&[u8], _>("tags")).unwrap_or_default(),
+                    avatar: r.get("avatar"),
+                    default_image_id: r.get("default_image_id"),
+                    images,
+                    is_public: r.get("is_public"),
+                    owned_by_user,
+                    revision: r.get("revision"),
+                });
+            }
             send!(MessageType::Response, Response::Characters(cs));
         }
         Request::GetCharacterImage {
@@ -1012,31 +1024,35 @@ async fn dispatch(
             image_id,
         } => {
             let uid = auth(&app.db, &session_token).await?;
-            let row = sqlx::query(
-                "SELECT owner_id,images FROM characters WHERE id=? AND (owner_id=? OR is_public=1)",
-            )
-            .bind(&character_id)
-            .bind(&uid)
-            .fetch_optional(&app.db)
-            .await?
-            .context("character image not found")?;
-            let owner_id: String = row.get("owner_id");
-            let images = decrypt_character_images(
-                &app.image_key,
-                &owner_id,
-                &character_id,
-                row.get::<&[u8], _>("images"),
-            )?;
-            let image = images
-                .into_iter()
-                .find(|image| image.id == image_id)
+            let data = {
+                let _permit = image_decrypt_permit(&app).await?;
+                let row = sqlx::query(
+                    "SELECT owner_id,images FROM characters WHERE id=? AND (owner_id=? OR is_public=1)",
+                )
+                .bind(&character_id)
+                .bind(&uid)
+                .fetch_optional(&app.db)
+                .await?
                 .context("character image not found")?;
+                let owner_id: String = row.get("owner_id");
+                let images = decrypt_character_images(
+                    &app.image_key,
+                    &owner_id,
+                    &character_id,
+                    row.get::<&[u8], _>("images"),
+                )?;
+                images
+                    .into_iter()
+                    .find(|image| image.id == image_id)
+                    .context("character image not found")?
+                    .data
+            };
             send!(
                 MessageType::Response,
                 Response::CharacterImage {
                     character_id,
                     image_id,
-                    data: image.data,
+                    data,
                 }
             );
         }
@@ -1363,27 +1379,34 @@ async fn dispatch(
             let uid = auth(&app.db, &session_token).await?;
             let mut operation = DeltaOperation::Add;
             if let Some(id) = &character.id {
-                let existing = sqlx::query("SELECT owner_id,images FROM characters WHERE id=?")
-                    .bind(id)
-                    .fetch_optional(&app.db)
-                    .await?;
-                if let Some(existing) = existing {
-                    let owner_id: String = existing.get("owner_id");
+                let owner_id: Option<String> =
+                    sqlx::query_scalar("SELECT owner_id FROM characters WHERE id=?")
+                        .bind(id)
+                        .fetch_optional(&app.db)
+                        .await?;
+                if let Some(owner_id) = owner_id {
                     if owner_id != uid {
                         bail!("forbidden character owner")
                     }
-                    let stored_images = decrypt_character_images(
-                        &app.image_key,
-                        &owner_id,
-                        id,
-                        existing.get::<&[u8], _>("images"),
-                    )?;
-                    for image in &mut character.images {
-                        if image.data.is_empty()
-                            && let Some(stored) =
-                                stored_images.iter().find(|stored| stored.id == image.id)
+                    if character.images.iter().any(|image| image.data.is_empty()) {
+                        let _permit = image_decrypt_permit(&app).await?;
+                        if let Some(stored) = sqlx::query_scalar::<_, Vec<u8>>(
+                            "SELECT images FROM characters WHERE id=?",
+                        )
+                        .bind(id)
+                        .fetch_optional(&app.db)
+                        .await?
                         {
-                            image.data.clone_from(&stored.data);
+                            let mut stored_images =
+                                decrypt_character_images(&app.image_key, &owner_id, id, &stored)?;
+                            for image in &mut character.images {
+                                if image.data.is_empty()
+                                    && let Some(stored_img) =
+                                        stored_images.iter_mut().find(|img| img.id == image.id)
+                                {
+                                    image.data = std::mem::take(&mut stored_img.data);
+                                }
+                            }
                         }
                     }
                     operation = DeltaOperation::Update;
@@ -1406,11 +1429,34 @@ async fn dispatch(
                     bail!("publishing characters is disabled")
                 }
             }
-            let mut visible_character = character.clone();
-            visible_character.owned_by_user = true;
-            for image in &mut visible_character.images {
-                image.data.clear();
-            }
+            let mut visible_character = CharacterInput {
+                id: character.id.clone(),
+                name: character.name.clone(),
+                description: character.description.clone(),
+                personality: character.personality.clone(),
+                scenario: character.scenario.clone(),
+                system_prompt: character.system_prompt.clone(),
+                example_dialogue: character.example_dialogue.clone(),
+                appearance: character.appearance.clone(),
+                age: character.age.clone(),
+                gender: character.gender.clone(),
+                race: character.race.clone(),
+                misc: character.misc.clone(),
+                tags: character.tags.clone(),
+                avatar: character.avatar.clone(),
+                images: character
+                    .images
+                    .iter()
+                    .map(|image| CharacterImage {
+                        id: image.id.clone(),
+                        label: image.label.clone(),
+                        data: Vec::new(),
+                    })
+                    .collect(),
+                default_image_id: character.default_image_id.clone(),
+                is_public: character.is_public,
+                owned_by_user: true,
+            };
             let changed = encode(&DeltaPayload::Character(Box::new(
                 visible_character.clone(),
             )))?;
@@ -1659,12 +1705,11 @@ async fn dispatch(
             {
                 bail!("conversation title or participant count invalid")
             }
-            let mut current_ids: Vec<String> = sqlx::query_scalar(
-                "SELECT character_id FROM participants WHERE conversation_id=?",
-            )
-            .bind(&conversation_id)
-            .fetch_all(&app.db)
-            .await?;
+            let mut current_ids: Vec<String> =
+                sqlx::query_scalar("SELECT character_id FROM participants WHERE conversation_id=?")
+                    .bind(&conversation_id)
+                    .fetch_all(&app.db)
+                    .await?;
             let mut requested_ids = participant_ids.clone();
             current_ids.sort();
             requested_ids.sort();

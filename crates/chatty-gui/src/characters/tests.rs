@@ -400,16 +400,30 @@ fn test_image_normalization() {
 #[test]
 fn image_cache_reuses_content_and_obeys_lru_entry_limit() {
     let mut cache = CharacterImageCache::default();
-    let first = cache.get_or_insert(&[1]).unwrap();
-    let second = cache.get_or_insert(&[2]).unwrap();
-    for n in 3..=MAX_CACHED_IMAGES as u8 {
-        cache.get_or_insert(&[n]).unwrap();
+    let first = cache.get_or_insert(&1usize.to_le_bytes()).unwrap();
+    let second = cache.get_or_insert(&2usize.to_le_bytes()).unwrap();
+    for n in 3..=MAX_CACHED_IMAGES {
+        cache.get_or_insert(&n.to_le_bytes()).unwrap();
     }
-    assert_eq!(cache.get_or_insert(&[1]).unwrap().id(), first.id());
-    cache.get_or_insert(&[99]).unwrap();
+    // Over 32 distinct portraits/thumbnails stay cached with stable IDs.
+    const { assert!(MAX_CACHED_IMAGES > 64) };
+    const { assert!(MAX_CACHED_IMAGE_BYTES >= 32 * 1024 * 1024) };
+    assert_eq!(
+        cache.get_or_insert(&1usize.to_le_bytes()).unwrap().id(),
+        first.id()
+    );
+    cache
+        .get_or_insert(&(MAX_CACHED_IMAGES + 100).to_le_bytes())
+        .unwrap();
     assert_eq!(cache.handles.len(), MAX_CACHED_IMAGES);
-    assert_eq!(cache.get_or_insert(&[1]).unwrap().id(), first.id());
-    assert_ne!(cache.get_or_insert(&[2]).unwrap().id(), second.id());
+    assert_eq!(
+        cache.get_or_insert(&1usize.to_le_bytes()).unwrap().id(),
+        first.id()
+    );
+    assert_ne!(
+        cache.get_or_insert(&2usize.to_le_bytes()).unwrap().id(),
+        second.id()
+    );
 
     // An image edited in place must get a different renderer identity.
     let mut bytes = vec![111, 112];
@@ -422,7 +436,8 @@ fn image_cache_reuses_content_and_obeys_lru_entry_limit() {
 fn image_cache_bounds_bytes_and_checks_hash_collisions() {
     use std::hash::{Hash, Hasher};
 
-    let mut cache = CharacterImageCache::default();
+    const TEST_MAX_BYTES: usize = 1024;
+    let mut cache = CharacterImageCache::with_limits(8, TEST_MAX_BYTES);
     let first = cache.get_or_insert(&[1, 2, 3]).unwrap();
     let mut hasher = std::hash::DefaultHasher::new();
     [4u8, 5, 6].as_slice().hash(&mut hasher);
@@ -430,18 +445,16 @@ fn image_cache_bounds_bytes_and_checks_hash_collisions() {
     assert_ne!(cache.get_or_insert(&[4, 5, 6]).unwrap().id(), first.id());
     cache.clear();
     for n in 1..=3 {
-        cache
-            .get_or_insert(&vec![n; MAX_CACHED_IMAGE_BYTES / 2])
-            .unwrap();
-        assert!(cache.retained_bytes <= MAX_CACHED_IMAGE_BYTES);
+        cache.get_or_insert(&vec![n; TEST_MAX_BYTES / 2]).unwrap();
+        assert!(cache.retained_bytes <= TEST_MAX_BYTES);
     }
     assert_eq!(cache.handles.len(), 2);
-    let oversized = vec![9; MAX_CACHED_IMAGE_BYTES + 1];
+    let oversized = vec![9; TEST_MAX_BYTES + 1];
     let first = cache.get_or_insert(&oversized).unwrap();
     let second = cache.get_or_insert(&oversized).unwrap();
     assert_ne!(first.id(), second.id());
     assert_eq!(cache.handles.len(), 2);
-    assert_eq!(cache.retained_bytes, MAX_CACHED_IMAGE_BYTES);
+    assert_eq!(cache.retained_bytes, TEST_MAX_BYTES);
     cache.clear();
     assert_eq!(cache.retained_bytes, 0);
     assert!(cache.handles.is_empty());

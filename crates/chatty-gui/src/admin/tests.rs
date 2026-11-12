@@ -654,3 +654,32 @@ mod image_settings {
         assert!(!shares_chat_host("", ""));
     }
 }
+
+#[test]
+fn image_workflow_loaded_updates_workflow_or_sets_notice() {
+    let mut state = AdminState::default();
+    assert!(
+        state
+            .update(AdminMessage::LoadImageWorkflow, "admin")
+            .is_empty()
+    );
+    assert!(
+        state
+            .update(
+                AdminMessage::ImageWorkflowLoaded(Some(Ok("{\"1\":{}}".into()))),
+                "admin"
+            )
+            .is_empty()
+    );
+    assert_eq!(state.broker_config.image.workflow, "{\"1\":{}}");
+    assert_eq!(
+        state.image_notice.as_deref(),
+        Some("Workflow loaded. Save image settings to use it.")
+    );
+
+    state.update(
+        AdminMessage::ImageWorkflowLoaded(Some(Err("bad workflow".into()))),
+        "admin",
+    );
+    assert_eq!(state.image_notice.as_deref(), Some("bad workflow"));
+}

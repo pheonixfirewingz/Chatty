@@ -25,9 +25,9 @@ pub fn normalize_character_image_png(source: &[u8]) -> std::result::Result<Vec<u
     Ok(output.into_inner())
 }
 
-pub(super) const MAX_CACHED_IMAGES: usize = 32;
+pub(super) const MAX_CACHED_IMAGES: usize = 512;
 
-pub(super) const MAX_CACHED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_CACHED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 thread_local! {
     // Iced builds views on the UI thread. Reuse identities so its renderer can
@@ -48,13 +48,31 @@ pub fn clear_image_handles() {
 }
 
 /// Least-recently-used encoded images, bounded by both bytes and entry count.
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct CharacterImageCache {
     pub(super) handles: std::collections::VecDeque<(u64, iced::widget::image::Handle)>,
     pub(super) retained_bytes: usize,
+    max_images: usize,
+    max_bytes: usize,
+}
+
+impl Default for CharacterImageCache {
+    fn default() -> Self {
+        Self::with_limits(MAX_CACHED_IMAGES, MAX_CACHED_IMAGE_BYTES)
+    }
 }
 
 impl CharacterImageCache {
+    #[must_use]
+    pub fn with_limits(max_images: usize, max_bytes: usize) -> Self {
+        Self {
+            handles: std::collections::VecDeque::new(),
+            retained_bytes: 0,
+            max_images: max_images.max(1),
+            max_bytes,
+        }
+    }
+
     pub fn get_or_insert(&mut self, bytes: &[u8]) -> Option<iced::widget::image::Handle> {
         use std::hash::{Hash, Hasher};
 
@@ -74,9 +92,9 @@ impl CharacterImageCache {
         }
 
         let handle = iced::widget::image::Handle::from_bytes(bytes.to_vec());
-        if bytes.len() <= MAX_CACHED_IMAGE_BYTES {
-            while self.handles.len() >= MAX_CACHED_IMAGES
-                || self.retained_bytes + bytes.len() > MAX_CACHED_IMAGE_BYTES
+        if bytes.len() <= self.max_bytes {
+            while self.handles.len() >= self.max_images
+                || self.retained_bytes + bytes.len() > self.max_bytes
             {
                 if let Some((_, iced::widget::image::Handle::Bytes(_, data))) =
                     self.handles.pop_front()

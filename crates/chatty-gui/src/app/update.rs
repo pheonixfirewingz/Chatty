@@ -218,16 +218,10 @@ impl ChattyApp {
             }
             Message::InspectControl(cmd) => self.inspect_control(&cmd),
             Message::Character(msg) => self.update_character(msg),
-            Message::World(msg) => {
-                self.update_world(msg);
-                Task::none()
-            }
+            Message::World(msg) => self.update_world(msg),
             Message::Memory(msg) => self.update_memory(msg),
             Message::Conversation(msg) => self.update_conversation(msg),
-            Message::Admin(msg) => {
-                self.update_admin(msg);
-                Task::none()
-            }
+            Message::Admin(msg) => self.update_admin(msg),
             Message::Tts(event) => {
                 self.update_tts(event);
                 Task::none()
@@ -460,8 +454,37 @@ impl ChattyApp {
         }
     }
 
-    pub(super) fn update_world(&mut self, msg: WorldMessage) {
-        let action = self.world_state.update(&self.worlds, msg);
+    pub(super) fn update_world(&mut self, msg: WorldMessage) -> Task<Message> {
+        match msg {
+            WorldMessage::ImportLorebook => {
+                if self.file_dialog_open || self.world_state.import_pending {
+                    return Task::none();
+                }
+                self.file_dialog_open = true;
+                return Task::perform(
+                    crate::worlds::pick_silly_tavern_lorebook_async(),
+                    |outcome| Message::World(WorldMessage::LorebookPicked(outcome)),
+                );
+            }
+            WorldMessage::LorebookPicked(outcome) => {
+                self.file_dialog_open = false;
+                if self.token.is_empty() {
+                    return Task::none();
+                }
+                let action = self
+                    .world_state
+                    .update(&self.worlds, WorldMessage::LorebookPicked(outcome));
+                self.apply_world_action(action);
+            }
+            other => {
+                let action = self.world_state.update(&self.worlds, other);
+                self.apply_world_action(action);
+            }
+        }
+        Task::none()
+    }
+
+    fn apply_world_action(&mut self, action: WorldAction) {
         match action {
             WorldAction::Save(world) => {
                 self.send(Request::SaveWorld {
@@ -553,7 +576,7 @@ impl ChattyApp {
         Task::none()
     }
 
-    pub(super) fn update_admin(&mut self, msg: AdminMessage) {
+    pub(super) fn update_admin(&mut self, msg: AdminMessage) -> Task<Message> {
         if matches!(msg, AdminMessage::CloseDialog) {
             self.screen = Screen::Chat;
         } else if matches!(msg, AdminMessage::RefreshMonitor) {
@@ -562,12 +585,31 @@ impl ChattyApp {
             if let Some(id) = self.admin.models.cancel_download(model) {
                 let _ = self.commands.send(Command::Cancel(id));
             }
+        } else if matches!(msg, AdminMessage::LoadImageWorkflow) {
+            if self.file_dialog_open {
+                return Task::none();
+            }
+            self.file_dialog_open = true;
+            return Task::perform(admin::pick_image_workflow_async(), |outcome| {
+                Message::Admin(AdminMessage::ImageWorkflowLoaded(outcome))
+            });
+        } else if let AdminMessage::ImageWorkflowLoaded(outcome) = msg {
+            self.file_dialog_open = false;
+            if !self.token.is_empty() {
+                let reqs = self
+                    .admin
+                    .update(AdminMessage::ImageWorkflowLoaded(outcome), &self.token);
+                for req in reqs {
+                    self.send(req);
+                }
+            }
         } else {
             let reqs = self.admin.update(msg, &self.token);
             for req in reqs {
                 self.send(req);
             }
         }
+        Task::none()
     }
 
     pub(super) fn update_tts(&mut self, event: TtsEvent) {

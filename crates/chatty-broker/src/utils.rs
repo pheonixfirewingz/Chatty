@@ -1,7 +1,7 @@
 use super::*;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadInPlace, KeyInit, Payload},
 };
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -48,20 +48,19 @@ fn encrypt_image_bytes(key: &[u8; 32], aad: &str, plaintext: &[u8]) -> Result<Ve
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut nonce)
         .map_err(|error| format_err!("generate image encryption nonce: {error}"))?;
-    let ciphertext = XChaCha20Poly1305::new(key.into())
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(|_| format_err!("encrypt image"))?;
-    let mut stored =
-        Vec::with_capacity(IMAGE_CIPHERTEXT_MAGIC.len() + nonce.len() + ciphertext.len());
+    let header_len = IMAGE_CIPHERTEXT_MAGIC.len() + nonce.len();
+    let mut stored = Vec::with_capacity(header_len + plaintext.len() + 16);
     stored.extend_from_slice(IMAGE_CIPHERTEXT_MAGIC);
     stored.extend_from_slice(&nonce);
-    stored.extend_from_slice(&ciphertext);
+    stored.extend_from_slice(plaintext);
+    let tag = XChaCha20Poly1305::new(key.into())
+        .encrypt_in_place_detached(
+            XNonce::from_slice(&nonce),
+            aad.as_bytes(),
+            &mut stored[header_len..],
+        )
+        .map_err(|_| format_err!("encrypt image"))?;
+    stored.extend_from_slice(&tag);
     Ok(stored)
 }
 
@@ -96,7 +95,7 @@ pub(super) fn encrypt_character_images(
     encrypt_image_bytes(
         key,
         &format!("{owner_id}:{character_id}"),
-        &encode(&images.to_vec())?,
+        &encode(&images)?,
     )
 }
 

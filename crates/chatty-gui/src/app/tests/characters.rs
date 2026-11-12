@@ -163,3 +163,212 @@ fn listed_character_images_are_fetched_and_kept() {
     assert_eq!(fetches(&mut app), 0);
     assert_eq!(app.characters[0].images[0].data, png);
 }
+
+#[test]
+fn character_image_fetches_are_paced_with_default_first() {
+    let mut app = Harness::demo();
+    app.token = "token".into();
+    let mut base = app.characters[0].clone();
+    base.id = "c-many".into();
+    base.images = (0..25)
+        .map(|i| CharacterImage {
+            id: format!("img-{i}"),
+            label: format!("mood {i}"),
+            data: Vec::new(),
+        })
+        .collect();
+    base.default_image_id = Some("img-20".into());
+
+    app.set_characters(vec![base]);
+    let batch1: Vec<_> = app
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::GetCharacterImage {
+                character_id,
+                image_id,
+                ..
+            } => Some((character_id, image_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(batch1.len(), 2, "at most 2 fetches start immediately");
+    assert_eq!(batch1[0].1, "img-20", "default portrait is fetched first");
+
+    // A normal response frees one slot and advances the queue.
+    let sample = png(128);
+    app.event(Event::CharacterImageRequestStarted {
+        request_id: 100,
+        character_id: batch1[0].0.clone(),
+        image_id: batch1[0].1.clone(),
+    });
+    app.respond(
+        100,
+        &Response::CharacterImage {
+            character_id: batch1[0].0.clone(),
+            image_id: batch1[0].1.clone(),
+            data: sample.clone(),
+        },
+    );
+    let batch2: Vec<_> = app
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::GetCharacterImage { image_id, .. } => Some(image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(batch2.len(), 1, "exactly 1 replacement fetch starts");
+
+    // A per-image error frees its slot without showing a modal error.
+    app.event(Event::CharacterImageRequestStarted {
+        request_id: 101,
+        character_id: batch1[1].0.clone(),
+        image_id: batch1[1].1.clone(),
+    });
+    app.fail(101, "transient error");
+    assert!(app.error.is_none());
+
+    let mut pending = vec![batch2[0].clone()];
+    let next: Vec<_> = app
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::GetCharacterImage { image_id, .. } => Some(image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(next.len(), 1);
+    pending.extend(next);
+
+    let mut req_id = 102;
+    let mut completed = 1;
+    while let Some(image_id) = pending.pop() {
+        app.event(Event::CharacterImageRequestStarted {
+            request_id: req_id,
+            character_id: "c-many".into(),
+            image_id: image_id.clone(),
+        });
+        app.respond(
+            req_id,
+            &Response::CharacterImage {
+                character_id: "c-many".into(),
+                image_id,
+                data: sample.clone(),
+            },
+        );
+        req_id += 1;
+        completed += 1;
+        for request in app.requests() {
+            if let Request::GetCharacterImage { image_id, .. } = request {
+                pending.push(image_id);
+            }
+        }
+    }
+    assert_eq!(completed, 24);
+    assert_eq!(app.characters[0].images[20].data, sample);
+}
+
+#[test]
+fn saving_new_character_reuses_pending_saved_images_without_refetching() {
+    let mut app = Harness::signed_in();
+    app.draft_character_open = true;
+    app.draft = DraftCharacter {
+        id: None,
+        name: "Mara".into(),
+        images: (0..22)
+            .map(|i| CharacterImage {
+                id: format!("img-{i}"),
+                label: format!("pose {i}"),
+                data: png(128),
+            })
+            .collect(),
+        default_image_id: Some("img-0".into()),
+        ..DraftCharacter::default()
+    };
+
+    app.update(CharacterMessage::Save);
+    assert!(!app.draft_character_open);
+    assert_eq!(app.pending_saved_images.len(), 22);
+    let _ = app.requests();
+
+    // Broker assigns a new character ID and responds with metadata-only listings.
+    let listed = chatty_protocol::Character {
+        id: "new-char-id".into(),
+        name: "Mara".into(),
+        description: String::new(),
+        personality: String::new(),
+        scenario: String::new(),
+        system_prompt: String::new(),
+        example_dialogue: String::new(),
+        appearance: String::new(),
+        age: String::new(),
+        gender: String::new(),
+        race: String::new(),
+        misc: String::new(),
+        tags: Vec::new(),
+        avatar: None,
+        images: (0..22)
+            .map(|i| CharacterImage {
+                id: format!("img-{i}"),
+                label: format!("pose {i}"),
+                data: Vec::new(),
+            })
+            .collect(),
+        default_image_id: Some("img-0".into()),
+        is_public: false,
+        owned_by_user: true,
+        revision: 1,
+    };
+    app.set_characters(vec![listed]);
+    assert!(
+        !app.requests()
+            .iter()
+            .any(|request| matches!(request, Request::GetCharacterImage { .. })),
+        "newly saved images must be reused without refetching"
+    );
+    assert!(app.pending_saved_images.is_empty());
+    assert!(
+        app.characters[0]
+            .images
+            .iter()
+            .all(|image| !image.data.is_empty())
+    );
+}
+
+#[test]
+fn stale_image_batch_and_reentrant_file_dialogs_are_ignored() {
+    let mut app = Harness::signed_in();
+    app.draft_character_open = true;
+    let old_epoch = app.draft_epoch;
+
+    app.file_dialog_open = true;
+    assert_eq!(app.update_units(CharacterMessage::AddImages), 0);
+    assert_eq!(app.update_units(CharacterMessage::Import), 0);
+    assert_eq!(
+        app.update_units(crate::worlds::WorldMessage::ImportLorebook),
+        0
+    );
+    assert_eq!(
+        app.update_units(crate::admin::AdminMessage::LoadImageWorkflow),
+        0
+    );
+
+    // Switching drafts bumps draft_epoch so late image batches are dropped.
+    app.update(CharacterMessage::New);
+    app.update(CharacterMessage::ImagesLoaded {
+        epoch: old_epoch,
+        batch: Some(Ok(characters::ImportedImageBatch {
+            images: vec![CharacterImage {
+                id: "stale".into(),
+                label: "stale".into(),
+                data: png(128),
+            }],
+            default_image_id: Some("stale".into()),
+            errors: Vec::new(),
+            truncated: false,
+        })),
+    });
+    assert!(!app.file_dialog_open);
+    assert!(app.draft.images.is_empty());
+}

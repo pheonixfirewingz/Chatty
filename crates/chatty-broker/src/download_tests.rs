@@ -139,6 +139,7 @@ async fn app(url: &str) -> App {
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         log_path: Arc::new(PathBuf::new()),
         argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+        image_decrypt_gate: Arc::new(Semaphore::new(IMAGE_DECRYPT_CONCURRENCY)),
         image_key: Arc::new([7; 32]),
     }
 }

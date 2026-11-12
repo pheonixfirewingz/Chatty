@@ -457,8 +457,12 @@ fn new_chat_blocks_characters_outside_a_shared_world() {
     });
 
     app.update(ConversationMessage::OpenNewChatDialog);
-    app.update(ConversationMessage::ToggleNewChatCharacter("assistant".into()));
-    app.update(ConversationMessage::ToggleNewChatCharacter("outsider".into()));
+    app.update(ConversationMessage::ToggleNewChatCharacter(
+        "assistant".into(),
+    ));
+    app.update(ConversationMessage::ToggleNewChatCharacter(
+        "outsider".into(),
+    ));
     assert_eq!(app.selected_characters, ["assistant"]);
 
     app.update(ConversationMessage::ToggleNewChatCharacter("bob".into()));
@@ -542,7 +546,9 @@ fn group_conversations_stay_in_the_list_and_open_when_created() {
     // Creating a new group opens it as soon as its delta and acceptance arrive.
     app.selected_conversation = Some("direct".into());
     app.update(ConversationMessage::OpenNewChatDialog);
-    app.update(ConversationMessage::ToggleNewChatCharacter("assistant".into()));
+    app.update(ConversationMessage::ToggleNewChatCharacter(
+        "assistant".into(),
+    ));
     app.update(ConversationMessage::ToggleNewChatCharacter("bob".into()));
     app.update(ConversationMessage::CreateNewChat);
     assert!(app.pending_new_conversation);
@@ -575,10 +581,7 @@ fn group_conversations_stay_in_the_list_and_open_when_created() {
         },
     );
     assert!(!app.pending_new_conversation);
-    assert_eq!(
-        app.selected_conversation.as_deref(),
-        Some("created-group")
-    );
+    assert_eq!(app.selected_conversation.as_deref(), Some("created-group"));
     assert!(app.requests().iter().any(|request| matches!(
         request,
         Request::GetConversation { conversation_id, .. } if conversation_id == "created-group"

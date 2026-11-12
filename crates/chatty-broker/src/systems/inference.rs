@@ -526,7 +526,9 @@ const GROUP_USER_NAME: &str = "User";
 /// Join neighbouring turns that share a role. In a group several people speak
 /// between the speaker's own turns, and some chat templates reject two user
 /// turns in a row. `history` is newest first, and so is the result.
-fn merge_same_role_turns(history: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+fn merge_same_role_turns(
+    history: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
     let mut merged: Vec<(String, String)> = Vec::new();
     for (role, content) in history {
         match merged.last_mut() {
@@ -647,7 +649,11 @@ impl SpeakerFilter {
                     (start, text[after..start].contains('\n'))
                 }
                 (false, NamePrefix::Undecided) if !finished => {
-                    return ReplyBounds { start: 0, end: 0, stop: false };
+                    return ReplyBounds {
+                        start: 0,
+                        end: 0,
+                        stop: false,
+                    };
                 }
                 _ => (0, false),
             };
@@ -655,13 +661,23 @@ impl SpeakerFilter {
             let mut undecided = false;
             for name in &self.others {
                 match name_prefix(&text[start..], name) {
-                    NamePrefix::Yes(_) => return ReplyBounds { start, end: start, stop: true },
+                    NamePrefix::Yes(_) => {
+                        return ReplyBounds {
+                            start,
+                            end: start,
+                            stop: true,
+                        };
+                    }
                     NamePrefix::Undecided => undecided = true,
                     NamePrefix::No => {}
                 }
             }
             if undecided && !finished {
-                return ReplyBounds { start, end: start, stop: false };
+                return ReplyBounds {
+                    start,
+                    end: start,
+                    stop: false,
+                };
             }
         }
         // The first line is never cut: an empty reply helps no one.
@@ -671,16 +687,30 @@ impl SpeakerFilter {
             let mut undecided = false;
             for name in &self.others {
                 match name_prefix(line, name) {
-                    NamePrefix::Yes(_) => return ReplyBounds { start, end: newline, stop: true },
+                    NamePrefix::Yes(_) => {
+                        return ReplyBounds {
+                            start,
+                            end: newline,
+                            stop: true,
+                        };
+                    }
                     NamePrefix::Undecided => undecided = true,
                     NamePrefix::No => {}
                 }
             }
             if undecided && !finished {
-                return ReplyBounds { start, end: newline, stop: false };
+                return ReplyBounds {
+                    start,
+                    end: newline,
+                    stop: false,
+                };
             }
         }
-        ReplyBounds { start, end: text.len(), stop: false }
+        ReplyBounds {
+            start,
+            end: text.len(),
+            stop: false,
+        }
     }
 }
 
@@ -697,7 +727,11 @@ impl ReplyText {
         Self {
             raw: String::new(),
             filter,
-            bounds: ReplyBounds { start: 0, end: 0, stop: false },
+            bounds: ReplyBounds {
+                start: 0,
+                end: 0,
+                stop: false,
+            },
             sent: 0,
         }
     }
@@ -723,7 +757,11 @@ impl ReplyText {
     fn rescan(&mut self, finished: bool) {
         self.bounds = match &self.filter {
             Some(filter) => filter.bounds(&self.raw, finished),
-            None => ReplyBounds { start: 0, end: self.raw.len(), stop: false },
+            None => ReplyBounds {
+                start: 0,
+                end: self.raw.len(),
+                stop: false,
+            },
         };
     }
 
@@ -742,7 +780,11 @@ impl ReplyText {
     /// The reply to store.
     fn content(&self) -> &str {
         let text = &self.raw[self.bounds.start..self.bounds.end];
-        if self.filter.is_some() { text.trim_end() } else { text }
+        if self.filter.is_some() {
+            text.trim_end()
+        } else {
+            text
+        }
     }
 }
 
@@ -904,9 +946,8 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         }
         response=response_future=>response?
     };
-    let mut reply = ReplyText::new(
-        group_speaker.map(|speaker| SpeakerFilter::new(&participants, speaker)),
-    );
+    let mut reply =
+        ReplyText::new(group_speaker.map(|speaker| SpeakerFilter::new(&participants, speaker)));
     let mut seq = 0;
     let mut deadline = Instant::now() + Duration::from_millis(60);
     let mut cancelled = false;
@@ -1037,12 +1078,13 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         bail!("model returned an empty response; the context or output limit may be too small")
     }
     let character_owner: String = character.get("owner_id");
-    let character_images = decrypt_character_images(
-        &app.image_key,
-        &character_owner,
-        &sid,
-        character.get::<&[u8], _>("images"),
-    )?;
+    let stored = character.get::<&[u8], _>("images");
+    let character_images = if stored.is_empty() {
+        Vec::new()
+    } else {
+        let _permit = image_decrypt_permit(app).await?;
+        decrypt_character_images(&app.image_key, &character_owner, &sid, stored)?
+    };
     let default_image_id: Option<String> = character.get("default_image_id");
     // Persist with the default portrait; classification follows off the reply path.
     let image_id = default_image_id
@@ -1419,6 +1461,7 @@ pub(super) mod auxiliary_completion_tests {
             recent_errors: Arc::new(Mutex::new(Vec::new())),
             log_path: Arc::new(PathBuf::new()),
             argon_gate: Arc::new(Semaphore::new(ARGON2_CONCURRENCY)),
+            image_decrypt_gate: Arc::new(Semaphore::new(IMAGE_DECRYPT_CONCURRENCY)),
             image_key: Arc::new([7; 32]),
         }
     }
@@ -1787,7 +1830,13 @@ mod speaker_tests {
     #[test]
     fn group_replies_stop_before_another_speakers_line() {
         // The opening name is dropped; Ann's line and later text never show.
-        let (shown, stored) = stream(&["Bo", "b: Evening.", "\nIt is cold.\n", "An", "n: Hi Bob!\nUser: hey"]);
+        let (shown, stored) = stream(&[
+            "Bo",
+            "b: Evening.",
+            "\nIt is cold.\n",
+            "An",
+            "n: Hi Bob!\nUser: hey",
+        ]);
         assert_eq!(shown, "Evening.\nIt is cold.");
         assert_eq!(stored, "Evening.\nIt is cold.");
         // An own-name prefix followed by a newline still rejects another speaker's line.

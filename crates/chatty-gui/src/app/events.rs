@@ -114,6 +114,14 @@ impl ChattyApp {
                 self.message_image_request_ids
                     .insert(request_id, message_id);
             }
+            Event::CharacterImageRequestStarted {
+                request_id,
+                character_id,
+                image_id,
+            } => {
+                self.character_image_request_ids
+                    .insert(request_id, (character_id, image_id));
+            }
             Event::Status(status) => {
                 if status.contains("Offline:") || status.contains("Idle · offline:") {
                     // The broker cancels image jobs when their connection closes.
@@ -123,6 +131,9 @@ impl ChattyApp {
                     self.admin.image_test.pending = false;
                     self.message_image_requests.clear();
                     self.message_image_request_ids.clear();
+                    self.character_image_requests.clear();
+                    self.character_image_queue.clear();
+                    self.character_image_request_ids.clear();
                     self.memory_state.condensing = false;
                     self.interrupt_models(
                         "Connection interrupted. Refresh to check whether the operation finished on the server.",
@@ -191,6 +202,10 @@ impl ChattyApp {
         self.role = None;
         self.context_usage.clear();
         self.character_image_requests.clear();
+        self.character_image_queue.clear();
+        self.character_image_request_ids.clear();
+        self.pending_saved_images.clear();
+        self.draft_epoch += 1;
         self.clear_image_jobs();
     }
 
@@ -366,6 +381,7 @@ impl ChattyApp {
                             image_id,
                             data,
                         } => {
+                            self.character_image_request_ids.remove(&frame.request_id);
                             self.store_character_image(&character_id, &image_id, data);
                         }
                         Response::Conversations(v) => {
@@ -673,8 +689,33 @@ impl ChattyApp {
                     }
                 }
             }
+            MessageType::Error
+                if self
+                    .character_image_request_ids
+                    .contains_key(&frame.request_id) =>
+            {
+                let Some(key) = self.character_image_request_ids.remove(&frame.request_id) else {
+                    return;
+                };
+                self.character_image_requests.remove(&key);
+                if let Ok(WireError {
+                    code: ErrorCode::Unauthorized,
+                    message,
+                    ..
+                }) = decode::<WireError>(&frame.payload)
+                    && !self.token.is_empty()
+                    && self
+                        .error
+                        .as_ref()
+                        .is_none_or(|notice| notice.message != message)
+                {
+                    self.set_error(message);
+                }
+                self.pump_character_image_requests();
+            }
             MessageType::Error => {
                 self.pending_new_conversation = false;
+                self.pending_saved_images.clear();
                 self.world_state.import_pending = false;
                 self.world_state.import_started = None;
                 self.char_import_pending = false;
@@ -797,7 +838,8 @@ impl ChattyApp {
                     summary: summary.clone(),
                     revision: d.revision,
                 };
-                if let Some(existing) = self.conversations.iter_mut().find(|c| c.id == d.entity_id) {
+                if let Some(existing) = self.conversations.iter_mut().find(|c| c.id == d.entity_id)
+                {
                     *existing = updated;
                 } else {
                     self.conversations.insert(0, updated);

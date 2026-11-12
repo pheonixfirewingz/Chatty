@@ -58,6 +58,12 @@ pub(crate) enum Event {
         request_id: u64,
         message_id: String,
     },
+    /// A character portrait fetch was sent; failures free a queue slot quietly.
+    CharacterImageRequestStarted {
+        request_id: u64,
+        character_id: String,
+        image_id: String,
+    },
     Status(String),
     Connected {
         resuming_session: bool,
@@ -283,6 +289,12 @@ pub(crate) async fn run(
                             let _ = events.send(Event::ImageRequestStarted { request_id: next_id, scene });
                         } else if let Request::GetMessageImage { message_id, .. } = &*request {
                             let _ = events.send(Event::MessageImageRequestStarted { request_id: next_id, message_id: message_id.clone() });
+                        } else if let Request::GetCharacterImage { character_id, image_id, .. } = &*request {
+                            let _ = events.send(Event::CharacterImageRequestStarted {
+                                request_id: next_id,
+                                character_id: character_id.clone(),
+                                image_id: image_id.clone(),
+                            });
                         }
                         if matches!(&*request, Request::Logout { .. }) {
                             remembered = None;

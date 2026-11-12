@@ -2,13 +2,16 @@
 
 use crate::app::{ChattyApp, EmotionBatch, ImageJob, Message};
 use crate::characters;
-use crate::characters::{CharacterMessage, DraftCharacter};
+use crate::characters::{CharacterMessage, DraftCharacter, ImportedImageBatch};
 use crate::network::Command;
 use chatty_protocol::{Character, CharacterImage, CharacterInput, EntityKind, Request};
 use iced::Task;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Instant;
+
+/// Maximum concurrent `GetCharacterImage` requests to avoid overwhelming the broker.
+const MAX_IN_FLIGHT_CHARACTER_IMAGES: usize = 2;
 
 impl ChattyApp {
     pub(super) fn update_character(&mut self, msg: CharacterMessage) -> Task<Message> {
@@ -37,6 +40,12 @@ impl ChattyApp {
             }
             CharacterMessage::Save if self.portrait_image.pending => {}
             CharacterMessage::Save => {
+                for image in &self.draft.images {
+                    if !image.data.is_empty() {
+                        self.pending_saved_images
+                            .insert(image.id.clone(), image.data.clone());
+                    }
+                }
                 let input = CharacterInput::from(&self.draft);
                 self.send(Request::UpsertCharacter {
                     session_token: self.token.clone(),
@@ -85,11 +94,66 @@ impl ChattyApp {
                     });
                 }
             }
-            CharacterMessage::Export => self.export_character(),
-            CharacterMessage::Import => self.import_character(),
-            CharacterMessage::AiImport => self.ai_import_character(),
-            CharacterMessage::AddImages => self.add_character_images(),
-            CharacterMessage::AddImageFolder => self.add_character_image_folder(),
+            CharacterMessage::Export => return self.export_character(),
+            CharacterMessage::ExportFinished(error) => {
+                self.file_dialog_open = false;
+                if let Some(error) = error {
+                    self.set_error(error);
+                }
+            }
+            CharacterMessage::Import => return self.import_character(),
+            CharacterMessage::ImportLoaded(outcome) => {
+                self.file_dialog_open = false;
+                if self.draft_character_open
+                    && !self.token.is_empty()
+                    && let Some(result) = outcome
+                {
+                    match result {
+                        Ok(draft) => {
+                            self.cancel_portrait_generation();
+                            self.set_draft(*draft);
+                            self.draft_world_ids.clear();
+                        }
+                        Err(error) => self.set_error(error),
+                    }
+                }
+            }
+            CharacterMessage::AiImport => return self.ai_import_character(),
+            CharacterMessage::AiImportLoaded(outcome) => {
+                self.file_dialog_open = false;
+                if self.draft_character_open
+                    && !self.token.is_empty()
+                    && let Some(result) = outcome
+                {
+                    match result {
+                        Ok((source_name, text)) => {
+                            self.char_import_pending = true;
+                            self.char_import_started = Some(Instant::now());
+                            self.send(Request::ImportCharacterFromText {
+                                session_token: self.token.clone(),
+                                source_name,
+                                text,
+                            });
+                        }
+                        Err(error) => self.set_error(error),
+                    }
+                }
+            }
+            CharacterMessage::AddImages => return self.add_character_images(),
+            CharacterMessage::AddImageFolder => return self.add_character_image_folder(),
+            CharacterMessage::ImagesLoaded { epoch, batch } => {
+                self.file_dialog_open = false;
+                if self.draft_character_open
+                    && !self.token.is_empty()
+                    && epoch == self.draft_epoch
+                    && let Some(result) = batch
+                {
+                    match result {
+                        Ok(batch) => self.apply_imported_image_batch(batch),
+                        Err(error) => self.set_error(error),
+                    }
+                }
+            }
             CharacterMessage::GenerateEmotions => self.start_emotion_batch(),
             CharacterMessage::CancelImageGeneration => self.cancel_portrait_generation(),
             CharacterMessage::Edit(field, action) => {
@@ -106,7 +170,7 @@ impl ChattyApp {
     }
 
     /// Replace the roster. Listings carry image metadata only, so keep bytes
-    /// already held for unchanged images and fetch the rest once.
+    /// already held for unchanged images and fetch the rest with bounded concurrency.
     pub(super) fn set_characters(&mut self, mut characters: Vec<Character>) {
         let mut known: HashMap<(String, String), Vec<u8>> = HashMap::new();
         for character in self.characters.drain(..) {
@@ -130,8 +194,9 @@ impl ChattyApp {
         for character in &mut characters {
             for image in &mut character.images {
                 let key = (character.id.clone(), image.id.clone());
+                let saved = self.pending_saved_images.remove(&image.id);
                 if image.data.is_empty() {
-                    match known.remove(&key) {
+                    match saved.or_else(|| known.remove(&key)) {
                         Some(data) => image.data = data,
                         None => {
                             wanted.insert(key);
@@ -141,175 +206,272 @@ impl ChattyApp {
             }
         }
         self.characters = characters;
-        // Forget requests for images that no longer exist; keep in-flight ones.
+        // Forget queued requests for images that no longer exist; keep in-flight ones.
         self.character_image_requests
             .retain(|key| wanted.contains(key));
-        for (character_id, image_id) in wanted {
-            if self
+        self.character_image_queue
+            .retain(|key| wanted.contains(key));
+
+        // Prioritize default portraits first so roster avatars and active speakers load fastest.
+        let mut ordered_wanted = Vec::with_capacity(wanted.len());
+        for character in &self.characters {
+            let default_id = character
+                .default_image_id
+                .as_deref()
+                .filter(|id| character.images.iter().any(|image| image.id == *id))
+                .or_else(|| character.images.first().map(|image| image.id.as_str()));
+            if let Some(default_id) = default_id {
+                let key = (character.id.clone(), default_id.to_owned());
+                if wanted.contains(&key) {
+                    ordered_wanted.push(key);
+                }
+            }
+        }
+        for character in &self.characters {
+            for image in &character.images {
+                let key = (character.id.clone(), image.id.clone());
+                if wanted.contains(&key) {
+                    ordered_wanted.push(key);
+                }
+            }
+        }
+        for key in ordered_wanted {
+            if self.character_image_requests.insert(key.clone()) {
+                self.character_image_queue.push_back(key);
+            }
+        }
+        self.pump_character_image_requests();
+    }
+
+    pub(super) fn pump_character_image_requests(&mut self) {
+        if self.token.is_empty() {
+            return;
+        }
+        let mut in_flight = self
+            .character_image_requests
+            .len()
+            .saturating_sub(self.character_image_queue.len())
+            .max(self.character_image_request_ids.len());
+        while in_flight < MAX_IN_FLIGHT_CHARACTER_IMAGES {
+            let Some((character_id, image_id)) = self.character_image_queue.pop_front() else {
+                break;
+            };
+            if !self
                 .character_image_requests
-                .insert((character_id.clone(), image_id.clone()))
+                .contains(&(character_id.clone(), image_id.clone()))
             {
-                self.send(Request::GetCharacterImage {
-                    session_token: self.token.clone(),
-                    character_id,
-                    image_id,
-                });
+                continue;
             }
-        }
-    }
-
-    /// Load a SillyTavern JSON or PNG card into a new, unsaved draft.
-    pub(super) fn import_character(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Character archive or card", &["zip", "json", "png"])
-            .pick_file()
-        else {
-            return;
-        };
-        let extension = path
-            .extension()
-            .and_then(|x| x.to_str())
-            .map(str::to_ascii_lowercase);
-        let draft = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| match extension.as_deref() {
-                Some("zip") => characters::draft_from_zip(&bytes),
-                Some("png") => characters::png_card_json(&bytes)
-                    .and_then(|json| serde_json::from_slice(&json).ok())
-                    .and_then(characters::draft_from_card),
-                _ => serde_json::from_slice(&bytes)
-                    .ok()
-                    .and_then(characters::draft_from_card),
+            self.send(Request::GetCharacterImage {
+                session_token: self.token.clone(),
+                character_id,
+                image_id,
             });
-        match draft {
-            Some(draft) => {
-                self.cancel_portrait_generation();
-                self.set_draft(draft);
-                self.draft_world_ids.clear();
-            }
-            None => self.set_error("Could not read that character archive or SillyTavern card."),
+            in_flight += 1;
         }
     }
 
-    /// Ask the broker to turn a free-form text file into a character draft.
-    pub(super) fn ai_import_character(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Text file", &["txt", "md", "text"])
-            .pick_file()
-        else {
-            return;
-        };
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) => return self.set_error(format!("Failed to read file: {error}")),
-        };
-        if text.trim().is_empty() {
-            return self.set_error("Text file is empty.");
+    /// Load a SillyTavern JSON or PNG card into a new, unsaved draft off the UI thread.
+    pub(super) fn import_character(&mut self) -> Task<Message> {
+        if self.file_dialog_open {
+            return Task::none();
         }
-        let source_name = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Imported character")
-            .replace(['_', '-'], " ");
-        self.char_import_pending = true;
-        self.char_import_started = Some(Instant::now());
-        self.send(Request::ImportCharacterFromText {
-            session_token: self.token.clone(),
-            source_name,
-            text,
-        });
+        self.file_dialog_open = true;
+        Task::perform(
+            async move {
+                let handle = rfd::AsyncFileDialog::new()
+                    .add_filter("Character archive or card", &["zip", "json", "png"])
+                    .pick_file()
+                    .await?;
+                let path = handle.path().to_path_buf();
+                let result = tokio::task::spawn_blocking(move || {
+                    let extension = path
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(str::to_ascii_lowercase);
+                    let draft =
+                        std::fs::read(&path)
+                            .ok()
+                            .and_then(|bytes| match extension.as_deref() {
+                                Some("zip") => characters::draft_from_zip(&bytes),
+                                Some("png") => characters::png_card_json(&bytes)
+                                    .and_then(|json| serde_json::from_slice(&json).ok())
+                                    .and_then(characters::draft_from_card),
+                                _ => serde_json::from_slice(&bytes)
+                                    .ok()
+                                    .and_then(characters::draft_from_card),
+                            });
+                    draft.map(Box::new).ok_or_else(|| {
+                        "Could not read that character archive or SillyTavern card.".to_owned()
+                    })
+                })
+                .await;
+                Some(match result {
+                    Ok(outcome) => outcome,
+                    Err(error) => Err(format!("Could not read character file: {error}")),
+                })
+            },
+            |outcome| Message::Character(CharacterMessage::ImportLoaded(outcome)),
+        )
     }
 
-    pub(super) fn add_character_images(&mut self) {
-        let Some(paths) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
-            .pick_files()
-        else {
-            return;
-        };
-        self.import_character_image_paths(paths, None);
+    /// Ask the broker to turn a free-form text file into a character draft off the UI thread.
+    pub(super) fn ai_import_character(&mut self) -> Task<Message> {
+        if self.file_dialog_open || self.char_import_pending {
+            return Task::none();
+        }
+        self.file_dialog_open = true;
+        Task::perform(
+            async move {
+                let handle = rfd::AsyncFileDialog::new()
+                    .add_filter("Text file", &["txt", "md", "text"])
+                    .pick_file()
+                    .await?;
+                let path = handle.path().to_path_buf();
+                let result = tokio::task::spawn_blocking(move || {
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|error| format!("Failed to read file: {error}"))?;
+                    if text.trim().is_empty() {
+                        return Err("Text file is empty.".to_owned());
+                    }
+                    let source_name = path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Imported character")
+                        .replace(['_', '-'], " ");
+                    Ok((source_name, text))
+                })
+                .await;
+                Some(match result {
+                    Ok(outcome) => outcome,
+                    Err(error) => Err(format!("Failed to read file: {error}")),
+                })
+            },
+            |outcome| Message::Character(CharacterMessage::AiImportLoaded(outcome)),
+        )
+    }
+
+    pub(super) fn add_character_images(&mut self) -> Task<Message> {
+        if self.file_dialog_open {
+            return Task::none();
+        }
+        self.file_dialog_open = true;
+        let epoch = self.draft_epoch;
+        let remaining = characters::MAX_CHARACTER_IMAGES.saturating_sub(self.draft.images.len());
+        let used: usize = self.draft.images.iter().map(|image| image.data.len()).sum();
+        let draft_name = self.draft.name.clone();
+        Task::perform(
+            async move {
+                let handles = rfd::AsyncFileDialog::new()
+                    .add_filter("PNG image", &["png"])
+                    .pick_files()
+                    .await?;
+                let paths: Vec<PathBuf> = handles
+                    .into_iter()
+                    .map(|handle| handle.path().to_path_buf())
+                    .collect();
+                let result = tokio::task::spawn_blocking(move || {
+                    load_character_images_from_paths(paths, None, remaining, used, &draft_name)
+                })
+                .await;
+                Some(result.map_err(|error| format!("Could not import images: {error}")))
+            },
+            move |batch| Message::Character(CharacterMessage::ImagesLoaded { epoch, batch }),
+        )
     }
 
     /// Add every PNG in a folder; an image named after the folder becomes the default.
-    pub(super) fn add_character_image_folder(&mut self) {
-        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
-            return;
-        };
-        let mut paths = match std::fs::read_dir(&folder) {
-            Ok(entries) => entries
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    pub(super) fn add_character_image_folder(&mut self) -> Task<Message> {
+        if self.file_dialog_open {
+            return Task::none();
+        }
+        self.file_dialog_open = true;
+        let epoch = self.draft_epoch;
+        let remaining = characters::MAX_CHARACTER_IMAGES.saturating_sub(self.draft.images.len());
+        let used: usize = self.draft.images.iter().map(|image| image.data.len()).sum();
+        let draft_name = self.draft.name.clone();
+        Task::perform(
+            async move {
+                let handle = rfd::AsyncFileDialog::new().pick_folder().await?;
+                let folder = handle.path().to_path_buf();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut paths = std::fs::read_dir(&folder)
+                        .map_err(|error| format!("Could not read {}: {error}", folder.display()))?
+                        .filter_map(|entry| entry.ok())
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+                        })
+                        .collect::<Vec<_>>();
+                    paths.sort();
+                    let folder_name = folder
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned);
+                    Ok(load_character_images_from_paths(
+                        paths,
+                        folder_name.as_deref(),
+                        remaining,
+                        used,
+                        &draft_name,
+                    ))
                 })
-                .collect::<Vec<_>>(),
-            Err(error) => {
-                return self.set_error(format!("Could not read {}: {error}", folder.display()));
-            }
-        };
-        paths.sort();
-        let folder_name = folder
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned);
-        self.import_character_image_paths(paths, folder_name.as_deref());
+                .await;
+                Some(match result {
+                    Ok(outcome) => outcome,
+                    Err(error) => Err(format!("Could not import folder: {error}")),
+                })
+            },
+            move |batch| Message::Character(CharacterMessage::ImagesLoaded { epoch, batch }),
+        )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn import_character_image_paths(
         &mut self,
         paths: Vec<PathBuf>,
         default_stem: Option<&str>,
     ) {
         let remaining = characters::MAX_CHARACTER_IMAGES.saturating_sub(self.draft.images.len());
-        let truncated = paths.len() > remaining;
+        let used: usize = self.draft.images.iter().map(|image| image.data.len()).sum();
+        let batch = load_character_images_from_paths(
+            paths,
+            default_stem,
+            remaining,
+            used,
+            &self.draft.name,
+        );
+        self.apply_imported_image_batch(batch);
+    }
+
+    fn apply_imported_image_batch(&mut self, batch: ImportedImageBatch) {
+        for error in batch.errors {
+            self.set_error(error);
+        }
+        let mut truncated = batch.truncated;
         let mut used: usize = self.draft.images.iter().map(|image| image.data.len()).sum();
         let mut imported_default = None;
-        for path in paths.into_iter().take(remaining) {
-            let Ok(source) = std::fs::read(&path) else {
-                self.set_error(format!("Could not read {}.", path.display()));
-                continue;
-            };
-            if source.len() > 2 * 1024 * 1024 {
-                self.set_error(format!(
-                    "{} must be a PNG no larger than 2 MB.",
-                    path.display()
-                ));
-                continue;
+        for image in batch.images {
+            if self.draft.images.len() >= characters::MAX_CHARACTER_IMAGES {
+                truncated = true;
+                break;
             }
-            let data = match characters::normalize_character_image_png(&source) {
-                Ok(data) => data,
-                Err(error) => {
-                    self.set_error(format!("{}: {error}", path.display()));
-                    continue;
-                }
-            };
-            // The broker rejects a save over the total image budget.
-            if used + data.len() > characters::MAX_CHARACTER_IMAGE_BYTES {
+            if used + image.data.len() > characters::MAX_CHARACTER_IMAGE_BYTES {
                 self.set_error(format!(
                     "{} was not added: this character's images would exceed 5 MiB.",
-                    path.display()
+                    image.label
                 ));
                 continue;
             }
-            used += data.len();
-            let mut label = path
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("portrait")
-                .replace(['_', '-'], " ");
-            let id = chatty_protocol::util::new_uuid();
-            if default_stem.is_some_and(|stem| label.eq_ignore_ascii_case(stem))
-                || (!self.draft.name.trim().is_empty()
-                    && label.eq_ignore_ascii_case(self.draft.name.trim()))
-            {
-                imported_default = Some(id.clone());
-                label = "default".into();
+            used += image.data.len();
+            if batch.default_image_id.as_deref() == Some(image.id.as_str()) {
+                imported_default = Some(image.id.clone());
             }
             if self.draft.default_image_id.is_none() {
-                self.draft.default_image_id = Some(id.clone());
+                self.draft.default_image_id = Some(image.id.clone());
             }
-            self.draft.images.push(CharacterImage { id, label, data });
+            self.draft.images.push(image);
         }
         if let Some(id) = imported_default {
             self.draft.default_image_id = Some(id);
@@ -322,19 +484,17 @@ impl ChattyApp {
         }
     }
 
-    /// Save the draft and all its images as a zip archive the user picks.
-    pub(super) fn export_character(&mut self) {
+    /// Save the draft and all its images as a zip archive the user picks off the UI thread.
+    pub(super) fn export_character(&mut self) -> Task<Message> {
+        if self.file_dialog_open {
+            return Task::none();
+        }
         if self.draft.images.iter().any(|image| image.data.is_empty()) {
-            return self.set_error(
+            self.set_error(
                 "Character images are still downloading. Try exporting again in a moment.",
             );
+            return Task::none();
         }
-        let bytes = match characters::export_card_zip(&self.draft) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return self.set_error(format!("Could not build the character archive: {error}"));
-            }
-        };
         let name: String = self
             .draft
             .name
@@ -353,20 +513,37 @@ impl ChattyApp {
         } else {
             name
         };
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(format!("{name}.zip"))
-            .add_filter("Character archive", &["zip"])
-            .save_file()
-        else {
-            return;
-        };
-        if let Err(error) = std::fs::write(&path, bytes) {
-            self.set_error(format!("Could not write {}: {error}", path.display()));
-        }
+        let draft = self.draft.clone();
+        self.file_dialog_open = true;
+        Task::perform(
+            async move {
+                let handle = rfd::AsyncFileDialog::new()
+                    .set_file_name(format!("{name}.zip"))
+                    .add_filter("Character archive", &["zip"])
+                    .save_file()
+                    .await?;
+                let path = handle.path().to_path_buf();
+                let result = tokio::task::spawn_blocking(move || {
+                    let bytes = characters::export_card_zip(&draft).map_err(|error| {
+                        format!("Could not build the character archive: {error}")
+                    })?;
+                    std::fs::write(&path, bytes)
+                        .map_err(|error| format!("Could not write {}: {error}", path.display()))
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(error) => Some(format!("Could not export character: {error}")),
+                }
+            },
+            |error| Message::Character(CharacterMessage::ExportFinished(error)),
+        )
     }
 
     /// Replace the character draft and its multi-line editor buffers together.
     pub(super) fn set_draft(&mut self, draft: DraftCharacter) {
+        self.draft_epoch += 1;
         self.draft_editors.load(&draft);
         self.draft = draft;
     }
@@ -377,8 +554,10 @@ impl ChattyApp {
         image_id: &str,
         data: Vec<u8>,
     ) {
-        self.character_image_requests
-            .remove(&(character_id.to_owned(), image_id.to_owned()));
+        let key = (character_id.to_owned(), image_id.to_owned());
+        self.character_image_requests.remove(&key);
+        self.character_image_request_ids
+            .retain(|_, pending| pending != &key);
         if self.draft.id.as_deref() == Some(character_id)
             && let Some(image) = self
                 .draft
@@ -397,6 +576,7 @@ impl ChattyApp {
         {
             image.data = data;
         }
+        self.pump_character_image_requests();
     }
 
     pub(super) fn start_emotion_batch(&mut self) {
@@ -489,5 +669,66 @@ impl ChattyApp {
             batch.done += 1;
             self.send_next_emotion();
         }
+    }
+}
+
+fn load_character_images_from_paths(
+    paths: Vec<PathBuf>,
+    default_stem: Option<&str>,
+    remaining: usize,
+    mut used: usize,
+    draft_name: &str,
+) -> ImportedImageBatch {
+    let truncated = paths.len() > remaining;
+    let draft_name = draft_name.trim();
+    let mut images = Vec::new();
+    let mut errors = Vec::new();
+    let mut default_image_id = None;
+    for path in paths.into_iter().take(remaining) {
+        let Ok(source) = std::fs::read(&path) else {
+            errors.push(format!("Could not read {}.", path.display()));
+            continue;
+        };
+        if source.len() > 2 * 1024 * 1024 {
+            errors.push(format!(
+                "{} must be a PNG no larger than 2 MB.",
+                path.display()
+            ));
+            continue;
+        }
+        let data = match characters::normalize_character_image_png(&source) {
+            Ok(data) => data,
+            Err(error) => {
+                errors.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        if used + data.len() > characters::MAX_CHARACTER_IMAGE_BYTES {
+            errors.push(format!(
+                "{} was not added: this character's images would exceed 5 MiB.",
+                path.display()
+            ));
+            continue;
+        }
+        used += data.len();
+        let mut label = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("portrait")
+            .replace(['_', '-'], " ");
+        let id = chatty_protocol::util::new_uuid();
+        if default_stem.is_some_and(|stem| label.eq_ignore_ascii_case(stem))
+            || (!draft_name.is_empty() && label.eq_ignore_ascii_case(draft_name))
+        {
+            default_image_id = Some(id.clone());
+            label = "default".into();
+        }
+        images.push(CharacterImage { id, label, data });
+    }
+    ImportedImageBatch {
+        images,
+        default_image_id,
+        errors,
+        truncated,
     }
 }
