@@ -495,12 +495,14 @@ const PROMPT_HISTORY: &str = "SELECT m.author_type,m.author_id,COALESCE(c.name,'
 /// Map a stored message to a chat role.
 ///
 /// In a group (`speaker` is set), only the speaker's own lines are assistant
-/// turns. Other characters' lines become user turns prefixed with their name,
-/// so the model can tell who said what and does not continue their lines.
+/// turns. The user's and other characters' lines become user turns prefixed
+/// with "User" or the character's name, so the model can tell who said what
+/// and does not continue their lines.
 fn history_message(row: &sqlx::sqlite::SqliteRow, speaker: Option<&str>) -> (String, String) {
     let content: String = row.get("content");
     let author_type: &str = row.get("author_type");
     match author_type {
+        "user" if speaker.is_some() => ("user".to_owned(), format!("{GROUP_USER_NAME}: {content}")),
         "user" => ("user".to_owned(), content),
         "system" => ("system".to_owned(), content),
         _ => match speaker {
@@ -516,6 +518,25 @@ fn history_message(row: &sqlx::sqlite::SqliteRow, speaker: Option<&str>) -> (Str
             _ => ("assistant".to_owned(), content),
         },
     }
+}
+
+/// Label for the user's lines in a group prompt.
+const GROUP_USER_NAME: &str = "User";
+
+/// Join neighbouring turns that share a role. In a group several people speak
+/// between the speaker's own turns, and some chat templates reject two user
+/// turns in a row. `history` is newest first, and so is the result.
+fn merge_same_role_turns(history: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    let mut merged: Vec<(String, String)> = Vec::new();
+    for (role, content) in history {
+        match merged.last_mut() {
+            Some((last_role, newer)) if *last_role == role => {
+                *newer = format!("{content}\n\n{newer}");
+            }
+            _ => merged.push((role, content)),
+        }
+    }
+    merged
 }
 
 /// Describe the other characters present and keep the reply to one speaker.
@@ -542,8 +563,187 @@ fn group_prompt(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "This is a group roleplay. Other characters present:\n{others}\nLines from other characters appear as \"Name: text\". Write only {speaker_name}'s next reply. Never write dialogue, actions, or decisions for the other characters or the user, and do not prefix the reply with a name.\n"
+        "This is a group roleplay. Other characters present:\n{others}\nLines from other characters appear as \"Name: text\", and the user's lines as \"{GROUP_USER_NAME}: text\". Write only {speaker_name}'s next reply. Never write dialogue, actions, or decisions for the other characters or the user, and do not prefix the reply with a name.\n"
     )
+}
+
+/// How a line start compares with a `Name:` prefix.
+#[derive(Debug, PartialEq, Eq)]
+enum NamePrefix {
+    /// The line starts with the prefix; the value is its length in bytes.
+    Yes(usize),
+    No,
+    /// The text ends before the prefix can be confirmed or ruled out.
+    Undecided,
+}
+
+/// Match `Name:` at the start of `line`, ignoring case and Markdown emphasis
+/// such as `**Name:**`.
+fn name_prefix(line: &str, name: &str) -> NamePrefix {
+    let mut chars = line.char_indices().peekable();
+    while chars.next_if(|&(_, c)| c == '*' || c == '_').is_some() {}
+    for expected in name.chars() {
+        match chars.next() {
+            None => return NamePrefix::Undecided,
+            Some((_, c)) if c.to_lowercase().eq(expected.to_lowercase()) => {}
+            Some(_) => return NamePrefix::No,
+        }
+    }
+    loop {
+        match chars.next() {
+            None => return NamePrefix::Undecided,
+            Some((_, '*' | '_')) => {}
+            Some((at, ':')) => return NamePrefix::Yes(at + 1),
+            Some(_) => return NamePrefix::No,
+        }
+    }
+}
+
+/// Keeps a streamed group reply to its own speaker. Models often open with
+/// the speaker's `Name:` and then carry on with lines for the others. The
+/// opening name is dropped, and the reply ends before the first later line
+/// that starts with another character's or the user's `Name:`. Text that
+/// might still become such a line is held back until it is decided.
+struct SpeakerFilter {
+    own: String,
+    others: Vec<String>,
+}
+
+/// The part of the raw reply that may be shown, and whether it is complete.
+#[derive(Debug, PartialEq, Eq)]
+struct ReplyBounds {
+    start: usize,
+    end: usize,
+    stop: bool,
+}
+
+impl SpeakerFilter {
+    fn new(participants: &[sqlx::sqlite::SqliteRow], speaker_id: &str) -> Self {
+        let name = |r: &sqlx::sqlite::SqliteRow| r.get::<&str, _>("name").trim().to_owned();
+        let own = participants
+            .iter()
+            .find(|r| r.get::<&str, _>("id") == speaker_id)
+            .map(name)
+            .unwrap_or_default();
+        let others = participants
+            .iter()
+            .filter(|r| r.get::<&str, _>("id") != speaker_id)
+            .map(name)
+            .chain([GROUP_USER_NAME.to_owned()])
+            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&own))
+            .collect();
+        Self { own, others }
+    }
+
+    /// Bounds of the visible reply in `text`. With `finished`, text that is
+    /// still undecided is released because no more output follows.
+    fn bounds(&self, text: &str, finished: bool) -> ReplyBounds {
+        let lead = text.len() - text.trim_start().len();
+        let (start, skipped_newline) =
+            match (self.own.is_empty(), name_prefix(&text[lead..], &self.own)) {
+                (false, NamePrefix::Yes(length)) => {
+                    let after = lead + length;
+                    let start = after + text[after..].len() - text[after..].trim_start().len();
+                    (start, text[after..start].contains('\n'))
+                }
+                (false, NamePrefix::Undecided) if !finished => {
+                    return ReplyBounds { start: 0, end: 0, stop: false };
+                }
+                _ => (0, false),
+            };
+        if skipped_newline {
+            let mut undecided = false;
+            for name in &self.others {
+                match name_prefix(&text[start..], name) {
+                    NamePrefix::Yes(_) => return ReplyBounds { start, end: start, stop: true },
+                    NamePrefix::Undecided => undecided = true,
+                    NamePrefix::No => {}
+                }
+            }
+            if undecided && !finished {
+                return ReplyBounds { start, end: start, stop: false };
+            }
+        }
+        // The first line is never cut: an empty reply helps no one.
+        for (offset, _) in text[start..].match_indices('\n') {
+            let newline = start + offset;
+            let line = text[newline + 1..].trim_start_matches([' ', '\t', '\r']);
+            let mut undecided = false;
+            for name in &self.others {
+                match name_prefix(line, name) {
+                    NamePrefix::Yes(_) => return ReplyBounds { start, end: newline, stop: true },
+                    NamePrefix::Undecided => undecided = true,
+                    NamePrefix::No => {}
+                }
+            }
+            if undecided && !finished {
+                return ReplyBounds { start, end: newline, stop: false };
+            }
+        }
+        ReplyBounds { start, end: text.len(), stop: false }
+    }
+}
+
+/// Raw model output and the part already streamed to the client.
+struct ReplyText {
+    raw: String,
+    filter: Option<SpeakerFilter>,
+    bounds: ReplyBounds,
+    sent: usize,
+}
+
+impl ReplyText {
+    fn new(filter: Option<SpeakerFilter>) -> Self {
+        Self {
+            raw: String::new(),
+            filter,
+            bounds: ReplyBounds { start: 0, end: 0, stop: false },
+            sent: 0,
+        }
+    }
+
+    /// Whether the reply reached another speaker's line and must end.
+    fn stopped(&self) -> bool {
+        self.bounds.stop
+    }
+
+    fn push(&mut self, text: &str) {
+        if !self.stopped() {
+            self.raw.push_str(text);
+            self.rescan(false);
+        }
+    }
+
+    fn finish(&mut self) {
+        if !self.stopped() {
+            self.rescan(true);
+        }
+    }
+
+    fn rescan(&mut self, finished: bool) {
+        self.bounds = match &self.filter {
+            Some(filter) => filter.bounds(&self.raw, finished),
+            None => ReplyBounds { start: 0, end: self.raw.len(), stop: false },
+        };
+    }
+
+    /// Visible text not yet streamed.
+    fn pending(&self) -> &str {
+        let end = self.bounds.end;
+        &self.raw[self.sent.max(self.bounds.start).min(end)..end]
+    }
+
+    fn take_pending(&mut self) -> String {
+        let text = self.pending().to_owned();
+        self.sent = self.sent.max(self.bounds.end);
+        text
+    }
+
+    /// The reply to store.
+    fn content(&self) -> &str {
+        let text = &self.raw[self.bounds.start..self.bounds.end];
+        if self.filter.is_some() { text.trim_end() } else { text }
+    }
 }
 
 pub(super) async fn selected_model(app: &App) -> Result<String> {
@@ -636,6 +836,11 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     );
     let group_speaker = (participants.len() > 1).then_some(sid.as_str());
     let history = recent.iter().map(|r| history_message(r, group_speaker));
+    let history = if group_speaker.is_some() {
+        merge_same_role_turns(history)
+    } else {
+        history.collect()
+    };
     let messages = budget_chat_messages(
         &system,
         &prioritized_memory,
@@ -699,8 +904,9 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         }
         response=response_future=>response?
     };
-    let mut pending = String::new();
-    let mut complete = String::new();
+    let mut reply = ReplyText::new(
+        group_speaker.map(|speaker| SpeakerFilter::new(&participants, speaker)),
+    );
     let mut seq = 0;
     let mut deadline = Instant::now() + Duration::from_millis(60);
     let mut cancelled = false;
@@ -714,12 +920,13 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             Timeout,
             Data(Option<T>),
         }
+        let has_pending = !reply.pending().is_empty();
         let event = tokio::select! {
             biased;
             changed = cancel.changed() => {
                 if changed.is_err() || *cancel.borrow() { Event::Cancel } else { continue }
             }
-            _ = tokio::time::sleep_until(deadline), if !pending.is_empty() => Event::Timeout,
+            _ = tokio::time::sleep_until(deadline), if has_pending => Event::Timeout,
             item = stream.next() => Event::Data(item?),
         };
         match event {
@@ -729,7 +936,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             }
             Event::Timeout => {}
             Event::Data(Some(update)) => {
-                if update.reasoning && !thinking_sent && complete.is_empty() {
+                if update.reasoning && !thinking_sent && reply.raw.is_empty() {
                     thinking_sent = true;
                     tx.send((
                         MessageType::Response,
@@ -742,24 +949,25 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
                     ))
                     .await?;
                 }
-                if pending.is_empty() {
+                if !has_pending {
                     // Silent upstreams need no timer. Start the flush window
                     // when output first arrives instead of ticking while idle.
                     deadline = Instant::now() + Duration::from_millis(60);
                 }
-                pending.push_str(&update.text);
-                complete.push_str(&update.text);
+                reply.push(&update.text);
                 if let Some(tokens) = update.prompt_tokens {
                     usage.prompt_tokens = tokens;
                 }
                 if let Some(tokens) = update.completion_tokens {
                     usage.completion_tokens = tokens;
                 }
-                done = update.done;
+                // A group reply that moved on to another speaker is complete.
+                done = update.done || reply.stopped();
             }
             Event::Data(None) => break,
         }
 
+        let pending = reply.pending();
         if !pending.is_empty()
             && (pending.split_whitespace().count() >= 32 || Instant::now() >= deadline || done)
         {
@@ -767,7 +975,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
             let out = StreamChunk {
                 message_id: mid.clone(),
                 sequence: seq,
-                text: std::mem::take(&mut pending),
+                text: reply.take_pending(),
             };
             tx.send((MessageType::StreamChunk, req_id, encode(&out)?.into()))
                 .await?;
@@ -782,6 +990,8 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
     // Release the model before follow-up calls, which take their own admission.
     drop(stream);
     drop(workload);
+    reply.finish();
+    let pending = reply.take_pending();
     if !pending.is_empty() {
         seq += 1;
         tx.send((
@@ -796,6 +1006,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         ))
         .await?;
     }
+    let complete = reply.content().to_owned();
     let reported_context_used_percent = (usage.prompt_tokens > 0 && config.num_ctx > 0)
         .then(|| usage.total() as f64 * 100.0 / f64::from(config.num_ctx));
     info!(
@@ -1375,6 +1586,9 @@ async fn choose_speaker_with_model(
         .iter()
         .filter(|r| Some(r.get::<&str, _>("id")) != exclude)
         .collect::<Vec<_>>();
+    if candidates.len() <= 1 {
+        return candidates.first().map(|r| r.get("id"));
+    }
     let names = candidates
         .iter()
         .map(|r| r.get::<&str, _>("name"))
@@ -1503,7 +1717,15 @@ mod speaker_tests {
             [
                 ("assistant".to_owned(), "Evening".to_owned()),
                 ("user".to_owned(), "Ann: Hi there".to_owned()),
-                ("user".to_owned(), "Hello".to_owned()),
+                ("user".to_owned(), "User: Hello".to_owned()),
+            ]
+        );
+        // Ann's and the user's lines become one user turn, oldest first.
+        assert_eq!(
+            merge_same_role_turns(history),
+            [
+                ("assistant".to_owned(), "Evening".to_owned()),
+                ("user".to_owned(), "User: Hello\n\nAnn: Hi there".to_owned()),
             ]
         );
         let participants = sqlx::query(
@@ -1525,6 +1747,97 @@ mod speaker_tests {
         assert_eq!(name_mention("Miranda waves", "Mira"), None);
         assert_eq!(name_mention("Hannah", "Ann"), None);
         assert_eq!(name_mention("anything", " "), None);
+    }
+
+    fn bob_filter() -> SpeakerFilter {
+        SpeakerFilter {
+            own: "Bob".into(),
+            others: vec!["Ann".into(), GROUP_USER_NAME.into()],
+        }
+    }
+
+    /// Stream `chunks` through a group reply and return what the client saw
+    /// and what is stored.
+    fn stream(chunks: &[&str]) -> (String, String) {
+        let mut reply = ReplyText::new(Some(bob_filter()));
+        let mut shown = String::new();
+        for chunk in chunks {
+            reply.push(chunk);
+            shown.push_str(&reply.take_pending());
+            if reply.stopped() {
+                break;
+            }
+        }
+        reply.finish();
+        shown.push_str(&reply.take_pending());
+        (shown, reply.content().to_owned())
+    }
+
+    #[test]
+    fn name_prefixes_ignore_case_and_emphasis() {
+        assert_eq!(name_prefix("ann: hi", "Ann"), NamePrefix::Yes(4));
+        assert_eq!(name_prefix("**Ann:** hi", "Ann"), NamePrefix::Yes(6));
+        assert_eq!(name_prefix("**An", "Ann"), NamePrefix::Undecided);
+        assert_eq!(name_prefix("Ann", "Ann"), NamePrefix::Undecided);
+        assert_eq!(name_prefix("Ann waves", "Ann"), NamePrefix::No);
+        assert_eq!(name_prefix("Annabel: hi", "Ann"), NamePrefix::No);
+        assert_eq!(name_prefix("*Ann laughs*", "Ann"), NamePrefix::No);
+    }
+
+    #[test]
+    fn group_replies_stop_before_another_speakers_line() {
+        // The opening name is dropped; Ann's line and later text never show.
+        let (shown, stored) = stream(&["Bo", "b: Evening.", "\nIt is cold.\n", "An", "n: Hi Bob!\nUser: hey"]);
+        assert_eq!(shown, "Evening.\nIt is cold.");
+        assert_eq!(stored, "Evening.\nIt is cold.");
+        // An own-name prefix followed by a newline still rejects another speaker's line.
+        let (shown, stored) = stream(&["Bob:\n", "Ann: hi"]);
+        assert_eq!(shown, "");
+        assert_eq!(stored, "");
+        // So does a line for the user.
+        let (_, stored) = stream(&["Sure.\n\n**User:** thanks"]);
+        assert_eq!(stored, "Sure.");
+        // Mentions and narration that only start like a name are kept.
+        let (shown, stored) = stream(&["I look at Ann.\nAnn", " smiles.\n*Ann waves*"]);
+        assert_eq!(shown, "I look at Ann.\nAnn smiles.\n*Ann waves*");
+        assert_eq!(stored, shown);
+    }
+
+    #[tokio::test]
+    async fn automatic_speaker_selection_skips_model_when_one_candidate_remains() {
+        let app = group_app().await;
+        sqlx::query("UPDATE broker_settings SET adapter_enabled=0")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let participants = sqlx::query(PARTICIPANTS).fetch_all(&app.db).await.unwrap();
+        assert_eq!(
+            choose_speaker_with_model(&app, "owner", &participants, &[], Some("bob"))
+                .await
+                .as_deref(),
+            Some("ann")
+        );
+    }
+
+    #[test]
+    fn undecided_text_is_released_when_the_reply_ends() {
+        let (shown, stored) = stream(&["Fine.\nAn"]);
+        assert_eq!(shown, "Fine.\nAn");
+        assert_eq!(stored, "Fine.\nAn");
+        let (shown, _) = stream(&["Bo"]);
+        assert_eq!(shown, "Bo");
+        // The first line is never cut, so the reply cannot become empty.
+        let (_, stored) = stream(&["Ann: hello"]);
+        assert_eq!(stored, "Ann: hello");
+    }
+
+    #[test]
+    fn direct_replies_are_not_filtered() {
+        let mut reply = ReplyText::new(None);
+        reply.push("Hi.\nUser: more  ");
+        reply.finish();
+        assert_eq!(reply.take_pending(), "Hi.\nUser: more  ");
+        assert_eq!(reply.content(), "Hi.\nUser: more  ");
     }
 }
 

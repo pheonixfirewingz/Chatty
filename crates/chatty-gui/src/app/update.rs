@@ -742,7 +742,9 @@ impl ChattyApp {
             ConversationMessage::ToggleNewChatCharacter(id) => {
                 if let Some(index) = self.selected_characters.iter().position(|c| *c == id) {
                     self.selected_characters.remove(index);
-                } else if self.selected_characters.len() < conversation::MAX_CHAT_CHARACTERS {
+                } else if self.selected_characters.len() < conversation::MAX_CHAT_CHARACTERS
+                    && conversation::can_join_group(&self.worlds, &self.selected_characters, &id)
+                {
                     self.selected_characters.push(id);
                 }
             }
@@ -769,12 +771,15 @@ impl ChattyApp {
                         kind,
                         participant_ids,
                     },
-                    None => Request::CreateConversation {
-                        session_token: self.token.clone(),
-                        title,
-                        kind,
-                        participant_ids,
-                    },
+                    None => {
+                        self.pending_new_conversation = true;
+                        Request::CreateConversation {
+                            session_token: self.token.clone(),
+                            title,
+                            kind,
+                            participant_ids,
+                        }
+                    }
                 };
                 self.send(request);
                 self.new_chat_open = false;

@@ -523,6 +523,35 @@ pub(super) async fn load_worlds(db: &SqlitePool, uid: &str) -> Result<Vec<World>
         .collect()
 }
 
+/// Rules for a conversation's characters before it is saved: each character
+/// appears once, several characters need a group reply mode, and a group's
+/// characters must all be linked to one of the owner's worlds. Set
+/// `check_world` to false to keep an existing group whose members are
+/// unchanged, so groups made before the rule can still be renamed.
+pub(super) async fn check_conversation_characters(
+    db: &SqlitePool,
+    uid: &str,
+    kind: ConversationKind,
+    participant_ids: &[String],
+    check_world: bool,
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    if !participant_ids.iter().all(|id| seen.insert(id.as_str())) {
+        bail!("a character can only join a conversation once")
+    }
+    if participant_ids.len() < 2 {
+        return Ok(());
+    }
+    if kind == ConversationKind::Direct {
+        bail!("a chat with several characters needs a group reply mode")
+    }
+    let ids = participant_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    if check_world && !chatty_protocol::world::share_world(&load_worlds(db, uid).await?, &ids) {
+        bail!("group characters must all belong to the same world; link them to one world first")
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod loading_tests {
     use super::*;

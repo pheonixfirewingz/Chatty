@@ -146,11 +146,54 @@ fn test_new_chat_dialog_rendering() {
         editing: false,
         title: "My Chat",
         search: "",
+        worlds: &[],
         glass_mode: false,
     };
 
     let dialog = new_chat_dialog_view(&view_state, std::convert::identity);
     assert!(dialog.is_some());
+}
+
+#[test]
+fn can_join_group_requires_one_common_world() {
+    let worlds = vec![
+        World {
+            id: "w1".into(),
+            name: "Observatory".into(),
+            character_ids: vec!["a".into(), "b".into()],
+            entries: vec![],
+        },
+        World {
+            id: "w2".into(),
+            name: "Harbour".into(),
+            character_ids: vec!["b".into(), "c".into()],
+            entries: vec![],
+        },
+    ];
+    assert!(can_join_group(&worlds, &[], "c"));
+    assert!(can_join_group(&worlds, &["a".into()], "a"));
+    assert!(can_join_group(&worlds, &["a".into()], "b"));
+    assert!(!can_join_group(&worlds, &["a".into()], "c"));
+    assert!(!can_join_group(&worlds, &["a".into(), "b".into()], "c"));
+
+    let chars = vec![
+        dummy_character("a", "Alice"),
+        dummy_character("b", "Bob"),
+        dummy_character("c", "Cara"),
+    ];
+    let selected = vec!["a".to_string(), "b".to_string()];
+    let view_state = NewChatViewState {
+        is_open: true,
+        characters: &chars,
+        selected_character_ids: &selected,
+        kind: ConversationKind::GroupAutomatic,
+        editing: false,
+        title: "Observatory",
+        search: "",
+        worlds: &worlds,
+        glass_mode: false,
+    };
+    assert!(new_chat_dialog_view(&view_state, std::convert::identity).is_some());
 }
 
 #[test]

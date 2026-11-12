@@ -305,7 +305,23 @@ fn profile_card<'a, Message: Clone + 'a>(
         .clip(true);
 
     let glass_mode = view.glass_mode;
-    let disabled = full && !is_selected;
+    let same_world = is_selected || can_join_group(view.worlds, selected, &character.id);
+    let disabled = !is_selected && (full || !same_world);
+    if disabled {
+        layers = layers.push(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(photo_height)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(Color::from_rgba(0.05, 0.06, 0.09, 0.58))),
+                    border: Border {
+                        radius: top_radius,
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }),
+        );
+    }
     let card = button(column![layers, body])
         .width(width)
         .padding(CARD_OUTLINE)
@@ -319,16 +335,16 @@ fn profile_card<'a, Message: Clone + 'a>(
         });
 
     if disabled {
+        let reason = if !same_world {
+            "Characters in a group must belong to the same world".to_owned()
+        } else {
+            format!("A chat holds up to {MAX_CHAT_CHARACTERS} characters")
+        };
         tooltip(
             card,
-            container(
-                text(format!(
-                    "A chat holds up to {MAX_CHAT_CHARACTERS} characters"
-                ))
-                .size(12),
-            )
-            .padding([4, 8])
-            .style(crate::ui::tooltip_style),
+            container(text(reason).size(12))
+                .padding([4, 8])
+                .style(crate::ui::tooltip_style),
             tooltip::Position::Top,
         )
         .into()
@@ -398,17 +414,22 @@ fn profile_card_style(
         }
         _ => Color::TRANSPARENT,
     };
-    let lift = matches!(status, button::Status::Hovered) as u8 as f32;
+    let disabled = matches!(status, button::Status::Disabled);
+    let lift = (matches!(status, button::Status::Hovered) && !disabled) as u8 as f32;
     button::Style {
         background: Some(crate::ui::raised_background(glass_mode)),
-        text_color: theme.palette().text,
+        text_color: if disabled {
+            SECONDARY_TEXT
+        } else {
+            theme.palette().text
+        },
         border: Border {
             color: outline,
             width: CARD_OUTLINE,
             radius: CARD_RADIUS.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.42),
+            color: Color::from_rgba(0.0, 0.0, 0.0, if disabled { 0.2 } else { 0.42 }),
             offset: Vector::new(0.0, 6.0 + 2.0 * lift),
             blur_radius: 18.0 + 6.0 * lift,
         },

@@ -102,6 +102,7 @@ pub struct ChattyApp {
     markdown: conversation::ConversationMarkdown,
     selected_conversation: Option<String>,
     auto_select_conversation: bool,
+    pending_new_conversation: bool,
     /// Characters chosen in the chat dialog, in speaking order.
     selected_characters: Vec<String>,
     /// Speaker mode chosen in the chat dialog for two or more characters.
@@ -240,6 +241,7 @@ impl ChattyApp {
             markdown: conversation::ConversationMarkdown::default(),
             selected_conversation: None,
             auto_select_conversation: true,
+            pending_new_conversation: false,
             selected_characters: Vec::new(),
             new_chat_kind: ConversationKind::GroupAutomatic,
             editing_conversation: None,

@@ -12,7 +12,7 @@ pub use view::*;
 use crate::characters::ImageGeneration;
 use chatty_protocol::conversation::{ChatMessage, ConversationKind};
 use chatty_protocol::response::GenerationStatus;
-use chatty_protocol::{Character, GenerationContext};
+use chatty_protocol::{Character, GenerationContext, World};
 use std::collections::HashMap;
 
 /// Interaction messages for the conversation view and new-chat dialog.
@@ -143,7 +143,21 @@ pub struct NewChatViewState<'a> {
     pub title: &'a str,
     /// Fuzzy filter for the character gallery.
     pub search: &'a str,
+    /// The owner's worlds; a group's characters must share one.
+    pub worlds: &'a [World],
     pub glass_mode: bool,
+}
+
+/// Whether `candidate` may join `selected`: one world must link all of them.
+#[must_use]
+pub fn can_join_group(worlds: &[World], selected: &[String], candidate: &str) -> bool {
+    let ids = selected
+        .iter()
+        .map(String::as_str)
+        .filter(|id| *id != candidate)
+        .chain([candidate])
+        .collect::<Vec<_>>();
+    chatty_protocol::world::share_world(worlds, &ids)
 }
 
 /// Most characters one chat may hold.

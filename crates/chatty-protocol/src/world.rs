@@ -51,6 +51,17 @@ impl World {
     }
 }
 
+/// Whether one world links every character in `ids`. A group chat needs a
+/// shared world; zero or one character always qualifies.
+#[must_use]
+pub fn share_world(worlds: &[World], ids: &[&str]) -> bool {
+    ids.len() < 2
+        || worlds.iter().any(|world| {
+            ids.iter()
+                .all(|id| world.character_ids.iter().any(|linked| linked == id))
+        })
+}
+
 /// Deterministic, bounded selection. The caller supplies only immediate history.
 /// Facts are data for the roleplay, never durable memories or instructions.
 pub fn select_world_context(
@@ -173,5 +184,23 @@ mod tests {
         assert!(!select_world_context(&worlds, "c", "forest", 4096).contains("Locked"));
         assert!(select_world_context(&worlds, "other", "gate", 4096).is_empty());
         assert!(select_world_context(&worlds, "c", "gate", 8).is_empty());
+    }
+
+    #[test]
+    fn groups_need_one_world_linking_every_character() {
+        let world = |id: &str, characters: &[&str]| World {
+            id: id.into(),
+            name: id.into(),
+            character_ids: characters.iter().map(|&c| c.into()).collect(),
+            entries: vec![],
+        };
+        let worlds = [world("a", &["ann", "bob"]), world("b", &["bob", "cat"])];
+        assert!(share_world(&worlds, &[]));
+        assert!(share_world(&worlds, &["dan"]));
+        assert!(share_world(&worlds, &["ann", "bob"]));
+        assert!(share_world(&worlds, &["cat", "bob"]));
+        // Linked pairwise through Bob, but no single world holds all three.
+        assert!(!share_world(&worlds, &["ann", "bob", "cat"]));
+        assert!(!share_world(&worlds, &["ann", "dan"]));
     }
 }

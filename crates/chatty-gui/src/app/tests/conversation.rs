@@ -388,6 +388,12 @@ fn group_demo(kind: chatty_protocol::ConversationKind) -> Harness {
     second.id = "bob".into();
     second.name = "Bob".into();
     app.characters.push(second);
+    app.worlds.push(chatty_protocol::World {
+        id: "world-1".into(),
+        name: "Observatory".into(),
+        character_ids: vec!["assistant".into(), "bob".into()],
+        entries: vec![],
+    });
     app.conversations[0].participant_ids = vec!["assistant".into(), "bob".into()];
     app.conversations[0].kind = kind;
     app
@@ -437,6 +443,29 @@ fn several_characters_create_a_group_in_selection_order() {
 }
 
 #[test]
+fn new_chat_blocks_characters_outside_a_shared_world() {
+    let mut app = group_demo(chatty_protocol::ConversationKind::Direct);
+    let mut outsider = app.characters[0].clone();
+    outsider.id = "outsider".into();
+    outsider.name = "Outsider".into();
+    app.characters.push(outsider);
+    app.worlds.push(chatty_protocol::World {
+        id: "world-2".into(),
+        name: "Elsewhere".into(),
+        character_ids: vec!["outsider".into()],
+        entries: vec![],
+    });
+
+    app.update(ConversationMessage::OpenNewChatDialog);
+    app.update(ConversationMessage::ToggleNewChatCharacter("assistant".into()));
+    app.update(ConversationMessage::ToggleNewChatCharacter("outsider".into()));
+    assert_eq!(app.selected_characters, ["assistant"]);
+
+    app.update(ConversationMessage::ToggleNewChatCharacter("bob".into()));
+    assert_eq!(app.selected_characters, ["assistant", "bob"]);
+}
+
+#[test]
 fn editing_a_chat_adds_characters_and_changes_its_mode() {
     use chatty_protocol::ConversationKind;
     let mut app = group_demo(ConversationKind::Direct);
@@ -457,6 +486,103 @@ fn editing_a_chat_adds_characters_and_changes_its_mode() {
                 && participant_ids == &["assistant".to_owned(), "bob".to_owned()]
                 && title == "Night watch at the observatory"
     ));
+}
+
+#[test]
+fn group_conversations_stay_in_the_list_and_open_when_created() {
+    use chatty_protocol::{Conversation, ConversationKind};
+    let mut app = group_demo(ConversationKind::Direct);
+    let list = [
+        Conversation {
+            id: "direct".into(),
+            title: "Direct".into(),
+            kind: ConversationKind::Direct,
+            participant_ids: vec!["assistant".into()],
+            state: String::new(),
+            summary: String::new(),
+            revision: 1,
+        },
+        Conversation {
+            id: "auto".into(),
+            title: "Auto".into(),
+            kind: ConversationKind::GroupAutomatic,
+            participant_ids: vec!["assistant".into(), "bob".into()],
+            state: String::new(),
+            summary: String::new(),
+            revision: 2,
+        },
+        Conversation {
+            id: "robin".into(),
+            title: "Round robin".into(),
+            kind: ConversationKind::GroupRoundRobin,
+            participant_ids: vec!["assistant".into(), "bob".into()],
+            state: String::new(),
+            summary: String::new(),
+            revision: 3,
+        },
+        Conversation {
+            id: "manual".into(),
+            title: "Manual".into(),
+            kind: ConversationKind::GroupManual,
+            participant_ids: vec!["assistant".into(), "bob".into()],
+            state: String::new(),
+            summary: String::new(),
+            revision: 4,
+        },
+    ];
+    app.respond(1, &Response::Conversations(list.to_vec()));
+    assert_eq!(
+        app.conversations
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        ["direct", "auto", "robin", "manual"]
+    );
+
+    // Creating a new group opens it as soon as its delta and acceptance arrive.
+    app.selected_conversation = Some("direct".into());
+    app.update(ConversationMessage::OpenNewChatDialog);
+    app.update(ConversationMessage::ToggleNewChatCharacter("assistant".into()));
+    app.update(ConversationMessage::ToggleNewChatCharacter("bob".into()));
+    app.update(ConversationMessage::CreateNewChat);
+    assert!(app.pending_new_conversation);
+    let _ = app.requests();
+
+    let delta_payload = encode(&DeltaPayload::Conversation {
+        title: "New group".into(),
+        kind: ConversationKind::GroupAutomatic,
+        participant_ids: vec!["assistant".into(), "bob".into()],
+        state: String::new(),
+        summary: String::new(),
+    })
+    .unwrap();
+    app.frame(
+        MessageType::Delta,
+        2,
+        &StateDelta {
+            revision: 10,
+            entity_type: "conversation".into(),
+            entity_id: "created-group".into(),
+            operation: DeltaOperation::Add,
+            changed_fields: delta_payload,
+        },
+    );
+    app.respond(
+        2,
+        &Response::Accepted {
+            entity_id: Some("created-group".into()),
+            revision: 10,
+        },
+    );
+    assert!(!app.pending_new_conversation);
+    assert_eq!(
+        app.selected_conversation.as_deref(),
+        Some("created-group")
+    );
+    assert!(app.requests().iter().any(|request| matches!(
+        request,
+        Request::GetConversation { conversation_id, .. } if conversation_id == "created-group"
+    )));
 }
 
 #[test]

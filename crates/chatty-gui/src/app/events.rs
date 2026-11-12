@@ -10,7 +10,7 @@ use crate::network::{Command, Event};
 use crate::worlds::WorldDialogState;
 use crate::{admin, characters, conversation};
 use chatty_protocol::{
-    BrokerLog, ChatMessage, ConversationKind, DeltaOperation, DeltaPayload, ErrorCode, Frame,
+    BrokerLog, ChatMessage, Conversation, DeltaOperation, DeltaPayload, ErrorCode, Frame,
     GenerationContext, GenerationStatus, MessageType, Request, Response, Role, StateDelta,
     StreamChunk, Variant, WireError, decode,
 };
@@ -187,6 +187,7 @@ impl ChattyApp {
         self.end_generation();
         self.token.clear();
         self.shown_conversation = None;
+        self.pending_new_conversation = false;
         self.role = None;
         self.context_usage.clear();
         self.character_image_requests.clear();
@@ -368,12 +369,7 @@ impl ChattyApp {
                             self.store_character_image(&character_id, &image_id, data);
                         }
                         Response::Conversations(v) => {
-                            self.conversations = v
-                                .into_iter()
-                                .filter(|conversation| {
-                                    conversation.kind == ConversationKind::Direct
-                                })
-                                .collect();
+                            self.conversations = v;
                             self.context_usage.retain(|id, _| {
                                 self.conversations
                                     .iter()
@@ -404,6 +400,13 @@ impl ChattyApp {
                             if self.shown_conversation.as_ref() != Some(&v.conversation.id) {
                                 self.shown_conversation = Some(v.conversation.id.clone());
                                 self.chat_follow_due = true;
+                            }
+                            if let Some(existing) = self
+                                .conversations
+                                .iter_mut()
+                                .find(|c| c.id == v.conversation.id)
+                            {
+                                *existing = v.conversation.clone();
                             }
                             self.selected_conversation = Some(v.conversation.id);
                             self.messages = v.messages;
@@ -527,8 +530,19 @@ impl ChattyApp {
                             self.pending_tts_message_id = (!cancelled).then_some(message_id);
                             self.finish_generation(revision);
                         }
-                        Response::Accepted { revision, .. } => {
+                        Response::Accepted {
+                            entity_id,
+                            revision,
+                        } => {
                             self.revision = self.revision.max(revision);
+                            if self.pending_new_conversation
+                                && let Some(id) = entity_id.as_deref()
+                                && self.conversations.iter().any(|c| c.id == id)
+                            {
+                                self.pending_new_conversation = false;
+                                self.open_conversation(id);
+                                self.chat_follow_due = true;
+                            }
                             let done = match self.memory_state.status_message.as_deref() {
                                 Some("Saving memory…") => Some("Memory saved."),
                                 Some("Removing memory…") => Some("Memory removed."),
@@ -660,6 +674,7 @@ impl ChattyApp {
                 }
             }
             MessageType::Error => {
+                self.pending_new_conversation = false;
                 self.world_state.import_pending = false;
                 self.world_state.import_started = None;
                 self.char_import_pending = false;
@@ -750,8 +765,44 @@ impl ChattyApp {
         } else {
             decode::<DeltaPayload>(&d.changed_fields).ok()
         };
-        if d.entity_type == "conversation" && matches!(d.operation, DeltaOperation::Delete) {
-            self.context_usage.remove(&d.entity_id);
+        if d.entity_type == "conversation" {
+            if matches!(d.operation, DeltaOperation::Delete) {
+                self.conversations.retain(|c| c.id != d.entity_id);
+                self.context_usage.remove(&d.entity_id);
+                if self.selected_conversation.as_deref() == Some(d.entity_id.as_str()) {
+                    self.close_conversation();
+                }
+            } else if let Some(DeltaPayload::Conversation {
+                title,
+                kind,
+                participant_ids,
+                state,
+                summary,
+            }) = payload.as_ref()
+            {
+                if self.selected_conversation.as_deref() == Some(d.entity_id.as_str())
+                    && self
+                        .next_speaker
+                        .as_deref()
+                        .is_some_and(|speaker| !participant_ids.iter().any(|id| id == speaker))
+                {
+                    self.next_speaker = None;
+                }
+                let updated = Conversation {
+                    id: d.entity_id.clone(),
+                    title: title.clone(),
+                    kind: *kind,
+                    participant_ids: participant_ids.clone(),
+                    state: state.clone(),
+                    summary: summary.clone(),
+                    revision: d.revision,
+                };
+                if let Some(existing) = self.conversations.iter_mut().find(|c| c.id == d.entity_id) {
+                    *existing = updated;
+                } else {
+                    self.conversations.insert(0, updated);
+                }
+            }
         }
         if d.entity_type == "world" {
             self.worlds.retain(|world| world.id != d.entity_id);

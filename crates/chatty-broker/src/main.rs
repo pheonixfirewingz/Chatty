@@ -1596,6 +1596,7 @@ async fn dispatch(
             if participant_ids.len() > 32 || title.is_empty() || title.len() > 512 {
                 bail!("conversation title or participant count invalid")
             }
+            check_conversation_characters(&app.db, &uid, kind, &participant_ids, true).await?;
             let participant_json = serde_json::to_string(&participant_ids)?;
             let owned_count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM characters WHERE (owner_id=? OR is_public=1) AND id IN (SELECT value FROM json_each(?))").bind(&uid).bind(participant_json).fetch_one(&app.db).await?;
             if owned_count != participant_ids.len() as i64 {
@@ -1658,6 +1659,23 @@ async fn dispatch(
             {
                 bail!("conversation title or participant count invalid")
             }
+            let mut current_ids: Vec<String> = sqlx::query_scalar(
+                "SELECT character_id FROM participants WHERE conversation_id=?",
+            )
+            .bind(&conversation_id)
+            .fetch_all(&app.db)
+            .await?;
+            let mut requested_ids = participant_ids.clone();
+            current_ids.sort();
+            requested_ids.sort();
+            check_conversation_characters(
+                &app.db,
+                &uid,
+                kind,
+                &participant_ids,
+                current_ids != requested_ids,
+            )
+            .await?;
             let participant_json = serde_json::to_string(&participant_ids)?;
             let owned_count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM characters WHERE (owner_id=? OR is_public=1) AND id IN(SELECT value FROM json_each(?))").bind(&uid).bind(participant_json).fetch_one(&app.db).await?;
             if owned_count != participant_ids.len() as i64 {

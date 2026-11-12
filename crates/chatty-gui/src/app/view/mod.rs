@@ -204,6 +204,7 @@ impl ChattyApp {
                 editing: self.editing_conversation.is_some(),
                 title: &self.new_conversation_title,
                 search: &self.new_chat_search,
+                worlds: &self.worlds,
                 glass_mode: self.glass_mode,
             };
             modal(
