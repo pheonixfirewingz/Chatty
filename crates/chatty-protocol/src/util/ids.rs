@@ -1,7 +1,8 @@
 //! Random v4 UUID strings, replacing the `uuid` crate.
 //!
 //! Reads entropy from `/dev/urandom`; if that ever fails, falls back to a
-//! time/address-space hash so ID generation can never panic.
+//! time/address-space hash so ID generation can never panic. Secrets such as
+//! session tokens use [`secret_hex`], which never falls back.
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -22,6 +23,16 @@ pub fn new_uuid() -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+/// Returns `bytes` random bytes from `/dev/urandom` as lowercase hex.
+///
+/// Unlike [`new_uuid`], this fails instead of using a predictable fallback, so
+/// it is safe for bearer secrets.
+pub fn secret_hex(bytes: usize) -> std::io::Result<String> {
+    let mut buffer = vec![0u8; bytes];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut buffer)?;
+    Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn fill_random(buffer: &mut [u8]) {

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) async fn new_session(db: &SqlitePool, uid: &str) -> Result<(String, i64)> {
-    let token = new_uuid() + &new_uuid();
+    let token = chatty_protocol::util::secret_hex(32).context("no secure randomness")?;
     sqlx::query("INSERT INTO sessions(token,user_id) VALUES(?,?)")
         .bind(&token)
         .bind(uid)

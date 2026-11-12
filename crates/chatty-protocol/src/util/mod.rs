@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use crate::bail;
 pub use crate::format_err;
 pub use errors::{Context, Error, Result};
-pub use ids::new_uuid;
+pub use ids::{new_uuid, secret_hex};
 
 pub fn current_utc_timestamp() -> String {
     format_utc_timestamp(SystemTime::now())
