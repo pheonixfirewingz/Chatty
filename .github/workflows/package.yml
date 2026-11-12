@@ -27,7 +27,7 @@ jobs:
       - name: Install Flatpak and the Freedesktop SDK
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak
+          sudo apt-get install -y flatpak appstream-compose
           # flatpak build sandboxes with unprivileged user namespaces, which
           # Ubuntu 24.04 restricts by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

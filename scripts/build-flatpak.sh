@@ -80,6 +80,20 @@ if ! flatpak info "$runtime//$runtime_branch" >/dev/null 2>&1 ||
         "$rust_sdk" "$runtime_branch" >&2
     exit 1
 fi
+# Freedesktop SDK 26.08 no longer includes appstreamcli, so compose metadata
+# on the host (or via org.flatpak.Builder when installed).
+compose_cmd=()
+if command -v appstreamcli >/dev/null 2>&1 &&
+   appstreamcli compose --help >/dev/null 2>&1; then
+    compose_cmd=(appstreamcli)
+elif flatpak info --user org.flatpak.Builder >/dev/null 2>&1; then
+    compose_cmd=(flatpak run --user --filesystem="$app_dir" --command=appstreamcli org.flatpak.Builder)
+elif flatpak info --system org.flatpak.Builder >/dev/null 2>&1; then
+    compose_cmd=(flatpak run --system --filesystem="$app_dir" --command=appstreamcli org.flatpak.Builder)
+else
+    printf '%s\n' "appstreamcli compose is required (install appstream-compose or org.flatpak.Builder)." >&2
+    exit 1
+fi
 
 version=$(cargo metadata --manifest-path "$project_dir/Cargo.toml" --no-deps --format-version 1 |
     sed -n 's/.*"name":"chatty-gui","version":"\([^"]*\)".*/\1/p')
@@ -149,15 +163,23 @@ flatpak build \
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.metainfo.xml /app/share/metainfo/io.github.pheonixfirewingz.Chatty.metainfo.xml
         install -Dm644 packaging/flatpak/io.github.pheonixfirewingz.Chatty.svg /app/share/icons/hicolor/scalable/apps/io.github.pheonixfirewingz.Chatty.svg
         install -Dm644 LICENSE /app/share/licenses/io.github.pheonixfirewingz.Chatty/LICENSE
-        # AppStream catalog data lets `flatpak search` and software centres list the app.
-        appstreamcli compose --prefix=/ \
-            --origin=io.github.pheonixfirewingz.Chatty \
-            --components=io.github.pheonixfirewingz.Chatty \
-            --result-root=/app \
-            --data-dir=/app/share/app-info/xmls \
-            --icons-dir=/app/share/app-info/icons/flatpak \
-            /app
     '
+
+# AppStream catalog data lets `flatpak search` and software centres list the app.
+compose_args=(
+    --no-net
+    --prefix=/
+    --origin="$app_id"
+    --components="$app_id"
+    --result-root="$app_dir/files"
+    --data-dir="$app_dir/files/share/app-info/xmls"
+    --icons-dir="$app_dir/files/share/app-info/icons/flatpak"
+)
+compose_help=$("${compose_cmd[@]}" compose --help 2>/dev/null || true)
+if [[ "$compose_help" == *"--image-format"* ]]; then
+    compose_args+=(--image-format=png)
+fi
+"${compose_cmd[@]}" compose "${compose_args[@]}" "$app_dir/files"
 
 flatpak build-finish \
     --command=chatty-gui \

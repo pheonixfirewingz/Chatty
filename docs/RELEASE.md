@@ -69,7 +69,7 @@ short, and wide images for clipping, overlap, and inaccessible controls.
 
 ## Flatpak bundle
 
-The supported local bundle builder vendors locked dependencies and builds only the GUI inside the Freedesktop SDK:
+The supported local bundle builder vendors locked dependencies, builds the GUI inside the Freedesktop SDK, and composes AppStream metadata using host `appstreamcli` (`appstream-compose`) or `org.flatpak.Builder`:
 
 ```sh
 flatpak install flathub \
