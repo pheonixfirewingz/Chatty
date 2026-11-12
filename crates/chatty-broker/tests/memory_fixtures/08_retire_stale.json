@@ -1,0 +1,16 @@
+{
+  "description": "A memory that stopped being true is retired, not deleted.",
+  "participants": ["Mara"],
+  "saved": [
+    {"id": "bike", "holder": "Mara", "content": "The user rides a red bike to work."}
+  ],
+  "transcript": [
+    {"author": "user", "content": "I sold my bike. I take the tram to work now."},
+    {"author": "Mara", "content": "The tram is quicker in the rain anyway."}
+  ],
+  "scripted": "[{\"op\":\"retire\",\"ref\":1},{\"op\":\"add\",\"holder\":\"Mara\",\"content\":\"The user takes the tram to work.\",\"evidence\":[1]}]",
+  "expected": {
+    "active": [{"holder": "Mara", "contains": ["tram"]}],
+    "statuses": {"bike": "retired"}
+  }
+}

@@ -306,7 +306,7 @@ fn parse_memory_operations(value: &str) -> Result<Vec<MemoryOperation>> {
 }
 
 // Keep word order, negation, and numbers: fuzzy word overlap can discard changed facts.
-fn same_memory_text(left: &str, right: &str) -> bool {
+pub(super) fn same_memory_text(left: &str, right: &str) -> bool {
     fn words(value: &str) -> Vec<String> {
         value
             .trim()
@@ -354,7 +354,7 @@ fn memory_features(value: &str) -> (Vec<String>, Vec<String>, bool) {
 /// pairs (within two positions), with the same numbers and negation. Order
 /// keeps "Mara trusts Rowan" distinct from "Rowan trusts Mara"; numbers and
 /// negation keep changed facts distinct.
-fn near_duplicate(left: &str, right: &str) -> bool {
+pub(super) fn near_duplicate(left: &str, right: &str) -> bool {
     fn jaccard<T: Ord>(
         left: &std::collections::BTreeSet<T>,
         right: &std::collections::BTreeSet<T>,
@@ -1110,7 +1110,7 @@ async fn prune_memory_history(
     Ok(deltas)
 }
 
-async fn maybe_extract_automatic_memory(
+pub(super) async fn maybe_extract_automatic_memory(
     app: &App,
     owner_id: &str,
     conversation_id: &str,

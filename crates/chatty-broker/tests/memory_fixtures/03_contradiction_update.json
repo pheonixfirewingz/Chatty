@@ -1,0 +1,17 @@
+{
+  "description": "A changed fact supersedes the stale memory and keeps it as history.",
+  "participants": ["Mara"],
+  "saved": [
+    {"id": "paris", "holder": "Mara", "content": "The user lives in Paris."}
+  ],
+  "transcript": [
+    {"author": "user", "content": "Big news: I left Paris last month. I live in Berlin now."},
+    {"author": "Mara", "content": "Berlin! You will have to tell me all about it."}
+  ],
+  "scripted": "[{\"op\":\"update\",\"ref\":1,\"content\":\"The user moved from Paris to Berlin.\",\"importance\":4,\"evidence\":[1]}]",
+  "expected": {
+    "active": [{"holder": "Mara", "contains": ["Berlin"]}],
+    "statuses": {"paris": "superseded"},
+    "forbidden": [{"holder": "Mara", "contains": "lives in Paris"}]
+  }
+}

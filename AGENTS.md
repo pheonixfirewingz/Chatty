@@ -66,6 +66,10 @@ for functional and packaging checks.
   `cargo run -p chatty-gui -- --help`.
 - Protocol benchmark: `cargo run -p chatty-protocol --bin proto-bench`.
 - Mock inference: `cargo run -p chatty-broker --bin chatty-mock-llama -- --help`.
+- Memory evaluation: `cargo test` replays `crates/chatty-broker/tests/memory_fixtures`.
+  Against a server, start `chatty-mock-llama --listen 127.0.0.2:18114 --memory-fixtures <dir>`
+  (or use a live model), then run `chatty-broker --memory-eval <dir> --llama-url <url>`.
+  It reports pass/fail, precision, recall, and duplicate rate; record the real numbers.
 - `cargo run -p chatty-broker --bin e2e-smoke` needs a separately started broker,
   certificates, and test variables. Read its source before use; it is a low-level harness.
 - Protocol checks cover framing, fragmentation, compression, decompression bounds,

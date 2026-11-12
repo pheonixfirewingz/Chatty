@@ -1,0 +1,16 @@
+{
+  "description": "Pinned and manual memories are never changed; a conflicting fact is added beside them.",
+  "participants": ["Mara"],
+  "saved": [
+    {"id": "vegetarian", "holder": "Mara", "content": "The user is vegetarian.", "source": "manual", "pinned": true}
+  ],
+  "transcript": [
+    {"author": "user", "content": "I started eating fish again last week."},
+    {"author": "Mara", "content": "Then I will cook trout tonight."}
+  ],
+  "scripted": "[{\"op\":\"retire\",\"ref\":1},{\"op\":\"update\",\"ref\":1,\"content\":\"The user eats fish.\"},{\"op\":\"add\",\"holder\":\"Mara\",\"content\":\"The user eats fish again.\",\"evidence\":[1]}]",
+  "expected": {
+    "active": [{"holder": "Mara", "contains": ["fish"]}],
+    "statuses": {"vegetarian": "active"}
+  }
+}

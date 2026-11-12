@@ -47,6 +47,8 @@ mod images;
 mod inference;
 #[path = "systems/memory.rs"]
 mod memory;
+#[path = "systems/memory_eval.rs"]
+mod memory_eval;
 #[path = "systems/memory_extraction.rs"]
 mod memory_extraction;
 mod transport;
@@ -61,6 +63,7 @@ use emotion::*;
 use images::*;
 use inference::*;
 use memory::*;
+use memory_eval::*;
 use memory_extraction::*;
 use transport::*;
 use utils::*;
@@ -83,6 +86,9 @@ Options:\n\
   --cert <path>       TLS certificate PEM [default: certs/server.pem]\n\
   --key <path>        TLS private key PEM [default: certs/server.key]\n\
   --llama-url <url>   Inference adapter base URL [env: CHATTY_LLAMA_URL]\n\
+\nMemory evaluation (no TLS, in-memory database):\n\
+  --memory-eval <dir>        Run memory fixtures against --llama-url, then exit\n\
+  --memory-eval-model <name> Model for the evaluation [default: first listed]\n\
 \nAdapter plugins:\n\
   CHATTY_ADAPTER_DIR       Optional directory of WASM plugin subdirectories\n\
   CHATTY_ADAPTER_PLUGIN    Optional inference/management plugin ID override\n";
@@ -260,6 +266,15 @@ impl Drop for BusyGuard {
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = ParsedArgs::parse(USAGE)?;
+    if let Some(directory) = parsed.optional("memory-eval", "") {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_| format_err!("failed to install TLS crypto provider"))?;
+        let url = parsed.string("llama-url", "CHATTY_LLAMA_URL", "http://127.0.0.1:18114/v1");
+        let model = parsed.optional("memory-eval-model", "");
+        let passed = run_memory_evaluation(Path::new(&directory), &url, model.as_deref()).await?;
+        std::process::exit(if passed { 0 } else { 1 });
+    }
     let log = match parsed.optional("log", "CHATTY_LOG") {
         Some(path) => PathBuf::from(path),
         None => default_broker_log_path()?,

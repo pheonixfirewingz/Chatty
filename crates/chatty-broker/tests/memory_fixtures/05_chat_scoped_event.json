@@ -1,0 +1,12 @@
+{
+  "description": "Events of this chat stay in this chat unless marked global.",
+  "participants": ["Mara"],
+  "transcript": [
+    {"author": "user", "content": "Let's cross the rope bridge before the sun sets."},
+    {"author": "Mara", "content": "We made it across. The river is roaring beneath us."}
+  ],
+  "scripted": "[{\"op\":\"add\",\"holder\":\"Mara\",\"kind\":\"event\",\"importance\":2,\"content\":\"Mara and the user crossed the rope bridge at sunset.\",\"evidence\":[1,2]}]",
+  "expected": {
+    "active": [{"holder": "Mara", "contains": ["rope bridge"], "kind": "event", "scope": "chat"}]
+  }
+}
