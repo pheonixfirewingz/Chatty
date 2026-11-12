@@ -9,6 +9,32 @@ const MEMORY_USAGE_INSTRUCTIONS: &str = concat!(
     "a memory system, or force an unrelated memory into the response."
 );
 
+/// Columns read by `memory_entry_from_row`.
+pub(super) const MEMORY_COLUMNS: &str = "id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision,status,superseded_by";
+/// `MEMORY_COLUMNS` qualified for queries that alias `memories` as `m`.
+pub(super) const MEMORY_COLUMNS_M: &str = "m.id,m.conversation_id,m.character_id,m.kind,m.content,m.importance,m.pinned,m.confidence,m.source,m.source_message_ids,m.created_at,m.updated_at,m.revision,m.status,m.superseded_by";
+/// Active memories returned by one list request.
+const LISTED_ACTIVE_MEMORIES: i64 = 500;
+/// Superseded or retired memories returned by one list request.
+const LISTED_HISTORY_MEMORIES: i64 = 200;
+
+pub(super) fn memory_status_from_i64(value: i64) -> Result<MemoryStatus> {
+    match value {
+        0 => Ok(MemoryStatus::Active),
+        1 => Ok(MemoryStatus::Superseded),
+        2 => Ok(MemoryStatus::Retired),
+        _ => bail!("invalid stored memory status"),
+    }
+}
+
+pub(super) fn memory_status_value(value: MemoryStatus) -> i64 {
+    match value {
+        MemoryStatus::Active => 0,
+        MemoryStatus::Superseded => 1,
+        MemoryStatus::Retired => 2,
+    }
+}
+
 pub(super) fn memory_kind_from_i64(value: i64) -> Result<MemoryKind> {
     match value {
         0 => Ok(MemoryKind::Fact),
@@ -61,6 +87,8 @@ pub(super) fn memory_entry_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Mem
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         revision: row.get("revision"),
+        status: memory_status_from_i64(row.get("status"))?,
+        superseded_by: row.get("superseded_by"),
     })
 }
 
@@ -111,24 +139,57 @@ pub(super) async fn list_memories(
     owner_id: &str,
     conversation_id: Option<&str>,
     character_id: Option<&str>,
+    include_history: bool,
 ) -> Result<Vec<MemoryEntry>> {
     if let Some(conversation_id) = conversation_id {
         own_conversation(db, owner_id, conversation_id).await?;
     }
-    let rows = sqlx::query(
-        "SELECT id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision \
-         FROM memories WHERE owner_id=? AND status=0 \
-         AND (? IS NULL OR conversation_id IS NULL OR conversation_id=?) AND (? IS NULL OR character_id=?) \
-         ORDER BY pinned DESC,updated_at DESC,revision DESC LIMIT 500",
-    )
+    let mut entries = Vec::new();
+    for (status, limit) in [
+        ("status=0", LISTED_ACTIVE_MEMORIES),
+        ("status<>0", LISTED_HISTORY_MEMORIES),
+    ] {
+        if status != "status=0" && !include_history {
+            break;
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {MEMORY_COLUMNS} FROM memories WHERE owner_id=? AND {status} \
+             AND (? IS NULL OR conversation_id IS NULL OR conversation_id=?) AND (? IS NULL OR character_id=?) \
+             ORDER BY pinned DESC,updated_at DESC,revision DESC LIMIT ?"
+        ))
+        .bind(owner_id)
+        .bind(conversation_id)
+        .bind(conversation_id)
+        .bind(character_id)
+        .bind(character_id)
+        .bind(limit)
+        .fetch_all(db)
+        .await?;
+        for row in &rows {
+            entries.push(memory_entry_from_row(row)?);
+        }
+    }
+    Ok(entries)
+}
+
+/// Every memory scoped to one owned conversation, history included, so that
+/// deleting the conversation can promote all of them to cross-chat scope.
+pub(super) async fn chat_scoped_memories(
+    db: &SqlitePool,
+    owner_id: &str,
+    conversation_id: &str,
+) -> Result<Vec<MemoryEntry>> {
+    own_conversation(db, owner_id, conversation_id).await?;
+    sqlx::query(&format!(
+        "SELECT {MEMORY_COLUMNS} FROM memories WHERE owner_id=? AND conversation_id=? ORDER BY revision"
+    ))
     .bind(owner_id)
     .bind(conversation_id)
-    .bind(conversation_id)
-    .bind(character_id)
-    .bind(character_id)
     .fetch_all(db)
-    .await?;
-    rows.iter().map(memory_entry_from_row).collect()
+    .await?
+    .iter()
+    .map(memory_entry_from_row)
+    .collect()
 }
 
 pub(super) async fn persist_memory(
@@ -191,6 +252,9 @@ pub(super) async fn persist_memory(
         created_at,
         updated_at: now,
         revision: 0,
+        // Saving a superseded or retired memory makes it active again.
+        status: MemoryStatus::Active,
+        superseded_by: None,
     };
     let mut transaction = app.db.begin().await?;
     let changed = write_memory_tx(&mut transaction, owner_id, &mut entry, operation).await?;
@@ -221,12 +285,13 @@ pub(super) async fn write_memory_tx(
     sqlx::query(
         "INSERT INTO memories(\
             id,owner_id,conversation_id,character_id,content,revision,kind,importance,pinned,\
-            confidence,source,source_message_ids,status,created_at,updated_at,last_accessed_at,access_count\
-         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,NULL,0) \
+            confidence,source,source_message_ids,status,superseded_by,created_at,updated_at,last_accessed_at,access_count\
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,0) \
          ON CONFLICT(id) DO UPDATE SET \
             conversation_id=excluded.conversation_id,character_id=excluded.character_id,\
             content=excluded.content,revision=excluded.revision,kind=excluded.kind,\
-            importance=excluded.importance,pinned=excluded.pinned,updated_at=excluded.updated_at \
+            importance=excluded.importance,pinned=excluded.pinned,updated_at=excluded.updated_at,\
+            status=excluded.status,superseded_by=excluded.superseded_by \
          WHERE owner_id=excluded.owner_id",
     )
     .bind(&entry.id)
@@ -241,6 +306,8 @@ pub(super) async fn write_memory_tx(
     .bind(f64::from(entry.confidence))
     .bind(memory_source_value(entry.source))
     .bind(serde_json::to_string(&entry.source_message_ids)?)
+    .bind(memory_status_value(entry.status))
+    .bind(&entry.superseded_by)
     .bind(&entry.created_at)
     .bind(&entry.updated_at)
     .execute(&mut **transaction)
@@ -249,7 +316,26 @@ pub(super) async fn write_memory_tx(
     Ok(changed)
 }
 
-fn fts_query(value: &str) -> Option<String> {
+/// Common English words that carry no topic, sorted for binary search.
+/// Retrieval and near-duplicate checks ignore them.
+const STOP_WORDS: [&str; 120] = [
+    "a", "about", "after", "again", "all", "also", "am", "an", "and", "any", "are", "as", "at",
+    "be", "because", "been", "before", "being", "both", "but", "by", "can", "could", "did", "do",
+    "does", "doing", "each", "even", "for", "from", "further", "had", "has", "have", "having",
+    "he", "her", "here", "hers", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its",
+    "just", "let", "like", "me", "more", "most", "much", "my", "now", "of", "off", "oh", "ok",
+    "on", "once", "only", "or", "other", "our", "out", "over", "own", "quite", "really", "said",
+    "same", "say", "she", "should", "so", "some", "such", "than", "that", "the", "their", "them",
+    "then", "there", "these", "they", "this", "those", "through", "to", "too", "under", "until",
+    "up", "us", "very", "was", "way", "we", "well", "were", "what", "when", "where", "which",
+    "while", "who", "whom", "why", "will", "with", "would", "yes", "you", "your",
+];
+
+pub(super) fn is_stop_word(word: &str) -> bool {
+    STOP_WORDS.binary_search(&word).is_ok()
+}
+
+pub(super) fn fts_query(value: &str) -> Option<String> {
     let mut words = value
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| word.chars().count() >= 3)
@@ -268,13 +354,12 @@ pub(super) async fn relevant_memories(
     character_id: &str,
     context: &str,
 ) -> Result<Vec<MemoryEntry>> {
-    let baseline = sqlx::query(
-        "SELECT id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision \
-         FROM memories WHERE owner_id=? AND status=0 \
+    let baseline = sqlx::query(&format!(
+        "SELECT {MEMORY_COLUMNS} FROM memories WHERE owner_id=? AND status=0 \
          AND (conversation_id IS NULL OR conversation_id=?) \
          AND (character_id IS NULL OR character_id=?) \
          ORDER BY pinned DESC,importance DESC,updated_at DESC LIMIT 24",
-    )
+    ))
     .bind(owner_id)
     .bind(conversation_id)
     .bind(character_id)
@@ -292,14 +377,13 @@ pub(super) async fn relevant_memories(
     }
 
     if let Some(query) = fts_query(context) {
-        let matches = sqlx::query(
-            "SELECT m.id,m.conversation_id,m.character_id,m.kind,m.content,m.importance,m.pinned,m.confidence,m.source,m.source_message_ids,m.created_at,m.updated_at,m.revision \
-             FROM memory_fts f JOIN memories m ON m.id=f.memory_id \
+        let matches = sqlx::query(&format!(
+            "SELECT {MEMORY_COLUMNS_M} FROM memory_fts f JOIN memories m ON m.id=f.memory_id \
              WHERE memory_fts MATCH ? AND m.owner_id=? AND m.status=0 \
              AND (m.conversation_id IS NULL OR m.conversation_id=?) \
              AND (m.character_id IS NULL OR m.character_id=?) \
              ORDER BY bm25(memory_fts),m.importance DESC LIMIT 32",
-        )
+        ))
         .bind(query)
         .bind(owner_id)
         .bind(conversation_id)
@@ -407,6 +491,8 @@ mod tests {
             created_at: "2026-09-18 00:00:00".into(),
             updated_at: "2026-09-18 00:00:00".into(),
             revision: 1,
+            status: MemoryStatus::Active,
+            superseded_by: None,
         }]);
         assert!(prompt.contains("established long-term context"));
         assert!(prompt.contains("even when the user does not repeat them"));

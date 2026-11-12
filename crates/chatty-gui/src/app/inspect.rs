@@ -4,8 +4,8 @@ use crate::admin;
 use crate::app::{ChattyApp, Message, Screen};
 use chatty_protocol::{
     AdapterStatus, BrokerLog, BrokerMonitor, Character, CharacterImage, ChatMessage, Conversation,
-    ConversationKind, GenerationContext, MemoryEntry, MemoryKind, MemorySource, ModelSearchResult,
-    OllamaModel, OllamaRunningModel, OllamaState, Role,
+    ConversationKind, GenerationContext, MemoryEntry, MemoryKind, MemorySource, MemoryStatus,
+    ModelSearchResult, OllamaModel, OllamaRunningModel, OllamaState, Role,
 };
 use iced::futures::StreamExt;
 use iced::futures::stream::BoxStream;
@@ -256,6 +256,8 @@ impl ChattyApp {
                 created_at: "2026-08-20 09:10:00".into(),
                 updated_at: "2026-08-20 09:10:00".into(),
                 revision: 2,
+                status: MemoryStatus::Active,
+                superseded_by: None,
             },
             MemoryEntry {
                 id: "memory-event".into(),
@@ -272,6 +274,8 @@ impl ChattyApp {
                 created_at: "2026-08-24 14:30:00".into(),
                 updated_at: "2026-08-24 14:30:00".into(),
                 revision: 3,
+                status: MemoryStatus::Active,
+                superseded_by: None,
             },
         ];
         self.messages.push(ChatMessage {

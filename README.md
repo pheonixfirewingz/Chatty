@@ -187,7 +187,8 @@ Above the message input, the pencil opens the chat to rename it, add or remove
 characters, or change the mode; adding a character to a direct chat makes it a group.
 In a group, **Next reply** chips choose who answers. Outside manual mode a pick applies
 to one reply. Send an empty message (**Continue**) to let the characters talk among
-themselves. Automatic memory extraction saves facts for the character who replied last.
+themselves. Every character in the group remembers what it witnessed: after each reply,
+the broker saves new memories for each participant it applies to.
 
 ## Context usage
 

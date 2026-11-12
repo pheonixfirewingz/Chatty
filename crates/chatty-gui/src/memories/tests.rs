@@ -1,6 +1,6 @@
 use super::*;
-use chatty_protocol::MemorySource;
 use chatty_protocol::{Character, Conversation};
+use chatty_protocol::{MemorySource, MemoryStatus};
 use iced::Element;
 
 fn sample_entries() -> Vec<MemoryEntry> {
@@ -19,6 +19,8 @@ fn sample_entries() -> Vec<MemoryEntry> {
             created_at: "2026-09-01T10:00:00Z".into(),
             updated_at: "2026-09-01T10:00:00Z".into(),
             revision: 1,
+            status: MemoryStatus::Active,
+            superseded_by: None,
         },
         MemoryEntry {
             id: "m2".into(),
@@ -34,6 +36,8 @@ fn sample_entries() -> Vec<MemoryEntry> {
             created_at: "2026-09-02T12:00:00Z".into(),
             updated_at: "2026-09-02T12:00:00Z".into(),
             revision: 1,
+            status: MemoryStatus::Active,
+            superseded_by: None,
         },
         MemoryEntry {
             id: "m3".into(),
@@ -49,6 +53,8 @@ fn sample_entries() -> Vec<MemoryEntry> {
             created_at: "2026-09-03T14:00:00Z".into(),
             updated_at: "2026-09-03T14:00:00Z".into(),
             revision: 1,
+            status: MemoryStatus::Active,
+            superseded_by: None,
         },
     ]
 }
@@ -91,6 +97,8 @@ fn one_click_condense_dispatches_immediately_and_blocks_duplicate_clicks() {
         created_at: "2026-09-03T15:00:00Z".into(),
         updated_at: "2026-09-03T15:00:00Z".into(),
         revision: 2,
+        status: MemoryStatus::Active,
+        superseded_by: None,
     });
     assert!(can_condense_memories(&entries, None, None, None));
     assert!(can_condense_memories(

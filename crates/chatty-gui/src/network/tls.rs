@@ -233,7 +233,7 @@ pub(super) async fn verify_chatty_handshake(
     let hello = read_frame(&mut stream).await?;
     let value: serde_json::Value = serde_json::from_slice(&hello.payload)?;
     if hello.message_type != MessageType::Handshake
-        || value["protocol"] != 27
+        || value["protocol"] != 28
         || value["encoding"] != "bincode2"
     {
         bail!("unsupported broker handshake");

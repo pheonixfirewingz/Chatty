@@ -105,6 +105,8 @@ pub enum Request {
         session_token: String,
         conversation_id: Option<String>,
         character_id: Option<String>,
+        /// Also return superseded and retired memories, bounded separately.
+        include_history: bool,
     },
     UpsertCharacter {
         session_token: String,
@@ -167,8 +169,9 @@ pub enum Request {
         session_token: String,
         since_revision: i64,
     },
-    /// Ask the external model to extract one durable fact from recent conversation history.
-    /// The broker validates and persists the result; no model output is trusted directly.
+    /// Run memory extraction over recent conversation history now. The broker
+    /// validates every model operation before persisting it, keeps only
+    /// operations for `character_id` when given, and answers `MemoriesExtracted`.
     ExtractMemory {
         session_token: String,
         conversation_id: String,

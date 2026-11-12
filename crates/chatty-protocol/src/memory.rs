@@ -18,6 +18,17 @@ pub enum MemorySource {
     Automatic,
 }
 
+/// Lifecycle of a memory. Inactive rows are kept as history.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryStatus {
+    #[default]
+    Active,
+    /// Replaced by a newer memory; `superseded_by` names it when it still exists.
+    Superseded,
+    /// No longer true or relevant, with no replacement.
+    Retired,
+}
+
 impl MemoryKind {
     pub fn label(self) -> &'static str {
         match self {
@@ -64,4 +75,6 @@ pub struct MemoryEntry {
     pub created_at: String,
     pub updated_at: String,
     pub revision: i64,
+    pub status: MemoryStatus,
+    pub superseded_by: Option<String>,
 }

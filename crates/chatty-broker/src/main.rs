@@ -1105,7 +1105,7 @@ async fn dispatch(
         } => {
             let uid = auth(&app.db, &session_token).await?;
             let mut promoted_memories = if matches!(kind, EntityKind::Conversation) {
-                list_memories(&app.db, &uid, Some(&entity_id), None).await?
+                chat_scoped_memories(&app.db, &uid, &entity_id).await?
             } else {
                 Vec::new()
             };
@@ -1324,6 +1324,7 @@ async fn dispatch(
             session_token,
             conversation_id,
             character_id,
+            include_history,
         } => {
             let uid = auth(&app.db, &session_token).await?;
             let entries = list_memories(
@@ -1331,6 +1332,7 @@ async fn dispatch(
                 &uid,
                 conversation_id.as_deref(),
                 character_id.as_deref(),
+                include_history,
             )
             .await?;
             send!(MessageType::Response, Response::Memories(entries));
@@ -2012,33 +2014,15 @@ async fn dispatch(
                     bail!("memory character is not a conversation participant")
                 }
             }
-            let extracted = extract_memory(&app, &uid, &conversation_id).await?;
-            let eid = new_uuid();
-            let memory = MemoryInput {
-                id: Some(eid.clone()),
-                conversation_id: Some(conversation_id),
-                character_id,
-                kind: MemoryKind::Fact,
-                content: extracted.content,
-                importance: 50,
-                pinned: false,
-            };
-            let (entry, operation, changed) = persist_memory(
-                &app,
-                &uid,
-                memory,
-                MemorySource::Automatic,
-                0.8,
-                extracted.source_message_ids,
-            )
-            .await?;
-            let rev = entry.revision;
-            send_delta!(&uid, rev, "memory", eid, operation, changed);
+            let outcome =
+                run_manual_memory_extraction(&app, &uid, &conversation_id, character_id.as_deref())
+                    .await?;
             send!(
                 MessageType::Response,
-                Response::Accepted {
-                    entity_id: Some(eid),
-                    revision: rev
+                Response::MemoriesExtracted {
+                    added: outcome.added,
+                    updated: outcome.updated,
+                    retired: outcome.retired,
                 }
             );
         }

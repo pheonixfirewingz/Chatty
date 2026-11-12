@@ -352,7 +352,13 @@ pub(super) async fn send_snapshot(
         tx.send((MessageType::Delta, request_id, encode(&delta)?.into()))
             .await?;
     }
-    let mut memories=sqlx::query("SELECT id,conversation_id,character_id,kind,content,importance,pinned,confidence,source,source_message_ids,created_at,updated_at,revision FROM memories WHERE owner_id=? AND status=0 AND revision<=? ORDER BY id").bind(user_id).bind(snapshot_revision).fetch(&app.db);
+    let memory_sql = format!(
+        "SELECT {MEMORY_COLUMNS} FROM memories WHERE owner_id=? AND status=0 AND revision<=? ORDER BY id"
+    );
+    let mut memories = sqlx::query(&memory_sql)
+        .bind(user_id)
+        .bind(snapshot_revision)
+        .fetch(&app.db);
     while let Some(row) = memories.try_next().await? {
         let entity_id: String = row.get("id");
         let payload = DeltaPayload::Memory(memory_entry_from_row(&row)?);

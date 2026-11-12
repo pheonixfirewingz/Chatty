@@ -152,8 +152,7 @@ impl ChattyApp {
                 Message::CloseWorldsDialog,
             )
         } else if self.memory_dialog_open {
-            let can_extract =
-                self.selected_conversation.is_some() && self.memory_character().is_some();
+            let can_extract = self.selected_conversation.is_some();
             let state = MemoryViewState::new(
                 &self.memories,
                 &self.characters,

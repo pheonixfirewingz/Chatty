@@ -6,7 +6,7 @@ mod view;
 
 pub use view::*;
 
-use chatty_protocol::{MemoryEntry, MemoryInput, MemoryKind};
+use chatty_protocol::{MemoryEntry, MemoryInput, MemoryKind, MemoryStatus};
 use iced::widget::text_editor;
 
 /// Broker importance scale; retrieval ranks by it, and learned memories use 50.
@@ -272,7 +272,7 @@ pub fn blank_memory(character_id: Option<String>, conversation_id: Option<String
     }
 }
 
-/// Filters memories based on character, conversation, kind, and search text.
+/// Filters active memories based on character, conversation, kind, and search text.
 pub fn filter_memories<'a>(
     memories: &'a [MemoryEntry],
     character_id: Option<&str>,
@@ -284,6 +284,9 @@ pub fn filter_memories<'a>(
     memories
         .iter()
         .filter(|m| {
+            if m.status != MemoryStatus::Active {
+                return false;
+            }
             if let Some(cid) = character_id
                 && m.character_id.as_deref() != Some(cid)
             {
