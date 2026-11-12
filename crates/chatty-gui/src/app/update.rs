@@ -117,6 +117,7 @@ impl ChattyApp {
             Message::OpenCharactersDialog => {
                 self.draft_character_open = true;
                 self.set_draft(DraftCharacter::default());
+                self.enqueue_missing_character_images();
                 Task::none()
             }
             Message::CloseCharactersDialog => {

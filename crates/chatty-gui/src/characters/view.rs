@@ -520,6 +520,25 @@ fn character_editor_at_width<'a>(
     )]
     .spacing(8);
 
+    if !draft.images.is_empty() {
+        let total = draft.images.len();
+        let loaded = draft
+            .images
+            .iter()
+            .filter(|img| !img.data.is_empty())
+            .count();
+        let total_bytes: usize = draft.images.iter().map(|img| img.data.len()).sum();
+        let mib = total_bytes as f64 / (1024.0 * 1024.0);
+        let status_line = if loaded < total {
+            format!(
+                "{loaded} of {total} images loaded · downloading remaining portraits (max {MAX_CHARACTER_IMAGES}, 5.0 MiB)"
+            )
+        } else {
+            format!("{total} of {MAX_CHARACTER_IMAGES} images · {mib:.1} / 5.0 MiB")
+        };
+        gallery_col = gallery_col.push(text(status_line).size(12).color(secondary));
+    }
+
     if can_edit {
         let mut image_actions = row![
             action_icon(

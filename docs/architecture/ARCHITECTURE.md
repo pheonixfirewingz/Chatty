@@ -124,7 +124,7 @@ Reply portraits come from an in-process llama.cpp emotion classifier, not the in
 
 ### Synchronization
 
-Every durable owner-scoped mutation receives a monotonically increasing revision and a delta-log row. Initial login uses a bounded snapshot. Resume requests replay deltas newer than the client's revision.
+Every durable owner-scoped mutation receives a monotonically increasing revision and a delta-log row. Initial login uses a bounded snapshot. Resume requests replay deltas newer than the client's revision; a resume at revision 0 starts at the head because the client reloads its lists after authenticating.
 
 Live deltas are published only to other authenticated connections for the same owner. A lagged subscriber is disconnected so it can resume from the durable log instead of silently skipping revisions.
 

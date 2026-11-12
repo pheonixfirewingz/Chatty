@@ -2021,6 +2021,16 @@ async fn dispatch(
             };
             let uid = auth(&app.db, &session_token).await?;
             *identity.write().await = Some(uid.clone());
+            // A client resuming without state reloads full lists after it
+            // authenticates, so replaying the whole delta log would only flash
+            // long-deleted entities. Start it at the head like a fresh login.
+            let since_revision = if is_resume && since_revision <= 0 {
+                sqlx::query_scalar("SELECT COALESCE(MAX(revision),0) FROM deltas")
+                    .fetch_one(&app.db)
+                    .await?
+            } else {
+                since_revision
+            };
             if is_resume {
                 let role: String = sqlx::query_scalar("SELECT role FROM users WHERE id=?")
                     .bind(&uid)

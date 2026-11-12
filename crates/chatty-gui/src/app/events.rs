@@ -123,8 +123,10 @@ impl ChattyApp {
                     .insert(request_id, (character_id, image_id));
             }
             Event::Status(status) => {
-                if status.contains("Offline:") || status.contains("Idle · offline:") {
-                    // The broker cancels image jobs when their connection closes.
+                let idle_closed = status == "Idle · reconnects on demand";
+                if status.contains("Offline:") || status.contains("Idle · offline:") || idle_closed
+                {
+                    // The broker cancels image jobs and drops in-flight replies when a socket closes.
                     self.scene_image = ImageJob::default();
                     self.portrait_image = ImageJob::default();
                     self.emotion_batch = None;
@@ -135,9 +137,18 @@ impl ChattyApp {
                     self.character_image_queue.clear();
                     self.character_image_request_ids.clear();
                     self.memory_state.condensing = false;
-                    self.interrupt_models(
-                        "Connection interrupted. Refresh to check whether the operation finished on the server.",
-                    );
+                    let model_active = self.admin.models.busy
+                        || self
+                            .admin
+                            .models
+                            .downloads
+                            .values()
+                            .any(|download| !download.finished);
+                    if !idle_closed || model_active {
+                        self.interrupt_models(
+                            "Connection interrupted. Refresh to check whether the operation finished on the server.",
+                        );
+                    }
                 }
                 self.set_network_status(status);
             }
@@ -179,7 +190,11 @@ impl ChattyApp {
                 self.clear_account();
                 self.set_error("Saved session expired. Sign in again.");
             }
-            Event::Frame(frame) => self.handle_frame(frame),
+            Event::Frame(frame) => {
+                self.handle_frame(frame);
+                self.synced_revision
+                    .store(self.revision, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -197,6 +212,9 @@ impl ChattyApp {
         self.char_import_started = None;
         self.end_generation();
         self.token.clear();
+        self.revision = 0;
+        self.synced_revision
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.shown_conversation = None;
         self.pending_new_conversation = false;
         self.role = None;

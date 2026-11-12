@@ -22,6 +22,7 @@ impl ChattyApp {
             CharacterMessage::Select(id) => {
                 // Results must not land in a different character's draft.
                 self.cancel_portrait_generation();
+                self.enqueue_missing_character_images();
                 if let Some(c) = self.characters.iter().find(|c| c.id == id) {
                     let draft = DraftCharacter::from(c);
                     self.set_draft(draft);
@@ -211,7 +212,28 @@ impl ChattyApp {
             .retain(|key| wanted.contains(key));
         self.character_image_queue
             .retain(|key| wanted.contains(key));
+        self.enqueue_character_images_for(&wanted);
+    }
 
+    /// Re-queues any character images that still lack bytes after an offline/idle gap.
+    pub(super) fn enqueue_missing_character_images(&mut self) {
+        let wanted: HashSet<(String, String)> = self
+            .characters
+            .iter()
+            .flat_map(|character| {
+                character
+                    .images
+                    .iter()
+                    .filter(|image| image.data.is_empty())
+                    .map(move |image| (character.id.clone(), image.id.clone()))
+            })
+            .collect();
+        if !wanted.is_empty() {
+            self.enqueue_character_images_for(&wanted);
+        }
+    }
+
+    fn enqueue_character_images_for(&mut self, wanted: &HashSet<(String, String)>) {
         // Prioritize default portraits first so roster avatars and active speakers load fastest.
         let mut ordered_wanted = Vec::with_capacity(wanted.len());
         for character in &self.characters {
@@ -446,9 +468,7 @@ impl ChattyApp {
     }
 
     fn apply_imported_image_batch(&mut self, batch: ImportedImageBatch) {
-        for error in batch.errors {
-            self.set_error(error);
-        }
+        let mut notices = batch.errors;
         let mut truncated = batch.truncated;
         let mut used: usize = self.draft.images.iter().map(|image| image.data.len()).sum();
         let mut imported_default = None;
@@ -458,7 +478,7 @@ impl ChattyApp {
                 break;
             }
             if used + image.data.len() > characters::MAX_CHARACTER_IMAGE_BYTES {
-                self.set_error(format!(
+                notices.push(format!(
                     "{} was not added: this character's images would exceed 5 MiB.",
                     image.label
                 ));
@@ -477,10 +497,23 @@ impl ChattyApp {
             self.draft.default_image_id = Some(id);
         }
         if truncated {
-            self.set_error(format!(
+            notices.push(format!(
                 "Only the first {} character images were added.",
                 characters::MAX_CHARACTER_IMAGES
             ));
+        }
+        if !notices.is_empty() {
+            const MAX_SHOWN: usize = 6;
+            let extra = notices.len().saturating_sub(MAX_SHOWN);
+            let mut summary = notices
+                .into_iter()
+                .take(MAX_SHOWN)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if extra > 0 {
+                summary.push_str(&format!("\n…and {extra} more image(s) skipped."));
+            }
+            self.set_error(summary);
         }
     }
 

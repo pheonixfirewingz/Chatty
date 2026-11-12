@@ -152,6 +152,19 @@ pub struct ProtocolCodec {
     compress_scratch: Vec<u8>,
     decompress_scratch: Vec<u8>,
     rx_scratch: BytesMut,
+    /// Header bytes received so far for the next frame.
+    rx_header: [u8; HEADER_LEN],
+    rx_header_len: usize,
+    /// Parsed header of the frame whose payload is accumulating in `rx_scratch`.
+    rx_frame: Option<RxHeader>,
+}
+
+#[derive(Clone, Copy)]
+struct RxHeader {
+    len: usize,
+    compressed: bool,
+    message_type: MessageType,
+    request_id: u64,
 }
 
 impl Default for ProtocolCodec {
@@ -171,6 +184,9 @@ impl ProtocolCodec {
             compress_scratch: Vec::new(),
             decompress_scratch: Vec::new(),
             rx_scratch: BytesMut::with_capacity(16 * 1024),
+            rx_header: [0; HEADER_LEN],
+            rx_header_len: 0,
+            rx_frame: None,
         })
     }
 
@@ -230,26 +246,59 @@ impl ProtocolCodec {
         Ok(())
     }
 
+    /// Reads one frame. Cancel-safe: partial header and payload bytes stay in
+    /// the codec, so dropping this future inside `select!` loses no data and the
+    /// next call resumes the same frame.
     pub async fn read_frame<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,
     ) -> Result<Frame, ProtocolError> {
-        let mut header = [0u8; HEADER_LEN];
-        reader.read_exact(&mut header).await?;
-        let mut h = &header[..];
-        let len = h.get_u32() as usize;
-        let flags = h.get_u8();
-        let message_type = MessageType::try_from(h.get_u8())?;
-        let request_id = h.get_u64();
-        if len > MAX_PAYLOAD {
-            return Err(ProtocolError::Invalid("payload too large"));
-        }
-        if flags & !FLAG_ZSTD != 0 {
-            return Err(ProtocolError::Invalid("unknown compression flag"));
-        }
-        let compressed = flags & FLAG_ZSTD != 0;
-        self.rx_scratch.clear();
-        self.rx_scratch.reserve(len);
+        let header = match self.rx_frame {
+            Some(header) => header,
+            None => {
+                while self.rx_header_len < HEADER_LEN {
+                    let n = reader
+                        .read(&mut self.rx_header[self.rx_header_len..])
+                        .await?;
+                    if n == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "connection closed",
+                        )
+                        .into());
+                    }
+                    self.rx_header_len += n;
+                }
+                self.rx_header_len = 0;
+                let mut h = &self.rx_header[..];
+                let len = h.get_u32() as usize;
+                let flags = h.get_u8();
+                let message_type = MessageType::try_from(h.get_u8())?;
+                let request_id = h.get_u64();
+                if len > MAX_PAYLOAD {
+                    return Err(ProtocolError::Invalid("payload too large"));
+                }
+                if flags & !FLAG_ZSTD != 0 {
+                    return Err(ProtocolError::Invalid("unknown compression flag"));
+                }
+                self.rx_scratch.clear();
+                self.rx_scratch.reserve(len);
+                let header = RxHeader {
+                    len,
+                    compressed: flags & FLAG_ZSTD != 0,
+                    message_type,
+                    request_id,
+                };
+                self.rx_frame = Some(header);
+                header
+            }
+        };
+        let RxHeader {
+            len,
+            compressed,
+            message_type,
+            request_id,
+        } = header;
         while self.rx_scratch.len() < len {
             // Spare buffer capacity must not consume the next frame's header.
             let remaining = (len - self.rx_scratch.len()) as u64;
@@ -265,6 +314,7 @@ impl ProtocolCodec {
                 .into());
             }
         }
+        self.rx_frame = None;
         let payload = if compressed {
             let ProtocolCodec {
                 compressor: _,
@@ -273,6 +323,7 @@ impl ProtocolCodec {
                 compress_scratch: _,
                 decompress_scratch,
                 rx_scratch,
+                ..
             } = self;
             decompress_via(decompressor, decompress_scratch, &rx_scratch[..len])?
         } else {

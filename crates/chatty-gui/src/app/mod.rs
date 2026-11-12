@@ -28,6 +28,7 @@ use iced::{Task, Theme};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 use std::time::Instant;
 use subscription::ChannelHolder;
 use tokio::sync::mpsc;
@@ -69,6 +70,9 @@ pub struct ChattyApp {
     token: String,
     user_id: String,
     revision: i64,
+    /// Last applied revision, shared with the network task so a reconnect
+    /// resumes from it instead of replaying the whole delta log.
+    synced_revision: Arc<AtomicI64>,
     username: String,
     password: String,
     role: Option<Role>,
@@ -219,6 +223,7 @@ impl ChattyApp {
             token: String::new(),
             user_id: String::new(),
             revision: 0,
+            synced_revision: Arc::new(AtomicI64::new(0)),
             username: String::new(),
             password: String::new(),
             role: None,
@@ -313,11 +318,19 @@ impl ChattyApp {
         };
 
         let net_args = args.clone();
+        let synced_revision = Arc::new(AtomicI64::new(0));
         if !args.inspect {
-            tokio::spawn(network::run(net_args, remembered, command_rx, event_sender));
+            tokio::spawn(network::run(
+                net_args,
+                remembered,
+                command_rx,
+                event_sender,
+                synced_revision.clone(),
+            ));
         }
 
         let mut app = Self::new(command_tx, event_rx);
+        app.synced_revision = synced_revision;
         app.fifo_path = args.inspect_control;
         app.capture_guard = crate::capture_guard::ENABLED && !args.inspect;
         app.preferences_path = Some(preferences_path);

@@ -384,6 +384,17 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
             if conversation_id == "already-deleted"
     ));
 
+    // A deleted conversation's history must not reach a stateless resume.
+    for operation in [0, 2] {
+        sqlx::query(
+            "INSERT INTO deltas(owner_id,entity_type,entity_id,operation,changed_fields) VALUES(?,'conversation','gone',?,x'')",
+        )
+        .bind(&user_id)
+        .bind(operation)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
     let (tx, mut rx) = mpsc::channel(32);
     let resume_app = app.clone();
     let resume = tokio::spawn(async move {
@@ -403,7 +414,11 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
     });
     let mut authenticated = false;
     let mut synchronized = false;
+    let mut replayed = 0;
     while let Some((kind, _, payload)) = rx.recv().await {
+        if kind == MessageType::Delta {
+            replayed += 1;
+        }
         if kind != MessageType::Response {
             continue;
         }
@@ -422,6 +437,8 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
     resume.await.unwrap().unwrap();
     assert!(authenticated);
     assert!(synchronized);
+    // A stateless resume starts at the head instead of replaying old deltas.
+    assert_eq!(replayed, 0);
     let monitor = broker_monitor(&app).await;
     assert_eq!(monitor.adapter_status, AdapterStatus::Disabled);
     assert_eq!(monitor.adapter_model_count, 0);

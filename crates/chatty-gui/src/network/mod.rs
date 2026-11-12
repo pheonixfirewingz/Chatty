@@ -21,6 +21,8 @@ use chatty_protocol::{
 use session::{SavedSession, save_last_server, save_session};
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use tls::{ConnectAttempt, connect, save_trusted_certificate};
 use tokio::sync::mpsc;
@@ -104,6 +106,7 @@ pub(crate) async fn run(
     mut remembered: Option<SavedSession>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: EventSender,
+    synced_revision: Arc<AtomicI64>,
 ) {
     let path = match session_path(&args) {
         Ok(path) => path,
@@ -258,7 +261,8 @@ pub(crate) async fn run(
                     next_id,
                     &Request::Resume {
                         session_token: token,
-                        since_revision: 0,
+                        // Zero asks the broker to start at its head revision.
+                        since_revision: synced_revision.load(Ordering::Relaxed),
                     },
                 )
                 .await;

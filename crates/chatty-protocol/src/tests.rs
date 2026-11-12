@@ -270,3 +270,50 @@ async fn reusable_codec_keeps_consecutive_frames_separate() {
     assert_eq!(frame.message_type, MessageType::Cancel);
     assert!(frame.payload.is_empty());
 }
+
+#[tokio::test]
+async fn reusable_codec_read_survives_cancellation_mid_frame() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    // A small pipe forces every frame to arrive across many reads.
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    let mut seed = 0x9e37_79b9_u32;
+    let payload: Vec<u8> = (0..20_000)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        })
+        .collect();
+    let sent = payload.clone();
+    let writer_task = tokio::spawn(async move {
+        for id in [21, 22] {
+            write_payload(&mut writer, MessageType::Response, id, sent.clone())
+                .await
+                .unwrap();
+        }
+    });
+    let mut codec = ProtocolCodec::new().unwrap();
+    let mut frames = Vec::new();
+    let mut cancelled = 0;
+    while frames.len() < 2 {
+        // Poll once, then drop the future as `select!` does when another branch wins.
+        let mut read = std::pin::pin!(codec.read_frame(&mut reader));
+        match std::future::poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await {
+            Poll::Ready(frame) => frames.push(frame.unwrap()),
+            Poll::Pending => {
+                cancelled += 1;
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    writer_task.await.unwrap();
+    assert!(cancelled > 2, "reads were not interrupted mid-frame");
+    for (frame, id) in frames.iter().zip([21, 22]) {
+        assert_eq!(frame.request_id, id);
+        assert_eq!(frame.message_type, MessageType::Response);
+        assert_eq!(frame.payload, payload);
+    }
+}

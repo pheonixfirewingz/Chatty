@@ -372,3 +372,81 @@ fn stale_image_batch_and_reentrant_file_dialogs_are_ignored() {
     assert!(!app.file_dialog_open);
     assert!(app.draft.images.is_empty());
 }
+
+#[test]
+fn idle_disconnect_clears_stalled_image_requests_and_dialog_open_resumes_them() {
+    let mut app = Harness::demo();
+    app.token = "token".into();
+    let mut base = app.characters[0].clone();
+    base.id = "c-idle".into();
+    base.images = (0..4)
+        .map(|i| CharacterImage {
+            id: format!("img-{i}"),
+            label: format!("mood {i}"),
+            data: Vec::new(),
+        })
+        .collect();
+    base.default_image_id = Some("img-0".into());
+
+    app.set_characters(vec![base]);
+    let sent: Vec<_> = app
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::GetCharacterImage { image_id, .. } => Some(image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 2);
+    app.event(Event::CharacterImageRequestStarted {
+        request_id: 200,
+        character_id: "c-idle".into(),
+        image_id: sent[0].clone(),
+    });
+    app.event(Event::CharacterImageRequestStarted {
+        request_id: 201,
+        character_id: "c-idle".into(),
+        image_id: sent[1].clone(),
+    });
+
+    // Clean EOF ("Idle · reconnects on demand") must release stale in-flight IDs.
+    app.event(Event::Status("Idle · reconnects on demand".into()));
+    assert!(app.character_image_request_ids.is_empty());
+    assert!(app.character_image_requests.is_empty());
+    assert!(app.character_image_queue.is_empty());
+
+    // Opening the characters dialog re-queues missing portraits immediately.
+    app.update(crate::app::Message::OpenCharactersDialog);
+    let resumed: Vec<_> = app
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::GetCharacterImage { image_id, .. } => Some(image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resumed.len(), 2);
+}
+
+#[test]
+fn image_batch_reports_all_skip_reasons_instead_of_overwriting() {
+    let mut app = Harness::signed_in();
+    app.draft_character_open = true;
+    let epoch = app.draft_epoch;
+    app.update(CharacterMessage::ImagesLoaded {
+        epoch,
+        batch: Some(Ok(characters::ImportedImageBatch {
+            images: Vec::new(),
+            default_image_id: None,
+            errors: vec![
+                "first.png: too large".into(),
+                "second.png: too small".into(),
+            ],
+            truncated: true,
+        })),
+    });
+    let notice = &app.error.as_ref().expect("combined notice").message;
+    assert!(notice.contains("first.png: too large"));
+    assert!(notice.contains("second.png: too small"));
+    assert!(notice.contains("Only the first 32 character images were added."));
+}
