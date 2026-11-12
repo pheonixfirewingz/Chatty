@@ -1992,22 +1992,38 @@ async fn sessions_store_only_token_hashes_and_legacy_tokens_keep_working() {
 fn login_throttle_blocks_after_repeated_failures_until_the_window_ends() {
     let throttle = LoginThrottle::default();
     let start = Instant::now();
-    for _ in 0..5 {
-        throttle.check("alice", start).unwrap();
-        throttle.failed("alice", start);
+    for _ in 0..10 {
+        throttle.check("198.51.100.7", start).unwrap();
+        throttle.failed("198.51.100.7", start);
     }
-    assert!(throttle.check("alice", start).is_err());
-    assert!(throttle.check("bob", start).is_ok());
+    assert!(throttle.check("198.51.100.7", start).is_err());
+    assert!(throttle.check("198.51.100.8", start).is_ok());
     let later = start + Duration::from_secs(15 * 60);
-    throttle.check("alice", later).unwrap();
-    throttle.failed("alice", later);
-    assert!(throttle.check("alice", later).is_ok());
+    throttle.check("198.51.100.7", later).unwrap();
+    throttle.failed("198.51.100.7", later);
+    assert!(throttle.check("198.51.100.7", later).is_ok());
 
-    for _ in 0..5 {
-        throttle.failed("carol", start);
+    for _ in 0..10 {
+        throttle.failed("203.0.113.1", start);
     }
-    throttle.succeeded("carol");
-    assert!(throttle.check("carol", start).is_ok());
+    throttle.succeeded("203.0.113.1");
+    assert!(throttle.check("203.0.113.1", start).is_ok());
+}
+
+#[test]
+fn login_throttle_keys_by_client_address() {
+    let v4: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+    let mapped: std::net::IpAddr = "::ffff:198.51.100.7".parse().unwrap();
+    let v6a: std::net::IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+    let v6b: std::net::IpAddr = "2001:db8:1:2:bbbb::9".parse().unwrap();
+    assert_eq!(login_throttle_key(Some(v4), "alice"), "198.51.100.7");
+    assert_eq!(login_throttle_key(Some(mapped), "bob"), "198.51.100.7");
+    assert_eq!(
+        login_throttle_key(Some(v6a), "a"),
+        login_throttle_key(Some(v6b), "b")
+    );
+    assert_eq!(login_throttle_key(Some(v6a), "a"), "2001:db8:1:2::/64");
+    assert_eq!(login_throttle_key(None, "alice"), "user:alice");
 }
 
 #[test]

@@ -149,7 +149,7 @@ Stream output flushes after 32 whitespace-delimited units, 60 ms, or completion.
 
 - The broker trusts no client-supplied role or ownership claim.
 - Session tokens identify users and expire after 30 days. SQLite stores only their SHA-256 hashes; startup rehashes plaintext tokens left by older brokers.
-- Login allows five failed attempts per username in 15 minutes, counting unknown usernames, and verifies a dummy Argon2 hash for them. The in-memory throttle tracks at most 4096 usernames and resets on restart.
+- Login allows ten failed attempts per client IPv4 address or IPv6 /64 in 15 minutes, counting unknown usernames, and verifies a dummy Argon2 hash for them. The in-memory throttle tracks at most 4096 clients and resets on restart. A TCP proxy in front of the broker makes all clients share its address.
 - Characters, conversations, worlds, memories, deltas, and usage are owner-scoped.
 - Public characters are readable across accounts only when broker policy permits; only their owner can edit them.
 - Admin-only requests re-read role state from the database.

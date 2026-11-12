@@ -57,14 +57,30 @@ pub(super) async fn require_admin(db: &SqlitePool, token: &str) -> Result<String
     Ok(row.get("id"))
 }
 
-/// Failed sign-ins allowed per username within [`LOGIN_WINDOW`].
-const LOGIN_FAILURES: u32 = 5;
+/// Failed sign-ins allowed per client within [`LOGIN_WINDOW`].
+const LOGIN_FAILURES: u32 = 10;
 const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Bounds the throttle's memory. When full, the oldest window is dropped.
 const LOGIN_TRACKED: usize = 4096;
 
-/// Per-username failed sign-in counts, kept in memory only. Unknown usernames
-/// are counted too, so throttling reveals nothing about which accounts exist.
+/// Throttle key for a sign-in: the client's IPv4 address or IPv6 /64, which
+/// one host typically controls whole. Keying by client rather than username
+/// stops guessing without letting others lock a user out from elsewhere.
+/// Falls back to the username when the address is unknown.
+pub(super) fn login_throttle_key(peer: Option<std::net::IpAddr>, username: &str) -> String {
+    use std::net::IpAddr;
+    match peer.map(|ip| ip.to_canonical()) {
+        Some(IpAddr::V4(ip)) => ip.to_string(),
+        Some(IpAddr::V6(ip)) => {
+            let s = ip.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        None => format!("user:{username}"),
+    }
+}
+
+/// Failed sign-in counts per throttle key, kept in memory only. Failures for
+/// unknown usernames count too, so throttling reveals nothing about accounts.
 #[derive(Default)]
 pub(super) struct LoginThrottle(pub(super) std::sync::Mutex<HashMap<String, (u32, Instant)>>);
 

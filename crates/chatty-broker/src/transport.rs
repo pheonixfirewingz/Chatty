@@ -19,6 +19,7 @@ pub(super) async fn serve(
 ) -> Result<()> {
     ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
     let connection_id = new_uuid();
+    let peer = stream.get_ref().0.peer_addr().ok().map(|addr| addr.ip());
     let identity = Arc::new(RwLock::new(None::<String>));
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::channel::<Out>(32); // bounded queue is transport backpressure
@@ -123,8 +124,9 @@ pub(super) async fn serve(
                     let identity = identity.clone();
                     let busy = busy.clone();
                     let connection_id = connection_id.clone();
-                    let control =
+                    let mut control =
                         dispatch_control(&app, &connection_id, frame.request_id, &req, busy).await;
+                    control.peer = peer;
                     tokio::spawn(async move {
                         let cancellations = app.cancellations.clone();
                         let key = (connection_id.clone(), frame.request_id);

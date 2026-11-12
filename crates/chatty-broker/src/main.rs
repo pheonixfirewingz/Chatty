@@ -343,12 +343,15 @@ async fn main() -> Result<()> {
 struct DispatchControl {
     busy: Arc<AtomicU64>,
     download_cancel: Option<watch::Receiver<bool>>,
+    /// Client address; keys the sign-in throttle.
+    peer: Option<std::net::IpAddr>,
 }
 impl From<Arc<AtomicU64>> for DispatchControl {
     fn from(busy: Arc<AtomicU64>) -> Self {
         Self {
             busy,
             download_cancel: None,
+            peer: None,
         }
     }
 }
@@ -381,6 +384,7 @@ async fn dispatch_control(
     DispatchControl {
         busy,
         download_cancel,
+        peer: None,
     }
 }
 
@@ -396,6 +400,7 @@ async fn dispatch(
     let DispatchControl {
         busy,
         download_cancel,
+        peer,
     } = control;
     let _snapshot_guard = if matches!(&req, Request::Snapshot { .. }) {
         Some(app.snapshot_gate.write().await)
@@ -488,7 +493,8 @@ async fn dispatch(
             );
         }
         Request::Login { username, password } => {
-            login_throttle().check(&username, Instant::now())?;
+            let throttle_key = login_throttle_key(peer, &username);
+            login_throttle().check(&throttle_key, Instant::now())?;
             let row = sqlx::query("SELECT id,password_hash,role FROM users WHERE username=?")
                 .bind(&username)
                 .fetch_optional(&app.db)
@@ -508,10 +514,10 @@ async fn dispatch(
                 })
             };
             if !verified {
-                login_throttle().failed(&username, Instant::now());
+                login_throttle().failed(&throttle_key, Instant::now());
             }
             let row = row.filter(|_| verified).context("invalid credentials")?;
-            login_throttle().succeeded(&username);
+            login_throttle().succeeded(&throttle_key);
             let uid: String = row.get("id");
             let role: String = row.get("role");
             let (token, rev) = new_session(&app.db, &uid).await?;
