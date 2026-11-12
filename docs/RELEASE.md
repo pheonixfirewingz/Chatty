@@ -73,9 +73,9 @@ The supported local bundle builder vendors locked dependencies and builds only t
 
 ```sh
 flatpak install flathub \
-  org.freedesktop.Platform//25.08 \
-  org.freedesktop.Sdk//25.08 \
-  org.freedesktop.Sdk.Extension.rust-stable//25.08
+  org.freedesktop.Platform//26.08 \
+  org.freedesktop.Sdk//26.08 \
+  org.freedesktop.Sdk.Extension.rust-stable//26.08
 ./scripts/build-flatpak.sh
 ```
 
@@ -83,8 +83,8 @@ The result is written to `dist/chatty-<version>-<arch>.flatpak`. Install and tes
 
 ```sh
 flatpak install --user ./dist/chatty-*.flatpak
-flatpak run io.github.pheonixfirewingz.Chatty//25.08
-flatpak run io.github.pheonixfirewingz.Chatty//25.08 --test-speech
+flatpak run io.github.pheonixfirewingz.Chatty//26.08
+flatpak run io.github.pheonixfirewingz.Chatty//26.08 --test-speech
 ```
 
 For repeated local testing, install from the build repository instead of the bundle:

@@ -91,7 +91,7 @@ server access; no host Python installation or speech packages are required.
 To test the complete speech path from a terminal:
 
 ```sh
-flatpak run io.github.pheonixfirewingz.Chatty//25.08 --test-speech
+flatpak run io.github.pheonixfirewingz.Chatty//26.08 --test-speech
 ```
 
 The test plays a short phrase and exits with an error if model loading, synthesis,

@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 app_id=io.github.pheonixfirewingz.Chatty
-runtime_branch=${CHATTY_FLATPAK_BRANCH:-25.08}
+runtime_branch=${CHATTY_FLATPAK_BRANCH:-26.08}
 runtime=org.freedesktop.Platform
 sdk=org.freedesktop.Sdk
 rust_sdk=org.freedesktop.Sdk.Extension.rust-stable

@@ -30,7 +30,7 @@ pub fn new_uuid() -> String {
 /// it is safe for bearer secrets.
 pub fn secret_hex(bytes: usize) -> std::io::Result<String> {
     let mut buffer = vec![0u8; bytes];
-    getrandom::fill(&mut buffer).map_err(std::io::Error::other)?;
+    getrandom::fill(&mut buffer).map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
