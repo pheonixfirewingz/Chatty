@@ -2038,3 +2038,11 @@ fn login_throttle_memory_is_bounded() {
     }
     assert_eq!(throttle.0.lock().unwrap().len(), 4096);
 }
+
+#[test]
+fn certificate_fingerprint_matches_the_gui_format() {
+    assert_eq!(
+        certificate_fingerprint(b"abc"),
+        "BA:78:16:BF:8F:01:CF:EA:41:41:40:DE:5D:AE:22:23:B0:03:61:A3:96:17:7A:9C:B4:10:FF:61:F2:00:15:AD"
+    );
+}

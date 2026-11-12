@@ -177,8 +177,10 @@ The GUI uses this trust order:
    certificate is saved and a verified connection is retried.
 
 The discovery handshake never sends account credentials. Do not tell users to accept an
-unconfirmed fingerprint; compare it with `openssl x509 -in ca.pem -noout -fingerprint -sha256`
-on the broker or through another trusted channel.
+unconfirmed fingerprint. The broker prints the expected value to stderr and the boot log at
+startup as `TLS trust fingerprint (SHA-256)`: the last certificate in `server.pem`, which is
+the CA for a chain or the leaf otherwise. Compare it through a trusted channel, or use
+`openssl x509 -in ca.pem -noout -fingerprint -sha256` for a chain.
 
 For private deployments, configure `server.pem` as a chain containing the server leaf followed by
 the public private-CA certificate. This lets clients enroll the CA and permits future leaf renewal

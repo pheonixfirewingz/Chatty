@@ -6,11 +6,29 @@ pub(super) fn tls_config(cert: &str, key: &str) -> Result<ServerConfig> {
             .collect::<std::result::Result<_, _>>()?;
     let key: PrivateKeyDer<'static> = pemfile::private_key(&mut BufReader::new(File::open(key)?))?
         .context("missing private key")?;
+    if let Some(anchor) = certs.last() {
+        // Clients that do not already trust this chain show this fingerprint
+        // before trusting it; print it so operators can compare out of band.
+        let fingerprint = certificate_fingerprint(anchor);
+        info!(%fingerprint, "TLS trust fingerprint (SHA-256)");
+        eprintln!("chatty-broker TLS trust fingerprint (SHA-256): {fingerprint}");
+    }
     Ok(
         ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_no_client_auth()
             .with_single_cert(certs, key)?,
     )
+}
+
+/// SHA-256 of a DER certificate as colon-separated uppercase hex, matching
+/// the fingerprint the GUI shows for trust confirmation.
+pub(super) fn certificate_fingerprint(certificate: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(certificate)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 pub(super) async fn serve(
