@@ -286,6 +286,7 @@ async fn main() -> Result<()> {
         .connect(&database)
         .await?;
     sqlx::migrate!().run(&db).await?;
+    hash_legacy_sessions(&db).await?;
     sqlx::query("INSERT OR IGNORE INTO broker_settings(singleton,adapter_url) VALUES(1,?)")
         .bind(args.llama_url.trim_end_matches('/'))
         .execute(&db)
@@ -540,7 +541,7 @@ async fn dispatch(
         }
         Request::Logout { session_token } => {
             sqlx::query("DELETE FROM sessions WHERE token=?")
-                .bind(session_token)
+                .bind(session_key(&session_token))
                 .execute(&app.db)
                 .await?;
             *identity.write().await = None;
@@ -661,7 +662,7 @@ async fn dispatch(
             );
         }
         Request::GetPermissions { session_token } => {
-            let role:String=sqlx::query_scalar("SELECT u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>datetime('now')").bind(session_token).fetch_optional(&app.db).await?.context("unauthorized")?;
+            let role:String=sqlx::query_scalar("SELECT u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>datetime('now')").bind(session_key(&session_token)).fetch_optional(&app.db).await?.context("unauthorized")?;
             let mut permissions = vec![Permission::ManageOwnRoleplay, Permission::GenerateRoleplay];
             if role == "admin" {
                 permissions.push(Permission::ManageUsers);

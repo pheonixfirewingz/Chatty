@@ -319,7 +319,7 @@ async fn saved_session_resume_does_not_depend_on_adapter() {
         other => panic!("unexpected response: {other:?}"),
     };
     let user_id: String = sqlx::query_scalar("SELECT user_id FROM sessions WHERE token=?")
-        .bind(&token)
+        .bind(session_key(&token))
         .fetch_one(&app.db)
         .await
         .unwrap();
@@ -486,7 +486,7 @@ async fn cross_tenant_character_update_is_forbidden() {
         .unwrap();
     assert_eq!(default_name, "Assistant");
     let owner_id: String = sqlx::query_scalar("SELECT user_id FROM sessions WHERE token=?")
-        .bind(&first_token)
+        .bind(session_key(&first_token))
         .fetch_one(&app.db)
         .await
         .unwrap();
@@ -1952,4 +1952,38 @@ fn unknown_user_login_verifies_a_real_dummy_hash() {
             .verify_password(b"any password", &parsed)
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn sessions_store_only_token_hashes_and_legacy_tokens_keep_working() {
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&db).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,username,password_hash,role) VALUES('u','u','unused','user')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let legacy = format!("{}{}", new_uuid(), new_uuid());
+    sqlx::query("INSERT INTO sessions(token,user_id) VALUES(?,'u')")
+        .bind(&legacy)
+        .execute(&db)
+        .await
+        .unwrap();
+    hash_legacy_sessions(&db).await.unwrap();
+    hash_legacy_sessions(&db).await.unwrap();
+    assert_eq!(auth(&db, &legacy).await.unwrap(), "u");
+
+    let (token, _) = new_session(&db, "u").await.unwrap();
+    assert_eq!(auth(&db, &token).await.unwrap(), "u");
+    let stored: Vec<String> = sqlx::query_scalar("SELECT token FROM sessions")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert!(!stored.contains(&token) && !stored.contains(&legacy));
+    assert!(auth(&db, &session_key(&token)).await.is_err());
 }

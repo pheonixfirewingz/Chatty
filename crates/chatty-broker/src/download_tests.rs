@@ -121,7 +121,7 @@ async fn app(url: &str) -> App {
             .await
             .unwrap();
         sqlx::query("INSERT INTO sessions(token,user_id) VALUES(?,?)")
-            .bind(id)
+            .bind(crate::session_key(id))
             .bind(id)
             .execute(&db)
             .await
