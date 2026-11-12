@@ -6,7 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-chatty-metal-protocol = { path = "../chatty-metal-protocol", features = ["net"] }
 argon2.workspace = true
 bytes.workspace = true
 chatty-protocol = { path = "../chatty-protocol" }

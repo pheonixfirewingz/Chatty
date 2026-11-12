@@ -31,7 +31,6 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
     state: &AdminViewState<'a>,
 ) -> Element<'a, Message> {
     let models = state.models;
-    let is_metal = state.broker_config.adapter_plugin_id() == "chatty-metal";
     let active = models
         .downloads
         .values()
@@ -43,20 +42,12 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
         format!("Downloads · {active}")
     };
     let mut navigation = row![].spacing(6);
-    let nav_items: Vec<(usize, std::borrow::Cow<'static, str>)> = if is_metal {
-        vec![
-            (0, std::borrow::Cow::Borrowed("Appliance")),
-            (2, std::borrow::Cow::Borrowed("Settings")),
-        ]
-    } else {
-        vec![
-            (0, std::borrow::Cow::Borrowed("Installed")),
-            (1, std::borrow::Cow::Borrowed("Find models")),
-            (3, std::borrow::Cow::Owned(downloads)),
-            (2, std::borrow::Cow::Borrowed("Settings")),
-        ]
-    };
-    for (page, label) in nav_items {
+    for (page, label) in [
+        (0, std::borrow::Cow::Borrowed("Installed")),
+        (1, std::borrow::Cow::Borrowed("Find models")),
+        (3, std::borrow::Cow::Owned(downloads)),
+        (2, std::borrow::Cow::Borrowed("Settings")),
+    ] {
         let selected = models.page == page;
         navigation = navigation.push(
             button(text(label).size(13))
@@ -207,13 +198,11 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
         .spacing(8)
         .align_y(Alignment::Center),
     );
-    if !is_metal {
-        items = items.push(
-            text_input("Filter models", &models.installed_query)
-                .on_input(|value| Message::from(AdminMessage::InstalledSearchChanged(value)))
-                .padding(9),
-        );
-    }
+    items = items.push(
+        text_input("Filter models", &models.installed_query)
+            .on_input(|value| Message::from(AdminMessage::InstalledSearchChanged(value)))
+            .padding(9),
+    );
     let query = models.installed_query.trim().to_lowercase();
     let mut count = 0;
     for model in &ollama.models {
@@ -266,62 +255,57 @@ pub(super) fn ollama_tab_view<'a, Message: 'a + Clone + From<AdminMessage>>(
         ]
         .spacing(10)
         .width(Length::Fill);
-        if is_metal {
-            let controls = row![action("Settings", AdminMessage::ModelsPage(2), idle)].spacing(8);
-            items = items.push(ui::card(card.push(controls.wrap()), state.glass_mode));
+        let can_delete =
+            idle && !selected && running.is_none() && !models.is_downloading(&model.name);
+        let delete_help = if models.is_downloading(&model.name) {
+            "Cancel this model's download before deleting."
+        } else if running.is_some() {
+            "Unload this model before deleting."
+        } else if selected {
+            "Save a different chat model before deleting."
         } else {
-            let can_delete =
-                idle && !selected && running.is_none() && !models.is_downloading(&model.name);
-            let delete_help = if models.is_downloading(&model.name) {
-                "Cancel this model's download before deleting."
-            } else if running.is_some() {
-                "Unload this model before deleting."
-            } else if selected {
-                "Save a different chat model before deleting."
-            } else {
-                "Delete this model from the inference server."
-            };
-            let mut controls = row![
-                action(
-                    if selected { "Settings" } else { "Use model" },
-                    AdminMessage::ConfigureModel(model.name.clone()),
-                    idle
-                ),
-                action(
-                    if running.is_some() { "Unload" } else { "Load" },
-                    if running.is_some() {
-                        AdminMessage::OllamaUnload(model.name.clone())
-                    } else {
-                        AdminMessage::OllamaLoad(model.name.clone())
-                    },
-                    idle
-                ),
-            ]
-            .spacing(8);
-            if models.delete_model.as_deref() == Some(&model.name) {
-                card = card.push(text(format!("Delete {}?", model_label(&model.name))).size(14));
-                controls = controls
-                    .push(
-                        action(
-                            "Confirm delete",
-                            AdminMessage::OllamaDelete(model.name.clone()),
-                            can_delete,
-                        )
-                        .style(button::danger),
-                    )
-                    .push(action("Cancel", AdminMessage::CancelModelDelete, true));
-            } else {
-                controls = controls.push(hint(
+            "Delete this model from the inference server."
+        };
+        let mut controls = row![
+            action(
+                if selected { "Settings" } else { "Use model" },
+                AdminMessage::ConfigureModel(model.name.clone()),
+                idle
+            ),
+            action(
+                if running.is_some() { "Unload" } else { "Load" },
+                if running.is_some() {
+                    AdminMessage::OllamaUnload(model.name.clone())
+                } else {
+                    AdminMessage::OllamaLoad(model.name.clone())
+                },
+                idle
+            ),
+        ]
+        .spacing(8);
+        if models.delete_model.as_deref() == Some(&model.name) {
+            card = card.push(text(format!("Delete {}?", model_label(&model.name))).size(14));
+            controls = controls
+                .push(
                     action(
-                        "Delete",
-                        AdminMessage::ConfirmModelDelete(model.name.clone()),
+                        "Confirm delete",
+                        AdminMessage::OllamaDelete(model.name.clone()),
                         can_delete,
-                    ),
-                    delete_help,
-                ));
-            }
-            items = items.push(ui::card(card.push(controls.wrap()), state.glass_mode));
+                    )
+                    .style(button::danger),
+                )
+                .push(action("Cancel", AdminMessage::CancelModelDelete, true));
+        } else {
+            controls = controls.push(hint(
+                action(
+                    "Delete",
+                    AdminMessage::ConfirmModelDelete(model.name.clone()),
+                    can_delete,
+                ),
+                delete_help,
+            ));
         }
+        items = items.push(ui::card(card.push(controls.wrap()), state.glass_mode));
     }
     if count == 0 {
         items = items.push(

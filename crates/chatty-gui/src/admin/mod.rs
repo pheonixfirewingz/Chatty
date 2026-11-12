@@ -532,9 +532,6 @@ impl AdminState {
             AdminMessage::SelectRuntimeAdapter(id) => {
                 if self.adapter_override.is_none() && self.adapter_plugins.contains(&id) {
                     self.broker_config.use_ollama_api = id == "ollama";
-                    if id == "chatty-metal" && (self.models.page == 1 || self.models.page == 3) {
-                        self.models.page = 2;
-                    }
                     self.broker_config.adapter_plugin = id;
                 }
                 vec![]

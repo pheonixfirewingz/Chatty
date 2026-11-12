@@ -66,32 +66,6 @@ fn model_settings_navigation_and_disclosure_preserve_saved_values() {
 }
 
 #[test]
-fn metal_adapter_config_and_views_are_simplified() {
-    let mut state = AdminState {
-        adapter_plugins: vec!["ollama".into(), "chatty-metal".into()],
-        ..AdminState::default()
-    };
-    state.models.page = 1;
-    state.update(
-        AdminMessage::SelectRuntimeAdapter("chatty-metal".into()),
-        "admin",
-    );
-    assert_eq!(state.broker_config.adapter_plugin_id(), "chatty-metal");
-    assert_eq!(state.models.page, 2);
-
-    {
-        let _settings_view: Element<'_, AdminMessage> =
-            model_settings::view(&state.as_view_state());
-    }
-
-    for page in [0, 2] {
-        state.update(AdminMessage::ModelsPage(page), "admin");
-        let _manager_view: Element<'_, AdminMessage> =
-            model_manager::ollama_tab_view(&state.as_view_state());
-    }
-}
-
-#[test]
 fn clearing_download_history_keeps_active_and_cancelling_downloads() {
     let mut state = AdminState::default();
     for model in ["finished", "active", "cancelling"] {

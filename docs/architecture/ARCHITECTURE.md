@@ -195,3 +195,4 @@ Horizontal broker scaling is not supported: live broadcasts, cancellation owners
 
 - [ADR 0005: Image generation adapters](adr/0005-image-generation-adapters.md)
 - [ADR 0006: In-process emotion classifier](adr/0006-in-process-emotion-classifier.md)
+

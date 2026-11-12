@@ -215,7 +215,7 @@ async fn runtime_adapter_selection_is_authorized_validated_and_persisted() {
     };
     assert_eq!(
         adapter_plugins,
-        ["chatty-metal", "freetoken", "ollama", "openai-compatible"]
+        ["freetoken", "ollama", "openai-compatible"]
     );
     assert!(adapter_override.is_none());
     assert!(
@@ -278,28 +278,6 @@ async fn runtime_adapter_selection_is_authorized_validated_and_persisted() {
             "freetoken"
         );
     }
-    config.adapter_plugin = "chatty-metal".into();
-    config.adapter_url = "http://127.0.0.1:11434".into();
-    let (_, payload) = call(
-        &app,
-        Request::AdminSetBrokerConfig {
-            session_token: tokens[0].clone(),
-            config: Box::new(config.clone()),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(
-        matches!(decode::<Response>(&payload).unwrap(), Response::BrokerConfig { config, .. }
-        if config.adapter_plugin == "chatty-metal")
-    );
-    assert_eq!(
-        load_broker_config(&app.db)
-            .await
-            .unwrap()
-            .adapter_plugin_id(),
-        "chatty-metal"
-    );
 }
 
 #[tokio::test]

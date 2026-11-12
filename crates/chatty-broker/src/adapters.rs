@@ -1,6 +1,5 @@
 //! Broker-owned adapter selection. Provider HTTP and response schemas live in WASM.
 use super::*;
-mod metal;
 mod runtime;
 use runtime::{Adapter, Registry};
 use workload::{Workload, WorkloadGate, WorkloadGuard, same_host};

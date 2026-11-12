@@ -1,10 +1,9 @@
 [workspace]
 members = [
-    "crates/chatty-protocol", "crates/chatty-broker", "crates/chatty-gui", "crates/chatty-metal",
-    "crates/chatty-metal-protocol",
+    "crates/chatty-protocol", "crates/chatty-broker", "crates/chatty-gui",
     "crates/chatty-adapters/openai-compatible", "crates/chatty-adapters/ollama", "crates/chatty-adapters/hugging-face", "crates/chatty-adapters/freetoken", "crates/chatty-adapters/comfyui",
 ]
-default-members = ["crates/chatty-protocol", "crates/chatty-broker", "crates/chatty-gui", "crates/chatty-metal-protocol"]
+default-members = ["crates/chatty-protocol", "crates/chatty-broker", "crates/chatty-gui"]
 resolver = "2"
 
 [workspace.package]

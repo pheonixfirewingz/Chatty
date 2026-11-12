@@ -1357,12 +1357,6 @@ fn group_prompt(
 pub(super) async fn selected_model(app: &App) -> Result<String> {
     let config = load_broker_config(&app.db).await?;
     let models = probe_backend(app).await?;
-    if config.adapter_plugin_id() == "chatty-metal" {
-        return models
-            .into_iter()
-            .next()
-            .context("no model loaded on chatty-metal appliance");
-    }
     if config.model.is_empty() {
         return models.into_iter().next().context("no model loaded");
     }
@@ -1380,9 +1374,6 @@ const MEMORY_MODEL_CONTEXT: u32 = 16_384;
 /// Model and context window for memory extraction and condensation. A
 /// dedicated memory model replaces the chat model on the inference server.
 async fn memory_model(app: &App, config: &BrokerConfig) -> Result<(String, u32)> {
-    if config.adapter_plugin_id() == "chatty-metal" {
-        return Ok((selected_model(app).await?, config.num_ctx));
-    }
     if config.memory_model.is_empty() {
         return Ok((selected_model(app).await?, config.num_ctx));
     }
