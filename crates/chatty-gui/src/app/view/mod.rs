@@ -157,6 +157,7 @@ impl ChattyApp {
                 &self.memories,
                 &self.characters,
                 &self.conversations,
+                &self.messages,
                 &self.memory_state,
                 can_extract,
                 self.glass_mode,

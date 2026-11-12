@@ -124,3 +124,78 @@ fn memory_extraction_reports_operation_counts() {
         Some("Nothing new to remember from this chat.")
     );
 }
+
+#[test]
+fn memory_dialog_requests_history_and_keeps_superseded_deltas_hidden() {
+    use chatty_protocol::{
+        DeltaOperation, DeltaPayload, MemoryEntry, MemorySource, MemoryStatus, MessageType,
+        StateDelta, encode,
+    };
+    let mut app = Harness::new();
+    app.token = "session-token".into();
+    app.update(crate::app::Message::OpenMemoriesDialog(None, None));
+    assert!(app.requests().iter().any(|request| matches!(
+        request,
+        Request::ListMemories {
+            include_history: true,
+            ..
+        }
+    )));
+    let entry = |id: &str, status, superseded_by: Option<&str>| MemoryEntry {
+        id: id.into(),
+        conversation_id: None,
+        character_id: Some("char-1".into()),
+        kind: MemoryKind::Fact,
+        content: format!("Memory {id}."),
+        importance: 60,
+        pinned: false,
+        confidence: 0.8,
+        source: MemorySource::Automatic,
+        source_message_ids: vec![],
+        created_at: "2026-11-12 10:00:00".into(),
+        updated_at: "2026-11-12 10:00:00".into(),
+        revision: 0,
+        status,
+        superseded_by: superseded_by.map(Into::into),
+    };
+    for (revision, memory, operation) in [
+        (
+            5,
+            entry("new", MemoryStatus::Active, None),
+            DeltaOperation::Add,
+        ),
+        (
+            6,
+            entry("old", MemoryStatus::Superseded, Some("new")),
+            DeltaOperation::Update,
+        ),
+    ] {
+        app.frame(
+            MessageType::Delta,
+            0,
+            &StateDelta {
+                revision,
+                entity_type: "memory".into(),
+                entity_id: memory.id.clone(),
+                operation,
+                changed_fields: encode(&DeltaPayload::Memory(memory)).unwrap(),
+            },
+        );
+    }
+    // Both rows are kept; only the active one is listed, with the old one as history.
+    assert_eq!(app.memories.len(), 2);
+    let active = crate::memories::filter_memories(&app.memories, None, None, None, "");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, "new");
+    let predecessors = crate::memories::predecessors(&app.memories);
+    assert_eq!(
+        crate::memories::memory_history(&predecessors, "new")[0].id,
+        "old"
+    );
+
+    app.update(MemoryMessage::Restore("old".into()));
+    assert!(app.requests().iter().any(|request| matches!(
+        request,
+        Request::UpsertMemory { memory, .. } if memory.id.as_deref() == Some("old")
+    )));
+}

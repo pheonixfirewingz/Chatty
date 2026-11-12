@@ -1,5 +1,5 @@
 use super::*;
-use chatty_protocol::{Character, Conversation};
+use chatty_protocol::{Character, ChatMessage, Conversation};
 use chatty_protocol::{MemorySource, MemoryStatus};
 use iced::Element;
 
@@ -363,8 +363,15 @@ fn test_memory_dialog_view_creation() {
     }];
     let state = MemoryDialogState::default();
 
-    let view_state =
-        MemoryViewState::new(&entries, &characters, &conversations, &state, true, false);
+    let view_state = MemoryViewState::new(
+        &entries,
+        &characters,
+        &conversations,
+        &[],
+        &state,
+        true,
+        false,
+    );
 
     let _element: Element<'_, MemoryMessage> = memory_dialog_view(&view_state);
 }
@@ -389,4 +396,110 @@ fn importance_uses_the_broker_scale_and_pin_toggles_save_directly() {
         state.update(&entries, MemoryMessage::TogglePin("missing".into())),
         MemoryAction::None
     ));
+}
+
+/// m1 replaced by m5 replaced by m6, plus a retired memory and an orphan.
+fn history_entries() -> Vec<MemoryEntry> {
+    let mut entries = sample_entries();
+    let version = |id: &str, status, successor: Option<&str>, updated: &str| MemoryEntry {
+        id: id.into(),
+        status,
+        superseded_by: successor.map(Into::into),
+        updated_at: updated.into(),
+        content: format!("Version {id}."),
+        ..entries[1].clone()
+    };
+    let older = version(
+        "m5",
+        MemoryStatus::Superseded,
+        Some("m2"),
+        "2026-09-02T11:00:00Z",
+    );
+    let oldest = version(
+        "m6",
+        MemoryStatus::Superseded,
+        Some("m5"),
+        "2026-09-02T10:00:00Z",
+    );
+    let retired = version("m7", MemoryStatus::Retired, None, "2026-09-04T10:00:00Z");
+    let orphan = version(
+        "m8",
+        MemoryStatus::Superseded,
+        Some("gone"),
+        "2026-09-04T09:00:00Z",
+    );
+    entries.extend([oldest, older, retired, orphan]);
+    entries
+}
+
+#[test]
+fn history_follows_every_generation_and_retired_lists_unreplaced_rows() {
+    let entries = history_entries();
+    // Active lists and condensing ignore history.
+    let active = filter_memories(&entries, None, None, None, "");
+    assert_eq!(active.len(), 3);
+    assert!(!can_condense_memories(&entries, None, None, None));
+    let predecessors = predecessors(&entries);
+    let history = memory_history(&predecessors, "m2")
+        .into_iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(history, ["m5", "m6"]);
+    assert!(memory_history(&predecessors, "m1").is_empty());
+    let retired = filter_retired(&entries, None, None, None, "")
+        .into_iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(retired, ["m7", "m8"]);
+    // Filters apply to retired rows too.
+    assert!(filter_retired(&entries, Some("char-1"), None, None, "").is_empty());
+    assert_eq!(
+        filter_retired(&entries, None, None, None, "version m7").len(),
+        1
+    );
+}
+
+#[test]
+fn toggles_collapse_history_and_restore_saves_inactive_rows_only() {
+    let entries = history_entries();
+    let mut state = MemoryDialogState::default();
+    assert!(state.expanded_history.is_empty() && !state.show_retired);
+    state.update(&entries, MemoryMessage::ToggleHistory("m2".into()));
+    state.update(&entries, MemoryMessage::ToggleSources("m2".into()));
+    state.update(&entries, MemoryMessage::ToggleRetired);
+    assert!(state.expanded_history.contains("m2"));
+    assert!(state.expanded_sources.contains("m2"));
+    assert!(state.show_retired);
+    state.update(&entries, MemoryMessage::ToggleHistory("m2".into()));
+    assert!(state.expanded_history.is_empty());
+
+    match state.update(&entries, MemoryMessage::Restore("m7".into())) {
+        MemoryAction::Save(input) => {
+            assert_eq!(input.id.as_deref(), Some("m7"));
+            assert_eq!(input.content, "Version m7.");
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+    assert!(matches!(
+        state.update(&entries, MemoryMessage::Restore("m2".into())),
+        MemoryAction::None
+    ));
+
+    // Every state renders, including expanded history and sources.
+    let messages = vec![ChatMessage {
+        id: "msg-1".into(),
+        author_type: "user".into(),
+        author_id: None,
+        content: "We beat the shadow beast!".into(),
+        parent_id: None,
+        selected_variant_id: None,
+        character_image_id: None,
+        created_at: String::new(),
+        revision: 1,
+        variants: vec![],
+    }];
+    state.update(&entries, MemoryMessage::ToggleHistory("m2".into()));
+    let view = MemoryViewState::new(&entries, &[], &[], &messages, &state, true, false);
+    let _element: Element<'_, MemoryMessage> = memory_dialog_view(&view);
+    assert_eq!(source_messages(&view, &entries[1]).len(), 1);
 }
