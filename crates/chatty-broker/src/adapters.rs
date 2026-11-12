@@ -4,6 +4,22 @@ mod runtime;
 use runtime::{Adapter, Registry};
 use workload::{Workload, WorkloadGate, WorkloadGuard, same_host};
 
+/// True when `url` is plain HTTP to anything but this machine.
+pub(super) fn sends_cleartext_off_host(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    url.scheme() == "http"
+        && match host.parse::<std::net::IpAddr>() {
+            Ok(ip) => !ip.is_loopback(),
+            Err(_) => !host.eq_ignore_ascii_case("localhost"),
+        }
+}
+
 #[derive(Clone)]
 pub(super) struct AdapterHost {
     registry: Registry,
@@ -213,6 +229,13 @@ impl AdapterHost {
         }
     }
     pub fn configuration_changed(&self, config: &BrokerConfig) -> Result<()> {
+        if config.adapter_enabled && sends_cleartext_off_host(&config.adapter_url) {
+            warn!(
+                url = %config.adapter_url,
+                "inference URL uses plain HTTP to another host; prompts and chat content \
+                 cross the network unencrypted. Use https or a VPN tunnel"
+            );
+        }
         Ok(self
             .registry
             .select(config.adapter_enabled.then(|| self.plugin_id(config)))?)

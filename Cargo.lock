@@ -876,6 +876,7 @@ dependencies = [
  "iced_dialog",
  "image",
  "kittentts",
+ "objc2-app-kit 0.3.2",
  "ort",
  "rfd",
  "rodio",
@@ -886,6 +887,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -895,6 +897,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bytes",
+ "getrandom 0.3.4",
  "rustls",
  "serde",
  "tokio",

@@ -17,6 +17,11 @@ pub(crate) fn session_path(args: &Args) -> Result<PathBuf> {
         return Ok(path);
     }
 
+    if !cfg!(target_os = "linux") {
+        return native_data_dir()
+            .map(|directory| directory.join("session"))
+            .context("could not determine the user data directory; set CHATTY_SESSION_FILE");
+    }
     default_session_path(
         std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
@@ -24,6 +29,18 @@ pub(crate) fn session_path(args: &Args) -> Result<PathBuf> {
     .context(
         "could not determine the Linux user state directory; set XDG_STATE_HOME, HOME, or CHATTY_SESSION_FILE",
     )
+}
+
+/// Chatty's per-user data directory on Windows (`%APPDATA%\Chatty`) and
+/// macOS (`~/Library/Application Support/Chatty`). Linux uses XDG paths.
+pub(super) fn native_data_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support"))
+    };
+    base.filter(|path| path.is_absolute())
+        .map(|path| path.join("Chatty"))
 }
 
 pub(super) fn default_session_path(

@@ -1,7 +1,10 @@
 //! Native Chatty desktop client.
+// Release builds on Windows open no console window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod admin;
 mod app;
+mod capture_guard;
 mod characters;
 mod conversation;
 mod memories;
@@ -88,6 +91,10 @@ fn main() -> Result<()> {
         size: Size::new(width, height),
         min_size: None,
         transparent: true,
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: capture_guard::APP_ID.into(),
+            ..Default::default()
+        },
         ..Default::default()
     })
     .run()

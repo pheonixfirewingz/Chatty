@@ -21,6 +21,9 @@ pub(crate) enum Message {
     Conversation(ConversationMessage),
     InspectControl(String),
     ScreenshotCaptured(iced::window::Screenshot),
+    /// A window opened and needs capture protection.
+    WindowOpened(iced::window::Id),
+    WindowFocusChanged(bool),
     ServerAddressChanged(String),
     TryConnect,
     LoginUsernameChanged(String),

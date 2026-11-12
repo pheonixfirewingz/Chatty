@@ -120,6 +120,32 @@ cp /trusted/path/ca.pem \
 
 Use the exact host entered in the GUI as the CA filename stem.
 
+## Windows and macOS packages
+
+`.github/workflows/package.yml` builds every desktop package on GitHub-hosted
+runners when a `v*` tag is pushed or the workflow is started by hand. Tag builds
+attach the packages and a `SHA256SUMS` file to a draft GitHub release; review it
+before publishing. The same scripts run locally:
+
+- **Windows x64:** `./scripts/build-windows.ps1` in PowerShell, with rustup, the MSVC
+  build tools, CMake, NASM, and Inno Setup 6. It writes
+  `dist/chatty-<version>-windows-x64-setup.exe`, a per-user installer, and
+  `dist/chatty-<version>-windows-x64-portable.zip`.
+- **macOS:** `./scripts/build-macos.sh` with Xcode command-line tools and rustup. It
+  builds Apple silicon and Intel binaries, joins them, and writes
+  `dist/chatty-<version>-macos-universal.dmg`. Set `CHATTY_MACOS_SIGN_IDENTITY` to a
+  Developer ID to sign with the hardened runtime; otherwise the app is signed ad hoc
+  and Gatekeeper asks users to approve it on first launch. Notarization is not
+  automated.
+
+Both bundle ONNX Runtime 1.23.2, verified by SHA-256 before use. Neither packages
+the broker. Regenerate `packaging/windows/chatty.ico` and `packaging/macos/chatty.icns`
+from the Flatpak SVG with `python3 scripts/make-icons.py` (needs `rsvg-convert`).
+
+Test each package on a clean machine: install, connect to a broker, confirm a new
+certificate, sign in, stream a reply, use speech, restart, and check session resume.
+On Windows also check that screen recording shows no window content.
+
 ## Flathub manifest status
 
 `packaging/flatpak/io.github.pheonixfirewingz.Chatty.yml` is not submission-ready. Before use:
@@ -136,7 +162,7 @@ Publish together:
 
 - Tagged source archive
 - Checksummed broker binary for each supported server architecture
-- Checksummed GUI binary or Flatpak bundle
+- Checksummed GUI Flatpak bundle, Windows installer and portable zip, and macOS disk image
 - License and release notes
 - Protocol version and minimum compatible broker/GUI version
 

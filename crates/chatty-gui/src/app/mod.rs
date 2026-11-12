@@ -52,6 +52,11 @@ pub struct ChattyApp {
     tts_holder: ChannelHolder<TtsEvent>,
     fifo_path: Option<PathBuf>,
     pending_screenshot_path: Option<PathBuf>,
+    /// Whether the window is protected from screen capture.
+    capture_guard: bool,
+    /// Whether the window has keyboard focus; content hides without it when
+    /// the capture guard relies on focus.
+    window_focused: bool,
     zoom: f32,
 
     status: String,
@@ -192,6 +197,8 @@ impl ChattyApp {
             tts_holder: ChannelHolder(Arc::new(tokio::sync::Mutex::new(Some(tts_rx))), 2),
             fifo_path: None,
             pending_screenshot_path: None,
+            capture_guard: false,
+            window_focused: true,
             zoom: 1.0,
 
             status: "Enter the server IP to begin.".into(),
@@ -298,6 +305,7 @@ impl ChattyApp {
 
         let mut app = Self::new(command_tx, event_rx);
         app.fifo_path = args.inspect_control;
+        app.capture_guard = crate::capture_guard::ENABLED && !args.inspect;
         app.preferences_path = Some(preferences_path);
         app.server_address = initial_server;
         app.speech = speech;
@@ -309,7 +317,14 @@ impl ChattyApp {
             app.connected = true;
         }
 
-        (app, Task::none())
+        let task = if app.capture_guard {
+            // The window may open before or after boot; the subscription
+            // covers a later open.
+            iced::window::oldest().and_then(|id| Task::done(Message::WindowOpened(id)))
+        } else {
+            Task::none()
+        };
+        (app, task)
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {

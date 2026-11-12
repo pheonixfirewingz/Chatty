@@ -1,11 +1,11 @@
 //! Random v4 UUID strings, replacing the `uuid` crate.
 //!
-//! Reads entropy from `/dev/urandom`; if that ever fails, falls back to a
-//! time/address-space hash so ID generation can never panic.
+//! Reads entropy from the operating system; if that ever fails, falls back to
+//! a time/address-space hash so ID generation can never panic. Secrets such as
+//! session tokens use [`secret_hex`], which never falls back.
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
-use std::io::Read;
 
 /// Generates a random (version 4) UUID in canonical hyphenated form.
 pub fn new_uuid() -> String {
@@ -24,10 +24,18 @@ pub fn new_uuid() -> String {
     )
 }
 
+/// Returns `bytes` random bytes from the operating system as lowercase hex.
+///
+/// Unlike [`new_uuid`], this fails instead of using a predictable fallback, so
+/// it is safe for bearer secrets.
+pub fn secret_hex(bytes: usize) -> std::io::Result<String> {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::fill(&mut buffer).map_err(std::io::Error::other)?;
+    Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn fill_random(buffer: &mut [u8]) {
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom")
-        && file.read_exact(buffer).is_ok()
-    {
+    if getrandom::fill(buffer).is_ok() {
         return;
     }
     // Fallback: fold the current time through SipHash with a fresh random

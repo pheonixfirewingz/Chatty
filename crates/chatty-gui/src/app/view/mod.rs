@@ -18,7 +18,7 @@ use crate::memories::{MemoryViewState, memory_dialog_view};
 use crate::ui;
 use crate::worlds::{WorldViewState, world_dialog_view};
 use chatty_protocol::ConversationKind;
-use iced::widget::{Space, container, responsive, row, scrollable};
+use iced::widget::{Space, container, opaque, responsive, row, scrollable, stack, text};
 use iced::{Background, Color, Element, Length, Size};
 use iced_dialog::dialog;
 
@@ -70,11 +70,39 @@ impl ChattyApp {
 
         let glass_mode = self.glass_mode;
 
-        container(root)
+        let window: Element<Message> = container(root)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| ui::window_backdrop_style(glass_mode))
-            .into()
+            .into();
+
+        // Keep the window in a stack whether or not the cover shows, so the
+        // content's widget state (scroll offsets, inputs) survives refocus.
+        stack![window, self.capture_cover()].into()
+    }
+
+    /// Whether content is hidden from screen capture because the window is
+    /// unfocused on a platform without app-requested capture exclusion.
+    pub(super) fn content_hidden(&self) -> bool {
+        self.capture_guard && crate::capture_guard::HIDE_UNFOCUSED && !self.window_focused
+    }
+
+    fn capture_cover<'a>(&self) -> Element<'a, Message> {
+        if !self.content_hidden() {
+            return Space::new().into();
+        }
+        opaque(
+            container(
+                text("Chatty hides its content while in the background")
+                    .size(14)
+                    .color(ui::SECONDARY_TEXT),
+            )
+            .center(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(ui::PALETTE.background)),
+                ..Default::default()
+            }),
+        )
     }
 
     /// The topmost open modal, in priority order.

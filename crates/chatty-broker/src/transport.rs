@@ -6,11 +6,30 @@ pub(super) fn tls_config(cert: &str, key: &str) -> Result<ServerConfig> {
             .collect::<std::result::Result<_, _>>()?;
     let key: PrivateKeyDer<'static> = pemfile::private_key(&mut BufReader::new(File::open(key)?))?
         .context("missing private key")?;
+    if let Some(anchor) = certs.last() {
+        // Clients that do not already trust this chain show this fingerprint
+        // before trusting it; print it so operators can compare out of band.
+        let fingerprint = certificate_fingerprint(anchor);
+        info!(%fingerprint, "TLS trust fingerprint (SHA-256)");
+        eprintln!("chatty-broker TLS trust fingerprint (SHA-256): {fingerprint}");
+    }
     Ok(
-        ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        ServerConfig::builder_with_provider(chatty_protocol::util::tls::post_quantum_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
             .with_single_cert(certs, key)?,
     )
+}
+
+/// SHA-256 of a DER certificate as colon-separated uppercase hex, matching
+/// the fingerprint the GUI shows for trust confirmation.
+pub(super) fn certificate_fingerprint(certificate: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(certificate)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 pub(super) async fn serve(
@@ -19,6 +38,7 @@ pub(super) async fn serve(
 ) -> Result<()> {
     ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
     let connection_id = new_uuid();
+    let peer = stream.get_ref().0.peer_addr().ok().map(|addr| addr.ip());
     let identity = Arc::new(RwLock::new(None::<String>));
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::channel::<Out>(32); // bounded queue is transport backpressure
@@ -123,8 +143,9 @@ pub(super) async fn serve(
                     let identity = identity.clone();
                     let busy = busy.clone();
                     let connection_id = connection_id.clone();
-                    let control =
+                    let mut control =
                         dispatch_control(&app, &connection_id, frame.request_id, &req, busy).await;
+                    control.peer = peer;
                     tokio::spawn(async move {
                         let cancellations = app.cancellations.clone();
                         let key = (connection_id.clone(), frame.request_id);

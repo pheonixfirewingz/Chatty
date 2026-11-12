@@ -74,3 +74,21 @@ fn view_builds_without_panics_for_all_states() {
         app.error = None;
     }
 }
+
+#[test]
+fn capture_guard_hides_content_only_while_unfocused_on_linux() {
+    let mut app = Harness::demo();
+    app.update(Message::WindowFocusChanged(false));
+    assert!(!app.content_hidden(), "guard is off unless enabled");
+
+    app.capture_guard = true;
+    assert_eq!(app.content_hidden(), crate::capture_guard::HIDE_UNFOCUSED);
+    app.update(Message::WindowFocusChanged(true));
+    assert!(!app.content_hidden());
+    let _ = app.view();
+}
+
+#[test]
+fn capture_guard_is_release_only() {
+    assert_eq!(crate::capture_guard::ENABLED, !cfg!(debug_assertions));
+}

@@ -110,13 +110,14 @@ Defaults follow the XDG Base Directory Specification:
 | Per-server GUI CA | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.pem` or `~/.config/chatty/server-cas/<host>.ca.pem` |
 | First-use trust material | `$XDG_CONFIG_HOME/chatty/server-cas/<host>.ca.der` (or `.cert.der` for a leaf-only legacy chain) |
 
+On Windows and macOS the GUI keeps its session, preferences, and trust material in
+`%APPDATA%\Chatty\` and `~/Library/Application Support/Chatty/`, with certificates under
+`server-cas\`. Colons in IPv6 host names become `_` in Windows file names.
+
 Only distribute `ca.pem` to clients. Keep `ca.key` private and offline from client systems.
 
-The official client requests native screen-capture exclusion for its window. This is
-effective on supported Windows versions and best-effort on macOS. Current Linux X11
-and Wayland windowing APIs used by Chatty do not provide a portable equivalent, so
-the setting cannot prevent screenshots there. It also cannot prevent photography,
-modified clients, or capture outside the operating system's managed APIs.
+See [Screen capture protection](#screen-capture-protection) for what the client does
+against screenshots on each platform.
 
 Public brokers whose certificates chain to a standard public CA connect without a Chatty-specific
 certificate file. For private or LAN brokers, the GUI retrieves the public private-CA certificate
@@ -131,6 +132,32 @@ Private broker certificate files should contain the leaf certificate followed by
 certificate; the development certificate script produces this chain. Older leaf-only brokers fall
 back to an exact `<host>.cert.der` pin. If a private CA intentionally changes, remove the saved
 `<host>.ca.der` (or legacy `.cert.der`) and confirm the replacement fingerprint on next connection.
+
+## Screen capture protection
+
+Release builds keep conversations out of screenshots and screen recordings.
+Debug builds and `--inspect` stay capturable for development.
+
+- **Windows** excludes the window from capture (Windows 10 2004 or later;
+  older versions capture it as black).
+- **macOS** marks the window as not shareable.
+- **Linux** has no way for an app to opt out of capture on Wayland, so
+  Chatty covers its content whenever the window loses focus. For full
+  protection, add a compositor rule for the app ID
+  `io.github.pheonixfirewingz.Chatty`. In niri:
+
+  ```kdl
+  window-rule {
+      match app-id="^io\.github\.pheonixfirewingz\.Chatty$"
+      block-out-from "screen-capture"
+  }
+  ```
+
+  Hyprland offers the `noscreenshare` window rule, and recent KWin versions
+  can exclude windows from capture. Sway and GNOME have no equivalent. X11
+  sessions cannot be protected.
+
+No setting stops a camera pointed at the screen.
 
 ## Development and release
 

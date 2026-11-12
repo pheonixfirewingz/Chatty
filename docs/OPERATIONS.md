@@ -28,7 +28,9 @@ CHATTY_LLAMA_URL=http://127.0.0.1:11434/v1 \
 
 The inference endpoint may be unavailable at startup; the broker remains available and retries generation paths later. `CHATTY_LLAMA_URL` initializes a new database but does not override persisted configuration in an existing database.
 
-The broker truncates its private current-boot log at every process start and records all broker trace, debug, info, warning, and error events. The default path is `~/.local/share/chatty/chatty-boot.log`; set `CHATTY_LOG` for system installations. The file is mode `0600` on Unix, rolls over at 16 MiB to bound disk use, and is readable from the admin portal's **Logs** tab. Every outbound AI prompt is recorded there, including system instructions, selected memories, and chat content, so treat the log as private user data. Each prompt also logs estimated input tokens, the system/chat token split, and the requested context window and estimated percentage used when the request sets a context size. Estimates use the broker’s conservative three-UTF-8-bytes-per-token rule plus message overhead; they are not model-tokenizer counts. Generation completion logs provider-reported input, output, and total tokens, plus the percentage of the configured context used by that total. Zero reported counts can mean the provider omitted usage; auxiliary requests without an explicit context size show `None` for context usage. Only authenticated administrators can request it, and each response is limited to the newest 512 KiB.
+Prompts, memories, and chat content travel to the inference endpoint in that URL's protocol. Ollama serves plain HTTP, so keep it on the broker host, reach it over a VPN or SSH tunnel, or put a TLS proxy in front of it. The broker logs a warning when the configured URL is plain HTTP to a non-loopback host.
+
+The broker truncates its private current-boot log at every process start and records all broker trace, debug, info, warning, and error events. The default path is `~/.local/share/chatty/chatty-boot.log`; set `CHATTY_LOG` for system installations. The file is mode `0600` on Unix, rolls over at 16 MiB to bound disk use, and is readable from the admin portal's **Logs** tab. Outbound AI prompt and response bodies, including system instructions, selected memories, and chat content, are recorded only when `CHATTY_DEBUG=1`; leave it unset in production. The log still holds account, conversation, and memory IDs, so treat it as private user data. Each prompt logs estimated input tokens, the system/chat token split, and the requested context window and estimated percentage used when the request sets a context size. Estimates use the broker’s conservative three-UTF-8-bytes-per-token rule plus message overhead; they are not model-tokenizer counts. Generation completion logs provider-reported input, output, and total tokens, plus the percentage of the configured context used by that total. Zero reported counts can mean the provider omitted usage; auxiliary requests without an explicit context size show `None` for context usage. Only authenticated administrators can request it, and each response is limited to the newest 512 KiB.
 
 System and per-user service templates are in `packaging/`. Review their paths, user, network exposure, and inference URL before installation.
 
@@ -38,6 +40,7 @@ System and per-user service templates are in `packaging/`. Review their paths, u
 |---|---|---|
 | `CHATTY_LISTEN` | `0.0.0.0:7443`; launcher uses `127.0.0.1:7443` | Listen address |
 | `CHATTY_DATABASE` | XDG data directory | SQLite URL |
+| `CHATTY_DEBUG` | Unset | `1` or `true` records AI prompt and response bodies in the boot log |
 | `CHATTY_LOG` | XDG data directory | Current-boot broker log path |
 | `CHATTY_CERT` | `certs/server.pem` | Server certificate chain |
 | `CHATTY_KEY` | `certs/server.key` | Server private key |
@@ -163,7 +166,7 @@ Compatibility was checked against FreeToken commit `ba31db2ea708b61d7313bccb3ee4
 
 ## Certificates
 
-The broker accepts TLS 1.3 only. CA-based and public-PKI connections verify the requested server
+The broker accepts TLS 1.3 with the X25519MLKEM768 hybrid post-quantum key exchange only; check it with `openssl s_client -connect <host>:7443 -groups X25519MLKEM768` (OpenSSL 3.5 or later). CA-based and public-PKI connections verify the requested server
 name. First-use private certificate pins bind the exact confirmed certificate to the entered server.
 
 The GUI uses this trust order:
@@ -176,8 +179,10 @@ The GUI uses this trust order:
    certificate is saved and a verified connection is retried.
 
 The discovery handshake never sends account credentials. Do not tell users to accept an
-unconfirmed fingerprint; compare it with `openssl x509 -in ca.pem -noout -fingerprint -sha256`
-on the broker or through another trusted channel.
+unconfirmed fingerprint. The broker prints the expected value to stderr and the boot log at
+startup as `TLS trust fingerprint (SHA-256)`: the last certificate in `server.pem`, which is
+the CA for a chain or the leaf otherwise. Compare it through a trusted channel, or use
+`openssl x509 -in ca.pem -noout -fingerprint -sha256` for a chain.
 
 For private deployments, configure `server.pem` as a chain containing the server leaf followed by
 the public private-CA certificate. This lets clients enroll the CA and permits future leaf renewal

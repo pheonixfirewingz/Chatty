@@ -109,6 +109,22 @@ const ARGON2_CONCURRENCY: usize = 10;
 /// polling keep their own connection alive through traffic.
 const IDLE_CLOSE: Duration = Duration::from_secs(120);
 
+/// A real Argon2 hash with default parameters, verified when a login names an
+/// unknown user so that it costs the same as a wrong password.
+fn dummy_password_hash() -> Result<&'static str> {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(hash) = HASH.get() {
+        return Ok(hash);
+    }
+    let salt =
+        SaltString::encode_b64(b"chatty-dummy-salt").map_err(|e| Error::msg(e.to_string()))?;
+    let hash = Argon2::default()
+        .hash_password(b"chatty-dummy-password", &salt)
+        .map_err(|e| Error::msg(e.to_string()))?
+        .to_string();
+    Ok(HASH.get_or_init(|| hash))
+}
+
 async fn argon_permit(app: &App) -> Result<OwnedSemaphorePermit> {
     app.argon_gate
         .clone()
@@ -270,6 +286,7 @@ async fn main() -> Result<()> {
         .connect(&database)
         .await?;
     sqlx::migrate!().run(&db).await?;
+    hash_legacy_sessions(&db).await?;
     sqlx::query("INSERT OR IGNORE INTO broker_settings(singleton,adapter_url) VALUES(1,?)")
         .bind(args.llama_url.trim_end_matches('/'))
         .execute(&db)
@@ -326,12 +343,15 @@ async fn main() -> Result<()> {
 struct DispatchControl {
     busy: Arc<AtomicU64>,
     download_cancel: Option<watch::Receiver<bool>>,
+    /// Client address; keys the sign-in throttle.
+    peer: Option<std::net::IpAddr>,
 }
 impl From<Arc<AtomicU64>> for DispatchControl {
     fn from(busy: Arc<AtomicU64>) -> Self {
         Self {
             busy,
             download_cancel: None,
+            peer: None,
         }
     }
 }
@@ -364,6 +384,7 @@ async fn dispatch_control(
     DispatchControl {
         busy,
         download_cancel,
+        peer: None,
     }
 }
 
@@ -379,6 +400,7 @@ async fn dispatch(
     let DispatchControl {
         busy,
         download_cancel,
+        peer,
     } = control;
     let _snapshot_guard = if matches!(&req, Request::Snapshot { .. }) {
         Some(app.snapshot_gate.write().await)
@@ -471,20 +493,31 @@ async fn dispatch(
             );
         }
         Request::Login { username, password } => {
+            let throttle_key = login_throttle_key(peer, &username);
+            login_throttle().check(&throttle_key, Instant::now())?;
             let row = sqlx::query("SELECT id,password_hash,role FROM users WHERE username=?")
-                .bind(username)
+                .bind(&username)
                 .fetch_optional(&app.db)
-                .await?
-                .context("invalid credentials")?;
-            let stored: String = row.get("password_hash");
-            let parsed =
-                PasswordHash::new(&stored).map_err(|_| format_err!("invalid credentials"))?;
-            {
+                .await?;
+            // Verify against a dummy hash for unknown users so response time
+            // does not reveal which usernames exist.
+            let verified = {
                 let _argon_permit = argon_permit(&app).await?;
-                Argon2::default()
-                    .verify_password(password.as_bytes(), &parsed)
-                    .map_err(|_| format_err!("invalid credentials"))?;
+                let stored: String = match &row {
+                    Some(row) => row.get("password_hash"),
+                    None => dummy_password_hash()?.to_owned(),
+                };
+                PasswordHash::new(&stored).is_ok_and(|parsed| {
+                    Argon2::default()
+                        .verify_password(password.as_bytes(), &parsed)
+                        .is_ok()
+                })
+            };
+            if !verified {
+                login_throttle().failed(&throttle_key, Instant::now());
             }
+            let row = row.filter(|_| verified).context("invalid credentials")?;
+            login_throttle().succeeded(&throttle_key);
             let uid: String = row.get("id");
             let role: String = row.get("role");
             let (token, rev) = new_session(&app.db, &uid).await?;
@@ -519,7 +552,7 @@ async fn dispatch(
         }
         Request::Logout { session_token } => {
             sqlx::query("DELETE FROM sessions WHERE token=?")
-                .bind(session_token)
+                .bind(session_key(&session_token))
                 .execute(&app.db)
                 .await?;
             *identity.write().await = None;
@@ -640,7 +673,7 @@ async fn dispatch(
             );
         }
         Request::GetPermissions { session_token } => {
-            let role:String=sqlx::query_scalar("SELECT u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>datetime('now')").bind(session_token).fetch_optional(&app.db).await?.context("unauthorized")?;
+            let role:String=sqlx::query_scalar("SELECT u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>datetime('now')").bind(session_key(&session_token)).fetch_optional(&app.db).await?.context("unauthorized")?;
             let mut permissions = vec![Permission::ManageOwnRoleplay, Permission::GenerateRoleplay];
             if role == "admin" {
                 permissions.push(Permission::ManageUsers);

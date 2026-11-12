@@ -19,6 +19,18 @@ use std::time::{Duration, Instant};
 impl ChattyApp {
     pub(super) fn update_message(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::WindowOpened(id) => iced::window::run(id, |window| {
+                if !crate::capture_guard::exclude_from_capture(window)
+                    && !crate::capture_guard::HIDE_UNFOCUSED
+                {
+                    eprintln!("chatty: could not exclude the window from screen capture");
+                }
+            })
+            .discard(),
+            Message::WindowFocusChanged(focused) => {
+                self.window_focused = focused;
+                Task::none()
+            }
             Message::ScreenshotCaptured(screenshot) => {
                 if let Some(path) = self.pending_screenshot_path.take() {
                     let _ = image::save_buffer(
