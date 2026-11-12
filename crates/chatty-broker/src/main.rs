@@ -488,8 +488,9 @@ async fn dispatch(
             );
         }
         Request::Login { username, password } => {
+            login_throttle().check(&username, Instant::now())?;
             let row = sqlx::query("SELECT id,password_hash,role FROM users WHERE username=?")
-                .bind(username)
+                .bind(&username)
                 .fetch_optional(&app.db)
                 .await?;
             // Verify against a dummy hash for unknown users so response time
@@ -506,7 +507,11 @@ async fn dispatch(
                         .is_ok()
                 })
             };
+            if !verified {
+                login_throttle().failed(&username, Instant::now());
+            }
             let row = row.filter(|_| verified).context("invalid credentials")?;
+            login_throttle().succeeded(&username);
             let uid: String = row.get("id");
             let role: String = row.get("role");
             let (token, rev) = new_session(&app.db, &uid).await?;

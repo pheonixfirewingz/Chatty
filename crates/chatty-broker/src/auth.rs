@@ -56,3 +56,57 @@ pub(super) async fn require_admin(db: &SqlitePool, token: &str) -> Result<String
     }
     Ok(row.get("id"))
 }
+
+/// Failed sign-ins allowed per username within [`LOGIN_WINDOW`].
+const LOGIN_FAILURES: u32 = 5;
+const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// Bounds the throttle's memory. When full, the oldest window is dropped.
+const LOGIN_TRACKED: usize = 4096;
+
+/// Per-username failed sign-in counts, kept in memory only. Unknown usernames
+/// are counted too, so throttling reveals nothing about which accounts exist.
+#[derive(Default)]
+pub(super) struct LoginThrottle(pub(super) std::sync::Mutex<HashMap<String, (u32, Instant)>>);
+
+impl LoginThrottle {
+    pub(super) fn check(&self, username: &str, now: Instant) -> Result<()> {
+        let failures = self.0.lock().unwrap();
+        match failures.get(username) {
+            Some((count, start))
+                if *count >= LOGIN_FAILURES && now.duration_since(*start) < LOGIN_WINDOW =>
+            {
+                bail!("too many failed sign-ins; try again in 15 minutes")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(super) fn failed(&self, username: &str, now: Instant) {
+        let mut failures = self.0.lock().unwrap();
+        if !failures.contains_key(username) && failures.len() >= LOGIN_TRACKED {
+            failures.retain(|_, (_, start)| now.duration_since(*start) < LOGIN_WINDOW);
+            if failures.len() >= LOGIN_TRACKED
+                && let Some(oldest) = failures
+                    .iter()
+                    .min_by_key(|(_, (_, start))| *start)
+                    .map(|(name, _)| name.clone())
+            {
+                failures.remove(&oldest);
+            }
+        }
+        let entry = failures.entry(username.to_owned()).or_insert((0, now));
+        if now.duration_since(entry.1) >= LOGIN_WINDOW {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+    }
+
+    pub(super) fn succeeded(&self, username: &str) {
+        self.0.lock().unwrap().remove(username);
+    }
+}
+
+pub(super) fn login_throttle() -> &'static LoginThrottle {
+    static THROTTLE: std::sync::OnceLock<LoginThrottle> = std::sync::OnceLock::new();
+    THROTTLE.get_or_init(LoginThrottle::default)
+}

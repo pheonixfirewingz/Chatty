@@ -1987,3 +1987,38 @@ async fn sessions_store_only_token_hashes_and_legacy_tokens_keep_working() {
     assert!(!stored.contains(&token) && !stored.contains(&legacy));
     assert!(auth(&db, &session_key(&token)).await.is_err());
 }
+
+#[test]
+fn login_throttle_blocks_after_repeated_failures_until_the_window_ends() {
+    let throttle = LoginThrottle::default();
+    let start = Instant::now();
+    for _ in 0..5 {
+        throttle.check("alice", start).unwrap();
+        throttle.failed("alice", start);
+    }
+    assert!(throttle.check("alice", start).is_err());
+    assert!(throttle.check("bob", start).is_ok());
+    let later = start + Duration::from_secs(15 * 60);
+    throttle.check("alice", later).unwrap();
+    throttle.failed("alice", later);
+    assert!(throttle.check("alice", later).is_ok());
+
+    for _ in 0..5 {
+        throttle.failed("carol", start);
+    }
+    throttle.succeeded("carol");
+    assert!(throttle.check("carol", start).is_ok());
+}
+
+#[test]
+fn login_throttle_memory_is_bounded() {
+    let throttle = LoginThrottle::default();
+    let start = Instant::now();
+    for index in 0..5000 {
+        throttle.failed(
+            &format!("user{index}"),
+            start + Duration::from_millis(index),
+        );
+    }
+    assert_eq!(throttle.0.lock().unwrap().len(), 4096);
+}
