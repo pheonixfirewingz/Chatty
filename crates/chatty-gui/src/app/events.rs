@@ -43,6 +43,7 @@ impl ChattyApp {
             session_token: self.token.clone(),
             conversation_id: None,
             character_id: None,
+            include_history: false,
         });
     }
 
@@ -333,6 +334,19 @@ impl ChattyApp {
                         }
                         Response::Characters(v) => self.set_characters(v),
                         Response::Memories(v) => self.memories = v,
+                        Response::MemoriesExtracted {
+                            added,
+                            updated,
+                            retired,
+                        } => {
+                            self.memory_state.status_message =
+                                Some(extraction_status(added, updated, retired));
+                            if !self.token.is_empty() {
+                                self.send(Request::GetAccountUsage {
+                                    session_token: self.token.clone(),
+                                });
+                            }
+                        }
                         Response::MemoriesCondensed { before, after } => {
                             self.memory_state.condensing = false;
                             self.memory_state.status_message = Some(if before == 0 {
@@ -518,9 +532,6 @@ impl ChattyApp {
                             let done = match self.memory_state.status_message.as_deref() {
                                 Some("Saving memory…") => Some("Memory saved."),
                                 Some("Removing memory…") => Some("Memory removed."),
-                                Some("Learning from chat…") => {
-                                    Some("New memory learned from the chat.")
-                                }
                                 _ => None,
                             };
                             if let Some(done) = done {
@@ -840,4 +851,22 @@ impl ChattyApp {
             self.state.insert(key, p);
         }
     }
+}
+
+/// Status line for a finished memory extraction.
+fn extraction_status(added: usize, updated: usize, retired: usize) -> String {
+    if added + updated + retired == 0 {
+        return "Nothing new to remember from this chat.".into();
+    }
+    let parts = [
+        (added, "learned"),
+        (updated, "updated"),
+        (retired, "retired"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, verb)| format!("{count} {verb}"))
+    .collect::<Vec<_>>()
+    .join(", ");
+    format!("Memories: {parts}.")
 }

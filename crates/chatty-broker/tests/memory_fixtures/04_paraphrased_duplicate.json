@@ -1,0 +1,16 @@
+{
+  "description": "Paraphrases of saved memories are not saved again; distinct new details are.",
+  "participants": ["Mara"],
+  "saved": [
+    {"id": "tea", "holder": "Mara", "content": "The user loves jasmine tea."}
+  ],
+  "transcript": [
+    {"author": "user", "content": "You know I really love jasmine tea. I also started learning the violin."},
+    {"author": "Mara", "content": "The violin? Play something for me sometime."}
+  ],
+  "scripted": "[{\"op\":\"add\",\"holder\":\"Mara\",\"content\":\"The user really loves jasmine tea.\",\"evidence\":[1]},{\"op\":\"add\",\"holder\":\"Mara\",\"content\":\"The user is learning the violin.\",\"evidence\":[1]}]",
+  "expected": {
+    "active": [{"holder": "Mara", "contains": ["violin"]}],
+    "statuses": {"tea": "active"}
+  }
+}

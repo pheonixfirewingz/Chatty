@@ -6,8 +6,9 @@ mod view;
 
 pub use view::*;
 
-use chatty_protocol::{MemoryEntry, MemoryInput, MemoryKind};
+use chatty_protocol::{MemoryEntry, MemoryInput, MemoryKind, MemoryStatus};
 use iced::widget::text_editor;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Broker importance scale; retrieval ranks by it, and learned memories use 50.
 pub const MAX_IMPORTANCE: u8 = 100;
@@ -62,6 +63,14 @@ pub enum MemoryMessage {
     ConfirmDelete(String),
     /// Cancel deletion confirmation.
     CancelDelete,
+    /// Show or hide the earlier versions of a memory.
+    ToggleHistory(String),
+    /// Show or hide the chat messages a memory was learned from.
+    ToggleSources(String),
+    /// Show or hide retired memories and orphaned earlier versions.
+    ToggleRetired,
+    /// Make a superseded or retired memory active again.
+    Restore(String),
     /// Close the memory dialog.
     Close,
 }
@@ -92,6 +101,11 @@ pub struct MemoryDialogState {
     pub delete_confirm_id: Option<String>,
     pub condensing: bool,
     pub status_message: Option<String>,
+    /// Memories whose earlier versions are shown.
+    pub expanded_history: BTreeSet<String>,
+    /// Memories whose source messages are shown.
+    pub expanded_sources: BTreeSet<String>,
+    pub show_retired: bool,
 }
 
 impl MemoryDialogState {
@@ -219,6 +233,25 @@ impl MemoryDialogState {
                 self.delete_confirm_id = None;
                 MemoryAction::None
             }
+            MemoryMessage::ToggleHistory(id) => {
+                toggle(&mut self.expanded_history, id);
+                MemoryAction::None
+            }
+            MemoryMessage::ToggleSources(id) => {
+                toggle(&mut self.expanded_sources, id);
+                MemoryAction::None
+            }
+            MemoryMessage::ToggleRetired => {
+                self.show_retired = !self.show_retired;
+                MemoryAction::None
+            }
+            MemoryMessage::Restore(id) => match memories.iter().find(|m| m.id == id) {
+                // Saving an inactive memory makes it active again on the broker.
+                Some(entry) if entry.status != MemoryStatus::Active => {
+                    MemoryAction::Save(memory_input(entry))
+                }
+                _ => MemoryAction::None,
+            },
             MemoryMessage::Close => MemoryAction::Close,
         }
     }
@@ -240,6 +273,12 @@ impl MemoryDialogState {
             input.content = self.editor.text();
         }
         task
+    }
+}
+
+fn toggle(set: &mut BTreeSet<String>, id: String) {
+    if !set.remove(&id) {
+        set.insert(id);
     }
 }
 
@@ -272,7 +311,25 @@ pub fn blank_memory(character_id: Option<String>, conversation_id: Option<String
     }
 }
 
-/// Filters memories based on character, conversation, kind, and search text.
+fn matches_filters(
+    memory: &MemoryEntry,
+    character_id: Option<&str>,
+    conversation_id: Option<&str>,
+    kind: Option<MemoryKind>,
+    query: &str,
+) -> bool {
+    character_id.is_none_or(|id| memory.character_id.as_deref() == Some(id))
+        && conversation_id.is_none_or(|id| {
+            memory
+                .conversation_id
+                .as_deref()
+                .is_none_or(|own| own == id)
+        })
+        && kind.is_none_or(|kind| memory.kind == kind)
+        && (query.is_empty() || memory.content.to_lowercase().contains(query))
+}
+
+/// Filters active memories based on character, conversation, kind, and search text.
 pub fn filter_memories<'a>(
     memories: &'a [MemoryEntry],
     character_id: Option<&str>,
@@ -280,28 +337,74 @@ pub fn filter_memories<'a>(
     kind: Option<MemoryKind>,
     query: &str,
 ) -> Vec<&'a MemoryEntry> {
-    let q = query.trim().to_lowercase();
+    let query = query.trim().to_lowercase();
     memories
         .iter()
-        .filter(|m| {
-            if let Some(cid) = character_id
-                && m.character_id.as_deref() != Some(cid)
-            {
-                return false;
-            }
-            if let Some(cvid) = conversation_id
-                && m.conversation_id.as_deref().is_some_and(|id| id != cvid)
-            {
-                return false;
-            }
-            if let Some(k) = kind
-                && m.kind != k
-            {
-                return false;
-            }
-            q.is_empty() || m.content.to_lowercase().contains(&q)
-        })
+        .filter(|m| m.status == MemoryStatus::Active)
+        .filter(|m| matches_filters(m, character_id, conversation_id, kind, &query))
         .collect()
+}
+
+/// Inactive memories that no listed memory replaced: retired memories, and
+/// earlier versions whose replacement is gone. Uses the same filters.
+pub fn filter_retired<'a>(
+    memories: &'a [MemoryEntry],
+    character_id: Option<&str>,
+    conversation_id: Option<&str>,
+    kind: Option<MemoryKind>,
+    query: &str,
+) -> Vec<&'a MemoryEntry> {
+    let query = query.trim().to_lowercase();
+    let ids = memories
+        .iter()
+        .map(|m| m.id.as_str())
+        .collect::<BTreeSet<_>>();
+    memories
+        .iter()
+        .filter(|m| match m.status {
+            MemoryStatus::Active => false,
+            MemoryStatus::Retired => true,
+            MemoryStatus::Superseded => m
+                .superseded_by
+                .as_deref()
+                .is_none_or(|successor| !ids.contains(successor)),
+        })
+        .filter(|m| matches_filters(m, character_id, conversation_id, kind, &query))
+        .collect()
+}
+
+/// Earlier versions of each memory, keyed by the ID that replaced them.
+/// Built once per view so each card finds its history without a scan.
+pub fn predecessors(memories: &[MemoryEntry]) -> BTreeMap<&str, Vec<&MemoryEntry>> {
+    let mut map = BTreeMap::<&str, Vec<&MemoryEntry>>::new();
+    for memory in memories {
+        if memory.status == MemoryStatus::Superseded
+            && let Some(successor) = memory.superseded_by.as_deref()
+        {
+            map.entry(successor).or_default().push(memory);
+        }
+    }
+    map
+}
+
+/// All earlier versions of `id`, newest first, following replacement links
+/// back through every generation. Bounded by the listed history.
+pub fn memory_history<'a>(
+    predecessors: &BTreeMap<&str, Vec<&'a MemoryEntry>>,
+    id: &str,
+) -> Vec<&'a MemoryEntry> {
+    let mut history = Vec::<&MemoryEntry>::new();
+    let mut pending = vec![id.to_owned()];
+    while let Some(current) = pending.pop() {
+        for memory in predecessors.get(current.as_str()).into_iter().flatten() {
+            if memory.id != id && !history.iter().any(|seen| seen.id == memory.id) {
+                history.push(memory);
+                pending.push(memory.id.clone());
+            }
+        }
+    }
+    history.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    history
 }
 
 /// Returns whether the selected scope contains at least two unpinned memories

@@ -2,11 +2,14 @@
 
 use super::*;
 use crate::ui::{self, MessageIcon, SidebarToggle, Tone, action_icon};
-use chatty_protocol::{Character, Conversation, MemoryEntry, MemoryKind};
+use chatty_protocol::{
+    Character, ChatMessage, Conversation, MemoryEntry, MemoryKind, MemoryStatus,
+};
 use iced::widget::{
     Space, button, column, container, pick_list, row, scrollable, slider, text, text_input,
 };
 use iced::{Alignment, Element, Length, Padding};
+use std::collections::BTreeMap;
 
 /// Below this width filters and editor fields stack into one column.
 const STACK_WIDTH: f32 = 600.0;
@@ -69,6 +72,8 @@ pub struct MemoryViewState<'a> {
     pub memories: &'a [MemoryEntry],
     pub characters: &'a [Character],
     pub conversations: &'a [Conversation],
+    /// Messages of the open chat, for showing where a memory came from.
+    pub messages: &'a [ChatMessage],
     pub state: &'a MemoryDialogState,
     pub can_extract: bool,
     pub glass_mode: bool,
@@ -79,6 +84,7 @@ impl<'a> MemoryViewState<'a> {
         memories: &'a [MemoryEntry],
         characters: &'a [Character],
         conversations: &'a [Conversation],
+        messages: &'a [ChatMessage],
         state: &'a MemoryDialogState,
         can_extract: bool,
         glass_mode: bool,
@@ -87,6 +93,7 @@ impl<'a> MemoryViewState<'a> {
             memories,
             characters,
             conversations,
+            messages,
             state,
             can_extract,
             glass_mode,
@@ -224,7 +231,7 @@ where
     let header = row![
         column![
             text("Memories").size(22).font(ui::BOLD),
-            text("What characters remember across chats. Pinned memories are always sent.")
+            text("What each character remembers. Pinned memories are always sent; learned ones update as facts change.")
                 .size(12)
                 .color(ui::SECONDARY_TEXT),
         ]
@@ -255,9 +262,9 @@ where
         action_icon(
             MessageIcon::Sparkle,
             if view.can_extract {
-                "Learn a memory from the open chat"
+                "Learn memories from the open chat"
             } else {
-                "Learn from chat (open a chat with a character first)"
+                "Learn from chat (open a chat first)"
             },
             view.can_extract
                 .then(|| msg(MemoryMessage::ExtractFromChat)),
@@ -388,8 +395,32 @@ where
         count => format!("{count} memories"),
     };
     body = body.push(text(summary).size(12).color(ui::SECONDARY_TEXT));
+    let predecessors = predecessors(view.memories);
     for memory in filtered {
-        body = body.push(memory_card(view, memory));
+        body = body.push(memory_card(view, memory, &predecessors));
+    }
+    let retired = filter_retired(
+        view.memories,
+        state.filter_character_id.as_deref(),
+        state.filter_conversation_id.as_deref(),
+        state.filter_kind,
+        &state.search_query,
+    );
+    if !retired.is_empty() {
+        let label = format!(
+            "{} Retired and replaced memories ({})",
+            if state.show_retired { "▾" } else { "▸" },
+            retired.len()
+        );
+        body = body.push(disclosure(label, msg(MemoryMessage::ToggleRetired)));
+        if state.show_retired {
+            for memory in retired {
+                body = body.push(history_card(view, memory));
+                for earlier in memory_history(&predecessors, &memory.id) {
+                    body = body.push(history_card(view, earlier));
+                }
+            }
+        }
     }
 
     let list = scrollable(container(body).padding(Padding {
@@ -526,9 +557,141 @@ where
     .into()
 }
 
+/// Small text toggle that expands or collapses a section.
+fn disclosure<'a, Message: 'a + Clone>(
+    label: String,
+    on_press: impl Into<Option<Message>>,
+) -> Element<'a, Message> {
+    button(text(label).size(12))
+        .padding(Padding::from([2, 6]))
+        .style(ui::secondary_button_style())
+        .on_press_maybe(on_press.into())
+        .into()
+}
+
+fn character_name<'a>(view: &MemoryViewState<'a>, id: Option<&str>) -> &'a str {
+    match id {
+        Some(id) => view
+            .characters
+            .iter()
+            .find(|c| c.id == id)
+            .map_or("Unknown character", |c| c.name.as_str()),
+        None => "Any character",
+    }
+}
+
+/// Holder, kind, source, scope, and importance of a memory.
+fn memory_meta(view: &MemoryViewState<'_>, memory: &MemoryEntry) -> String {
+    let holder = match memory.character_id.as_deref() {
+        Some(_) => format!(
+            "Held by {}",
+            character_name(view, memory.character_id.as_deref())
+        ),
+        None => "Any character".to_owned(),
+    };
+    let chat = match &memory.conversation_id {
+        Some(id) => format!(
+            "Chat: {}",
+            view.conversations
+                .iter()
+                .find(|c| &c.id == id)
+                .map_or("Unknown chat", |c| c.title.as_str())
+        ),
+        None => "All chats".to_owned(),
+    };
+    format!(
+        "{holder} · {} · {} · {chat} · Importance {}",
+        memory.kind.label(),
+        memory.source.label(),
+        memory.importance
+    )
+}
+
+/// Loaded messages a memory was learned from, oldest first.
+pub fn source_messages<'a>(
+    view: &MemoryViewState<'a>,
+    memory: &MemoryEntry,
+) -> Vec<&'a ChatMessage> {
+    view.messages
+        .iter()
+        .filter(|message| memory.source_message_ids.contains(&message.id))
+        .collect()
+}
+
+/// A superseded or retired memory: read-only, restorable, deletable.
+fn history_card<'a, Message>(
+    view: &MemoryViewState<'a>,
+    memory: &'a MemoryEntry,
+) -> Element<'a, Message>
+where
+    Message: 'a + Clone + From<MemoryMessage>,
+{
+    let msg = |m: MemoryMessage| Message::from(m);
+    let status = match memory.status {
+        MemoryStatus::Retired => "Retired",
+        _ => "Replaced",
+    };
+    let meta = format!(
+        "{status} {} · {}",
+        memory.updated_at,
+        memory_meta(view, memory)
+    );
+    let controls: Element<'a, Message> =
+        if view.state.delete_confirm_id.as_deref() == Some(memory.id.as_str()) {
+            row![
+                button(text("Cancel").size(13))
+                    .padding(Padding::from([6, 12]))
+                    .style(ui::secondary_button_style())
+                    .on_press(msg(MemoryMessage::CancelDelete)),
+                button(text("Delete").size(13))
+                    .padding(Padding::from([6, 12]))
+                    .style(ui::danger_button_style())
+                    .on_press(msg(MemoryMessage::ConfirmDelete(memory.id.clone()))),
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            row![
+                button(text("Restore").size(13))
+                    .padding(Padding::from([6, 12]))
+                    .style(ui::secondary_button_style())
+                    .on_press(msg(MemoryMessage::Restore(memory.id.clone()))),
+                action_icon(
+                    MessageIcon::Delete,
+                    "Delete this version",
+                    Some(msg(MemoryMessage::RequestDelete(memory.id.clone()))),
+                    Tone::Danger,
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+        };
+    container(
+        row![
+            column![
+                text(&memory.content).size(13).color(ui::SECONDARY_TEXT),
+                text(meta).size(12).color(ui::SECONDARY_TEXT),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            controls,
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding {
+        left: 24.0,
+        ..Padding::from([4, 8])
+    })
+    .width(Length::Fill)
+    .into()
+}
+
 fn memory_card<'a, Message>(
     view: &MemoryViewState<'a>,
     memory: &'a MemoryEntry,
+    predecessors: &BTreeMap<&str, Vec<&'a MemoryEntry>>,
 ) -> Element<'a, Message>
 where
     Message: 'a + Clone + From<MemoryMessage>,
@@ -540,23 +703,7 @@ where
         .as_ref()
         .is_some_and(|draft| draft.id.as_deref() == Some(memory.id.as_str()));
 
-    let mut details = vec![memory.kind.label(), memory.source.label()];
-    let character = memory.character_id.as_ref().map(|id| {
-        view.characters
-            .iter()
-            .find(|c| &c.id == id)
-            .map_or("Unknown character", |c| c.name.as_str())
-    });
-    details.push(character.unwrap_or("Any character"));
-    let chat = memory.conversation_id.as_ref().map(|id| {
-        view.conversations
-            .iter()
-            .find(|c| &c.id == id)
-            .map_or("Unknown chat", |c| c.title.as_str())
-    });
-    details.push(chat.unwrap_or("All chats"));
-    let meta = format!("{} · Importance {}", details.join(" · "), memory.importance);
-
+    let meta = memory_meta(view, memory);
     let controls: Element<'a, Message> =
         if view.state.delete_confirm_id.as_deref() == Some(memory.id.as_str()) {
             row![
@@ -611,20 +758,76 @@ where
             .into()
         };
 
-    ui::card(
-        row![
-            column![
-                text(&memory.content).size(14),
-                text(meta).size(12).color(ui::SECONDARY_TEXT),
-            ]
-            .spacing(4)
-            .width(Length::Fill),
-            controls,
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
-        view.glass_mode,
-    )
-    .width(Length::Fill)
-    .into()
+    let history = memory_history(predecessors, &memory.id);
+    let sources = source_messages(view, memory);
+    let history_open = view.state.expanded_history.contains(&memory.id);
+    let sources_open = view.state.expanded_sources.contains(&memory.id);
+    let mut toggles = row![].spacing(6);
+    if !history.is_empty() {
+        toggles = toggles.push(disclosure(
+            format!(
+                "{} Earlier versions ({})",
+                if history_open { "▾" } else { "▸" },
+                history.len()
+            ),
+            msg(MemoryMessage::ToggleHistory(memory.id.clone())),
+        ));
+    }
+    if !memory.source_message_ids.is_empty() {
+        toggles = toggles.push(if sources.is_empty() {
+            disclosure("Source messages (open their chat to view)".into(), None)
+        } else {
+            disclosure(
+                format!(
+                    "{} Source messages ({})",
+                    if sources_open { "▾" } else { "▸" },
+                    sources.len()
+                ),
+                msg(MemoryMessage::ToggleSources(memory.id.clone())),
+            )
+        });
+    }
+    let mut details = column![
+        text(&memory.content).size(14),
+        text(meta).size(12).color(ui::SECONDARY_TEXT),
+    ]
+    .spacing(4)
+    .width(Length::Fill);
+    if !history.is_empty() || !memory.source_message_ids.is_empty() {
+        details = details.push(toggles.wrap());
+    }
+    if sources_open {
+        for message in sources {
+            let author = match message.author_type.as_str() {
+                "user" => "You",
+                _ => character_name(view, message.author_id.as_deref()),
+            };
+            details = details.push(
+                text(format!("{author}: {}", clip_excerpt(&message.content)))
+                    .size(12)
+                    .color(ui::SECONDARY_TEXT),
+            );
+        }
+    }
+    let mut card = column![
+        row![details, controls]
+            .spacing(12)
+            .align_y(Alignment::Center)
+    ]
+    .spacing(6);
+    if history_open {
+        for earlier in history {
+            card = card.push(history_card(view, earlier));
+        }
+    }
+    ui::card(card, view.glass_mode).width(Length::Fill).into()
+}
+
+/// First 240 characters of a message, on one line.
+fn clip_excerpt(content: &str) -> String {
+    let line = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(240) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line,
+    }
 }

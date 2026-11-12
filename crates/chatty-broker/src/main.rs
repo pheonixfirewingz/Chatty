@@ -47,6 +47,10 @@ mod images;
 mod inference;
 #[path = "systems/memory.rs"]
 mod memory;
+#[path = "systems/memory_eval.rs"]
+mod memory_eval;
+#[path = "systems/memory_extraction.rs"]
+mod memory_extraction;
 mod transport;
 mod utils;
 mod workload;
@@ -59,6 +63,8 @@ use emotion::*;
 use images::*;
 use inference::*;
 use memory::*;
+use memory_eval::*;
+use memory_extraction::*;
 use transport::*;
 use utils::*;
 
@@ -80,11 +86,15 @@ Options:\n\
   --cert <path>       TLS certificate PEM [default: certs/server.pem]\n\
   --key <path>        TLS private key PEM [default: certs/server.key]\n\
   --llama-url <url>   Inference adapter base URL [env: CHATTY_LLAMA_URL]\n\
+\nMemory evaluation (no TLS, in-memory database):\n\
+  --memory-eval <dir>        Run memory fixtures against --llama-url, then exit\n\
+  --memory-eval-model <name> Model for the evaluation [default: first listed]\n\
 \nAdapter plugins:\n\
   CHATTY_ADAPTER_DIR       Optional directory of WASM plugin subdirectories\n\
   CHATTY_ADAPTER_PLUGIN    Optional inference/management plugin ID override\n";
 
-type MemoryJobs = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
+/// One memory job per (owner, conversation); the flag requests a follow-up run.
+type MemoryJobs = Arc<Mutex<HashMap<(String, String), bool>>>;
 
 #[derive(Clone)]
 struct App {
@@ -93,6 +103,7 @@ struct App {
     cancellations: CancellationRegistry,
     snapshot_gate: Arc<RwLock<()>>,
     memory_jobs: MemoryJobs,
+    memory_access: MemoryAccess,
     deltas: broadcast::Sender<PublishedDelta>,
     recent_errors: Arc<Mutex<Vec<String>>>,
     log_path: Arc<PathBuf>,
@@ -255,6 +266,15 @@ impl Drop for BusyGuard {
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = ParsedArgs::parse(USAGE)?;
+    if let Some(directory) = parsed.optional("memory-eval", "") {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_| format_err!("failed to install TLS crypto provider"))?;
+        let url = parsed.string("llama-url", "CHATTY_LLAMA_URL", "http://127.0.0.1:18114/v1");
+        let model = parsed.optional("memory-eval-model", "");
+        let passed = run_memory_evaluation(Path::new(&directory), &url, model.as_deref()).await?;
+        std::process::exit(if passed { 0 } else { 1 });
+    }
     let log = match parsed.optional("log", "CHATTY_LOG") {
         Some(path) => PathBuf::from(path),
         None => default_broker_log_path()?,
@@ -303,6 +323,7 @@ async fn main() -> Result<()> {
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         snapshot_gate: Arc::new(RwLock::new(())),
         memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        memory_access: Default::default(),
         deltas: delta_tx,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         log_path: Arc::new(args.log),
@@ -1101,7 +1122,7 @@ async fn dispatch(
         } => {
             let uid = auth(&app.db, &session_token).await?;
             let mut promoted_memories = if matches!(kind, EntityKind::Conversation) {
-                list_memories(&app.db, &uid, Some(&entity_id), None).await?
+                chat_scoped_memories(&app.db, &uid, &entity_id).await?
             } else {
                 Vec::new()
             };
@@ -1320,6 +1341,7 @@ async fn dispatch(
             session_token,
             conversation_id,
             character_id,
+            include_history,
         } => {
             let uid = auth(&app.db, &session_token).await?;
             let entries = list_memories(
@@ -1327,6 +1349,7 @@ async fn dispatch(
                 &uid,
                 conversation_id.as_deref(),
                 character_id.as_deref(),
+                include_history,
             )
             .await?;
             send!(MessageType::Response, Response::Memories(entries));
@@ -2008,33 +2031,15 @@ async fn dispatch(
                     bail!("memory character is not a conversation participant")
                 }
             }
-            let extracted = extract_memory(&app, &uid, &conversation_id).await?;
-            let eid = new_uuid();
-            let memory = MemoryInput {
-                id: Some(eid.clone()),
-                conversation_id: Some(conversation_id),
-                character_id,
-                kind: MemoryKind::Fact,
-                content: extracted.content,
-                importance: 50,
-                pinned: false,
-            };
-            let (entry, operation, changed) = persist_memory(
-                &app,
-                &uid,
-                memory,
-                MemorySource::Automatic,
-                0.8,
-                extracted.source_message_ids,
-            )
-            .await?;
-            let rev = entry.revision;
-            send_delta!(&uid, rev, "memory", eid, operation, changed);
+            let outcome =
+                run_manual_memory_extraction(&app, &uid, &conversation_id, character_id.as_deref())
+                    .await?;
             send!(
                 MessageType::Response,
-                Response::Accepted {
-                    entity_id: Some(eid),
-                    revision: rev
+                Response::MemoriesExtracted {
+                    added: outcome.added,
+                    updated: outcome.updated,
+                    retired: outcome.retired,
                 }
             );
         }

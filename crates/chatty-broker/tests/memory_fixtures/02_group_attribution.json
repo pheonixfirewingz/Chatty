@@ -1,0 +1,19 @@
+{
+  "description": "Group chat: each participant keeps what it witnessed, attributed to the right holder.",
+  "participants": ["Ann", "Bob"],
+  "transcript": [
+    {"author": "user", "content": "Ann, I promise to bring you the silver map tomorrow."},
+    {"author": "Ann", "content": "I will hold you to that promise."},
+    {"author": "Bob", "content": "And I will make sure the storm does not stop you."},
+    {"author": "user", "content": "Thanks, both of you. By the way, my name is Rowan."}
+  ],
+  "scripted": "[{\"op\":\"add\",\"holder\":\"Ann\",\"kind\":\"relationship\",\"scope\":\"global\",\"importance\":4,\"content\":\"The user promised to bring Ann the silver map.\",\"evidence\":[1]},{\"op\":\"add\",\"holder\":\"all\",\"kind\":\"fact\",\"scope\":\"global\",\"importance\":4,\"content\":\"The user's name is Rowan.\",\"evidence\":[4]}]",
+  "expected": {
+    "active": [
+      {"holder": "Ann", "contains": ["silver map"]},
+      {"holder": "Ann", "contains": ["Rowan"]},
+      {"holder": "Bob", "contains": ["Rowan"]}
+    ],
+    "forbidden": [{"holder": "Bob", "contains": "silver map"}]
+  }
+}

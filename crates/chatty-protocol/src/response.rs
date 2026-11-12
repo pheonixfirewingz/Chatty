@@ -76,6 +76,12 @@ pub enum Response {
         before: usize,
         after: usize,
     },
+    /// Result of an explicit memory extraction.
+    MemoriesExtracted {
+        added: usize,
+        updated: usize,
+        retired: usize,
+    },
     SyncComplete {
         revision: i64,
     },

@@ -1,0 +1,15 @@
+{
+  "description": "Direct chat: new preferences become global facts.",
+  "participants": ["Mara"],
+  "transcript": [
+    {"author": "user", "content": "Could you brew some jasmine tea? Coffee always makes me jittery, so I never drink it."},
+    {"author": "Mara", "content": "Jasmine tea it is. I will keep the coffee away from you."}
+  ],
+  "scripted": "[{\"op\":\"add\",\"holder\":\"Mara\",\"kind\":\"fact\",\"scope\":\"global\",\"importance\":3,\"content\":\"The user likes jasmine tea.\",\"evidence\":[1]},{\"op\":\"add\",\"holder\":\"Mara\",\"kind\":\"fact\",\"scope\":\"global\",\"importance\":3,\"content\":\"The user never drinks coffee because it makes them jittery.\",\"evidence\":[1]}]",
+  "expected": {
+    "active": [
+      {"holder": "Mara", "contains": ["jasmine"], "scope": "global"},
+      {"holder": "Mara", "contains": ["coffee"], "scope": "global"}
+    ]
+  }
+}

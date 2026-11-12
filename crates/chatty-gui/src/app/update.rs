@@ -362,14 +362,22 @@ impl ChattyApp {
 
     /// The character whose memories a manual extraction updates: the chosen
     /// speaker, else the latest character to reply in the open chat.
-    pub(super) fn memory_character(&self) -> Option<&str> {
-        self.selected_speaker().or_else(|| {
-            self.messages
-                .iter()
-                .rev()
-                .find(|m| m.author_type == "character")
-                .and_then(|m| m.author_id.as_deref())
-        })
+    /// Character that manual extraction is limited to: the dialog's character
+    /// filter when it takes part in the selected chat. `None` extracts for
+    /// every participant.
+    pub(super) fn memory_extraction_character(&self) -> Option<&str> {
+        let character_id = self.memory_state.filter_character_id.as_deref()?;
+        let conversation_id = self.selected_conversation.as_deref()?;
+        self.conversations
+            .iter()
+            .find(|conversation| conversation.id == conversation_id)
+            .is_some_and(|conversation| {
+                conversation
+                    .participant_ids
+                    .iter()
+                    .any(|id| id == character_id)
+            })
+            .then_some(character_id)
     }
 
     /// Open the chat dialog to create a conversation with `characters`.
@@ -397,6 +405,7 @@ impl ChattyApp {
             session_token: self.token.clone(),
             conversation_id: self.memory_state.filter_conversation_id.clone(),
             character_id: self.memory_state.filter_character_id.clone(),
+            include_history: true,
         });
     }
 
@@ -511,7 +520,7 @@ impl ChattyApp {
             }
             MemoryAction::ExtractFromChat => {
                 let cid = self.selected_conversation.clone();
-                let char_id = self.memory_character().map(str::to_owned);
+                let char_id = self.memory_extraction_character().map(str::to_owned);
                 if let Some(cid) = cid {
                     self.send(Request::ExtractMemory {
                         session_token: self.token.clone(),
