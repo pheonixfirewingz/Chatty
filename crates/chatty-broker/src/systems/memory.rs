@@ -192,13 +192,28 @@ pub(super) async fn persist_memory(
         updated_at: now,
         revision: 0,
     };
-    let changed = encode(&DeltaPayload::Memory(entry.clone()))?;
     let mut transaction = app.db.begin().await?;
+    let changed = write_memory_tx(&mut transaction, owner_id, &mut entry, operation).await?;
+    transaction.commit().await?;
+    Ok((entry, operation, changed))
+}
+
+/// Appends the memory delta and writes the row in the caller's transaction.
+/// Sets `entry.revision` and returns the encoded delta payload. Callers must
+/// have validated scope and ownership; an existing row of another owner is
+/// never changed.
+pub(super) async fn write_memory_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    owner_id: &str,
+    entry: &mut MemoryEntry,
+    operation: DeltaOperation,
+) -> Result<Vec<u8>> {
+    let changed = encode(&DeltaPayload::Memory(entry.clone()))?;
     let revision = delta_tx(
-        &mut transaction,
+        transaction,
         owner_id,
         "memory",
-        &id,
+        &entry.id,
         operation,
         &changed,
     )
@@ -228,11 +243,10 @@ pub(super) async fn persist_memory(
     .bind(serde_json::to_string(&entry.source_message_ids)?)
     .bind(&entry.created_at)
     .bind(&entry.updated_at)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
-    transaction.commit().await?;
     entry.revision = revision;
-    Ok((entry, operation, changed))
+    Ok(changed)
 }
 
 fn fts_query(value: &str) -> Option<String> {

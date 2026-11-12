@@ -24,6 +24,19 @@ impl Error {
         Self(Box::new(BareMessage(message.into())))
     }
 
+    /// Finds an error of type `E` anywhere in the chain, like `anyhow`'s
+    /// `downcast_ref`, including beneath context layers.
+    pub fn downcast_ref<E: StdError + 'static>(&self) -> Option<&E> {
+        let mut current: Option<&(dyn StdError + 'static)> = Some(self.0.as_ref());
+        while let Some(error) = current {
+            if let Some(found) = error.downcast_ref::<E>() {
+                return Some(found);
+            }
+            current = error.source();
+        }
+        None
+    }
+
     /// Adds one context layer above whatever this error already carries.
     fn contextual(self, message: String) -> Self {
         Self(Box::new(ContextLayer {

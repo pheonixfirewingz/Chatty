@@ -47,6 +47,8 @@ mod images;
 mod inference;
 #[path = "systems/memory.rs"]
 mod memory;
+#[path = "systems/memory_extraction.rs"]
+mod memory_extraction;
 mod transport;
 mod utils;
 mod workload;
@@ -59,6 +61,7 @@ use emotion::*;
 use images::*;
 use inference::*;
 use memory::*;
+use memory_extraction::*;
 use transport::*;
 use utils::*;
 
@@ -84,7 +87,8 @@ Options:\n\
   CHATTY_ADAPTER_DIR       Optional directory of WASM plugin subdirectories\n\
   CHATTY_ADAPTER_PLUGIN    Optional inference/management plugin ID override\n";
 
-type MemoryJobs = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
+/// One memory job per (owner, conversation); the flag requests a follow-up run.
+type MemoryJobs = Arc<Mutex<HashMap<(String, String), bool>>>;
 
 #[derive(Clone)]
 struct App {
