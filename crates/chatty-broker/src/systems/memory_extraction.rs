@@ -1252,6 +1252,9 @@ pub(super) async fn schedule_automatic_memory(app: &App, owner_id: &str, convers
             if let Err(error) = maybe_extract_automatic_memory(&app, &key.0, &key.1).await {
                 warn!(%error, conversation_id=%key.1, "automatic character memory extraction failed; will retry after the next reply");
             }
+            if let Err(error) = flush_memory_access(&app.db, &app.memory_access).await {
+                warn!(%error, "memory retrieval counts were not saved");
+            }
             let mut jobs = app.memory_jobs.lock().await;
             if !jobs.get_mut(&key).is_some_and(std::mem::take) {
                 jobs.remove(&key);

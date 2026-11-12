@@ -598,6 +598,7 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         8192,
     );
     let memories = relevant_memories(&app.db, uid, cid, &sid, &immediate).await?;
+    record_memory_access(&app.memory_access, uid, &memories);
     info!(
         owner_id = uid,
         conversation_id = cid,
@@ -629,7 +630,10 @@ pub(super) async fn generate(app: &App, job: Generation<'_>) -> Result<()> {
         clip(&context.get::<String, _>("summary"), 32_768),
         world_context
     );
-    let prioritized_memory = format!("Long-term memory:\n{}", memory_prompt(&memories));
+    let prioritized_memory = format!(
+        "Long-term memory:\n{}",
+        memory_prompt(character.get::<&str, _>("name"), &memories)
+    );
     let group_speaker = (participants.len() > 1).then_some(sid.as_str());
     let history = recent.iter().map(|r| history_message(r, group_speaker));
     let messages = budget_chat_messages(
@@ -1199,6 +1203,7 @@ pub(super) mod auxiliary_completion_tests {
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             snapshot_gate: Arc::new(RwLock::new(())),
             memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+            memory_access: Default::default(),
             deltas,
             recent_errors: Arc::new(Mutex::new(Vec::new())),
             log_path: Arc::new(PathBuf::new()),

@@ -134,6 +134,7 @@ async fn app(url: &str) -> App {
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         snapshot_gate: Arc::new(RwLock::new(())),
         memory_jobs: Arc::new(Mutex::new(HashMap::new())),
+        memory_access: Default::default(),
         deltas,
         recent_errors: Arc::new(Mutex::new(Vec::new())),
         log_path: Arc::new(PathBuf::new()),
